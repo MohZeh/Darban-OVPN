@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Security problem
+    url: https://github.com/MohZeh/darban-ovpn/security/advisories/new
+    about: Report vulnerabilities privately.
+  - name: Installation or custom work
+    url: mailto:zehtabex@gmail.com
+    about: Paid help with your own server or a custom automation.
