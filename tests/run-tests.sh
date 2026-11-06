@@ -1,0 +1,1418 @@
+#!/usr/bin/env bash
+# Regression tests for Darban OVPN. Run: bash tests/run-tests.sh [name-filter]
+#
+# Each test gets a fresh fake server (see fake-server.sh) and drives the real entry points: the
+# manager's menu and commands, and the CRL maintainer. Only synthetic data under a temp directory.
+#
+# Limits: Easy-RSA, systemd, ss and flock are stand-ins, there is no real terminal and no real
+# OpenVPN client. Passing here does not replace the acceptance test on a disposable Linux VM.
+set -uo pipefail
+HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+REPO=$(cd "$HERE/.." && pwd)
+FILTER=${1:-}
+export MSYS2_ARG_CONV_EXCL='*' LC_ALL=C.UTF-8 NO_COLOR=1
+native() { if command -v cygpath >/dev/null; then cygpath -m "$1"; else printf '%s' "$1"; fi; }
+posix() { if command -v cygpath >/dev/null; then cygpath -u "$1"; else printf '%s' "$1"; fi; }
+WORK=$(native "$(mktemp -d "${TMPDIR:-/tmp}/darban-tests.XXXXXXXX")")
+trap 'rm -rf "$WORK"' EXIT
+export BASE_PATH=$PATH
+PASS=0; FAIL=0; FAILED=()
+CURRENT=''
+
+fresh() {
+    E=$WORK/env
+    bash "$HERE/fake-server.sh" "$(native "$REPO")" "$E" >/dev/null || { echo 'fake server build FAILED'; exit 2; }
+    PATH="$(posix "$E/bin"):$BASE_PATH"
+    SERVER_CONF=$E/server/server.conf; STUB_LOG=$E/stub.log; CRL=$E/server/crl.pem; PKI=$E/pki
+    EASYRSA_PKI=$PKI EASYRSA_BATCH=1
+    export PATH SERVER_CONF STUB_LOG E EASYRSA_PKI EASYRSA_BATCH
+    unset FAIL_GENCRL
+}
+result() { if (( $1 )); then PASS=$((PASS + 1)); else FAIL=$((FAIL + 1)); FAILED+=("$CURRENT: $2"); printf '  FAIL %s\n' "$2"; fi; }
+ok_if() { local what=$1; shift; if "$@"; then result 1 "$what"; else result 0 "$what"; fi; }
+has() { local what=$1 needle=$2 text=$3; if [[ $text == *"$needle"* ]]; then result 1 "$what"; else result 0 "$what (wanted: $needle)"; printf '%s\n' "$text" | sed 's/^/    | /' | tail -25; fi; }
+lacks() { local what=$1 needle=$2 text=$3; if [[ $text != *"$needle"* ]]; then result 1 "$what"; else result 0 "$what (unwanted: $needle)"; printf '%s\n' "$text" | sed 's/^/    | /' | tail -25; fi; }
+rc_is() { local what=$1 want=$2 got=$3; if [[ $got == "$want" ]]; then result 1 "$what"; else result 0 "$what (rc $got, wanted $want)"; fi; }
+rc_not0() { local what=$1 got=$2; if [[ $got != 0 ]]; then result 1 "$what"; else result 0 "$what (rc 0)"; fi; }
+
+# Commands get an empty stdin: an open one that never answers would hold a prompt until the idle timeout.
+mgr() { bash "$E/manager.sh" "$@" 2>&1 </dev/null; }
+menu() { printf "$1" | bash "$E/manager.sh" 2>&1; }
+maintain() { bash "$E/crl-maintain" "$@" 2>&1; }
+easyrsa() { bash "$E/bin/easyrsa" "$@"; }
+publish_now() { easyrsa gen-crl && cp "$PKI/crl.pem" "$CRL"; }
+crl_count() { openssl crl -in "$1" -noout -text | grep -c 'Serial Number'; }
+serial_of() { openssl x509 -in "$1" -noout -serial | sed 's/^serial=//'; }
+crl_lists() { openssl crl -in "$1" -noout -text | grep -q "Serial Number: $2"; }
+state_row() { awk -F '\t' -v cn="/CN=$1" '$6==cn {print $1}' "$PKI/index.txt" | tr -d '\n'; }
+revoke_menu() { menu "3\n$1\n$1\n0\n"; }
+# Restores the index as a backup would, including the files the revocation moved away.
+snapshot_index() { cp "$PKI/index.txt" "$E/index.before"; cp "$PKI/issued/alice.crt" "$E/alice.crt"; cp "$PKI/private/alice.key" "$E/alice.key"; }
+restore_index() { cp "$E/index.before" "$PKI/index.txt"; cp "$E/alice.crt" "$PKI/issued/alice.crt"; cp "$E/alice.key" "$PKI/private/alice.key"; }
+# Runs the library's CRL check by itself, for states the entry points refuse earlier.
+lib_verify() { bash -c 'set -uo pipefail; source "$E/lib/common.sh"; darban_verify_crl "$E/server/crl.pem"' 2>&1; }
+
+test_create_and_revoke_baseline() {
+    local out rc serial
+    out=$(menu '2\nbob\n0\n')
+    has 'create prints the download panel' 'created and verified' "$out"
+    has 'create prints a scp command' 'scp -P 2222' "$out"
+    ok_if 'profile written' test -s "$E/clients/bob.ovpn"
+    has 'list shows the new client' 'bob' "$(mgr list)"
+    lacks 'list hides the server certificate' 'server_abc123' "$(mgr list)"
+    serial=$(serial_of "$PKI/issued/bob.crt")
+    out=$(revoke_menu bob)
+    has 'revoke reports success' 'bob is revoked.' "$out"
+    ok_if 'CRL lists the revoked serial' crl_lists "$CRL" "$serial"
+    ok_if 'server copy deleted' test ! -e "$E/clients/bob.ovpn"
+    out=$(mgr status); rc=$?
+    has 'status reports a healthy CRL' 'Published CRL valid and complete' "$out"
+    lacks 'status has no unfinished revocation' 'NOT blocked' "$out"
+    out=$(maintain --check); rc=$?
+    rc_is 'maintainer check passes' 0 "$rc"
+}
+
+test_index_missing_empty_or_malformed_is_rejected() {
+    local out rc
+    out=$(maintain --check); rc=$?
+    rc_is 'healthy baseline passes' 0 "$rc"
+
+    mv "$PKI/index.txt" "$PKI/index.saved"
+    out=$(lib_verify); rc=$?
+    rc_not0 'missing index rejected (R-01)' "$rc"
+    has 'missing index is named' 'CA database is missing' "$out"
+    mkdir "$PKI/index.txt"
+    out=$(lib_verify); rc=$?
+    rc_not0 'unreadable index rejected: the read error is not swallowed (R-01)' "$rc"
+    rmdir "$PKI/index.txt"
+
+    : > "$PKI/index.txt"
+    out=$(maintain --check); rc=$?
+    rc_not0 'empty index rejected' "$rc"
+    has 'empty index is explained' 'does not contain the server certificate' "$out"
+    cp "$CRL" "$E/crl.keep"
+    out=$(maintain --auto); rc=$?
+    rc_not0 'timer run on an empty index fails' "$rc"
+    ok_if 'timer run on an empty index leaves the CRL alone' cmp -s "$CRL" "$E/crl.keep"
+
+    { cat "$PKI/index.saved"; printf 'garbage line\n'; } > "$PKI/index.txt"
+    out=$(maintain --check); rc=$?
+    rc_not0 'malformed record rejected' "$rc"
+    has 'malformed record is named' 'malformed record' "$out"
+
+    grep -v server_abc123 "$PKI/index.saved" > "$PKI/index.txt"
+    out=$(maintain --check); rc=$?
+    rc_not0 'index without the server certificate rejected' "$rc"
+}
+
+test_index_rollback_cannot_unrevoke() {
+    local out rc serial
+    snapshot_index
+    serial=$(serial_of "$PKI/issued/alice.crt")
+    out=$(revoke_menu alice)
+    ok_if 'alice is on the CRL' crl_lists "$CRL" "$serial"
+    cp "$CRL" "$E/crl.keep"
+    restore_index
+
+    out=$(maintain --check); rc=$?
+    rc_not0 'check detects the rollback (C-01)' "$rc"
+    has 'check explains the rollback' 'looks older than the published CRL' "$out"
+    out=$(maintain --auto); rc=$?
+    rc_not0 'timer run refuses (C-01)' "$rc"
+    has 'timer run refuses to un-revoke' 'would un-revoke' "$out"
+    ok_if 'CRL unchanged after the timer run' cmp -s "$CRL" "$E/crl.keep"
+    out=$(maintain --renew); rc=$?
+    rc_not0 'manual renew refuses without the flag' "$rc"
+    ok_if 'CRL unchanged after renew' cmp -s "$CRL" "$E/crl.keep"
+    has 'header shows the problem' 'problem' "$(menu '0\n')"
+    out=$(mgr repair-crl); rc=$?
+    rc_not0 'repair refuses too' "$rc"
+    ok_if 'CRL unchanged after repair' cmp -s "$CRL" "$E/crl.keep"
+
+    out=$(menu '2\nbob\n0\n')
+    cp "$PKI/index.txt" "$E/index.mid"
+    out=$(revoke_menu bob)
+    has 'revoke stops before the permanent step' 'No changes made' "$out"
+    ok_if 'revoke changed nothing in the index' cmp -s "$PKI/index.txt" "$E/index.mid"
+
+    out=$(maintain --auto --allow-crl-shrink); rc_is 'override is not accepted on --auto' 2 "$?"
+    out=$(DARBAN_ALLOW_CRL_SHRINK=1 maintain --renew); rc=$?
+    rc_not0 'override cannot come from the environment' "$rc"
+    ok_if 'CRL still unchanged' cmp -s "$CRL" "$E/crl.keep"
+    out=$(maintain --renew --allow-crl-shrink); rc=$?
+    rc_is 'explicit override publishes' 0 "$rc"
+    has 'override names what it un-revokes' 'explicitly un-revoking' "$out"
+    rc_is 'override leaves no revoked entries' 0 "$(crl_count "$CRL")"
+    out=$(maintain --check); rc_is 'state is consistent after the override' 0 "$?"
+}
+
+test_expired_revoked_entry_may_leave_the_crl() {
+    local out rc serial
+    serial=$(serial_of "$PKI/issued/alice.crt")
+    out=$(revoke_menu alice)
+    ok_if 'alice is on the CRL' crl_lists "$CRL" "$serial"
+    # The database now says this certificate has long expired and drops it from future CRLs.
+    awk -F '\t' 'BEGIN {OFS="\t"} $6=="/CN=alice" {$1="E"; $2="200101000000Z"; $3=""} {print}' "$PKI/index.txt" > "$PKI/index.new"
+    mv "$PKI/index.new" "$PKI/index.txt"
+    out=$(maintain --check); rc=$?
+    rc_is 'an expired certificate on the CRL is not a rollback' 0 "$rc"
+    out=$(maintain --renew); rc=$?
+    rc_is 'renew may omit an expired certificate' 0 "$rc"
+    rc_is 'expired entry left the CRL' 0 "$(crl_count "$CRL")"
+}
+
+test_garbage_published_crl_never_blocks_repair() {
+    local out rc
+    echo garbage > "$CRL"
+    out=$(maintain --check); rc=$?
+    rc_not0 'garbage CRL detected' "$rc"
+    out=$(revoke_menu alice)
+    has 'emergency revoke still works' 'alice is revoked.' "$out"
+    out=$(maintain --check); rc_is 'CRL healthy again' 0 "$?"
+}
+
+test_dotted_name_is_fully_managed() {
+    local out serial
+    easyrsa build-client-full john.doe nopass
+    publish_now
+    serial=$(serial_of "$PKI/issued/john.doe.crt")
+    out=$(mgr list)
+    has 'list shows the dotted name (C-02)' 'john.doe' "$out"
+    has 'list counts it' '2 valid' "$out"
+    has 'header agrees with the list' '2 valid' "$(menu '0\n')"
+    out=$(menu '4\njohn.doe\n3\n1\n1\n0\n')
+    has 're-export works' 'Profile for "john.doe" rebuilt' "$out"
+    ok_if 'profile written' test -s "$E/clients/john.doe.ovpn"
+    has 'download offers it' 'john.doe' "$(menu '4\n\n0\n')"
+    out=$(revoke_menu john.doe)
+    has 'revoke works' 'john.doe is revoked.' "$out"
+    ok_if 'CRL lists it' crl_lists "$CRL" "$serial"
+    out=$(menu '2\nnew.dotted\n\n0\n')
+    has 'new names stay strict' 'Use 1-64 letters' "$out"
+}
+
+test_reissued_name_revokes_the_valid_certificate() {
+    local out old_serial new_serial
+    old_serial=$(serial_of "$PKI/issued/alice.crt")
+    easyrsa revoke alice; publish_now
+    easyrsa build-client-full alice nopass
+    new_serial=$(serial_of "$PKI/issued/alice.crt")
+    out=$(mgr list)
+    has 'list shows the valid certificate (C-02)' 'VALID' "$out"
+    lacks 'the default list leaves the history out' 'REVOKED' "$out"
+    has 'list --all shows the revoked history' 'REVOKED' "$(mgr list --all)"
+    out=$(menu '4\nalice\n3\n1\n1\n0\n')
+    has 're-export works' 'Profile for "alice" rebuilt' "$out"
+    grep -q "$(openssl x509 -in "$PKI/issued/alice.crt" -outform PEM | sed -n 2p)" "$E/clients/alice.ovpn"
+    rc_is 'the profile holds the new certificate' 0 "$?"
+    out=$(revoke_menu alice)
+    has 'revoke works' 'alice is revoked.' "$out"
+    ok_if 'CRL lists the new serial' crl_lists "$CRL" "$new_serial"
+    ok_if 'CRL keeps the old serial' crl_lists "$CRL" "$old_serial"
+    rc_is 'both records are revoked' RR "$(state_row alice)"
+    out=$(menu '3\n0\n')
+    has 'nothing left to revoke' 'No clients are available' "$out"
+}
+
+test_stale_certificate_file_is_refused_with_a_reason() {
+    local out
+    cp "$PKI/issued/alice.crt" "$E/old.crt"
+    easyrsa revoke alice; publish_now
+    easyrsa build-client-full alice nopass
+    # The file on disk is the OLD, revoked certificate, while the index lists a new valid one.
+    cp "$E/old.crt" "$PKI/issued/alice.crt"
+    out=$(menu '3\n0\n')
+    has 'revoke explains (C-02)' 'is not the certificate the CA lists as valid' "$out"
+    out=$(menu '4\n0\n')
+    has 're-export explains' 'is not the certificate the CA lists as valid' "$out"
+    ok_if 'no profile built from the revoked certificate' test ! -e "$E/clients/alice.ovpn"
+    has 'list explains' 'cannot be revoked here' "$(mgr list)"
+}
+
+test_blocked_valid_certificates_are_visible() {
+    local out
+    # This builds states the real Easy-RSA refuses to create: a repeated name and a name with a space.
+    if [[ -n ${DARBAN_REAL_EASYRSA:-} ]]; then return 0; fi
+    easyrsa build-client-full bob nopass
+    rm "$PKI/issued/bob.crt"
+    easyrsa build-client-full carol nopass
+    easyrsa build-client-full carol nopass
+    bash -c 'cd "$EASYRSA_PKI"
+        openssl req -new -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes -keyout private/x.key -out x.csr -subj "/CN=has space" 2>/dev/null
+        openssl ca -batch -config openssl.cnf -extensions client -in x.csr -out x.crt -notext -days 825 2>/dev/null
+        rm -f x.csr x.crt issued/[0-9A-F]*.pem'
+    # A second server-capable certificate that is not the one OpenVPN runs with.
+    easyrsa build-server-full spare nopass
+    out=$(mgr list)
+    has 'missing file: listed (C-02)' 'bob' "$out"
+    has 'missing file: explained' 'bob cannot be revoked here: pki/issued/bob.crt is missing' "$out"
+    has 'duplicate valid: explained' 'carol cannot be revoked here: several valid' "$out"
+    has 'unsupported name: listed' 'has space' "$out"
+    has 'unsupported name: explained' 'has space cannot be revoked here' "$out"
+    has 'server-capable: explained' 'spare cannot be revoked here: this certificate can act as a server' "$out"
+    has 'list count matches every valid record' '6 valid' "$out"
+    has 'header count matches the list' '6 valid' "$(menu '0\n')"
+    out=$(menu '3\n\n0\n')
+    has 'picker still offers alice' 'alice' "$out"
+    has 'picker gives the reasons apart' 'Valid, but not available for this action:' "$out"
+    has 'picker explains bob' 'bob: pki/issued/bob.crt is missing' "$out"
+    out=$(menu '3\nbob\n\n0\n')
+    has 'a blocked name cannot be picked' 'is not in the list above' "$out"
+}
+
+test_failed_crl_after_revoke_can_be_finished() {
+    local out rc serial
+    menu '4\nalice\n3\n1\n1\n0\n' >/dev/null
+    ok_if 'export exists' test -s "$E/clients/alice.ovpn"
+    serial=$(serial_of "$PKI/issued/alice.crt")
+    out=$(printf '3\nalice\nalice\n0\n' | FAIL_GENCRL=1 bash "$E/manager.sh" 2>&1)
+    has 'the failure is urgent (R-03)' 'OpenVPN can still accept it' "$out"
+    has 'the next step is named' 'sudo darban repair-crl' "$out"
+    lacks 'no false success' 'alice is revoked.' "$out"
+    rc_is 'the CA already marked it' R "$(state_row alice)"
+
+    out=$(menu '0\n')
+    has 'header names the client after a restart' 'NOT blocked yet: alice' "$out"
+    has 'list names the client' 'NOT blocked yet: alice' "$(mgr list)"
+    has 'status names the client' 'NOT blocked yet: alice' "$(mgr status)"
+    has 'revoke menu points to the repair' 'Finish this first' "$(menu '3\n0\n')"
+
+    out=$(FAIL_GENCRL=1 mgr repair-crl); rc=$?
+    rc_not0 'a failed repair reports failure' "$rc"
+    has 'still pending after the failed repair' 'NOT blocked yet: alice' "$(menu '0\n')"
+    ok_if 'export kept until the repair succeeds' test -s "$E/clients/alice.ovpn"
+
+    : > "$STUB_LOG"
+    out=$(mgr repair-crl); rc=$?
+    rc_is 'repair succeeds' 0 "$rc"
+    has 'repair reports success' 'The CRL is repaired.' "$out"
+    ok_if 'CRL now lists the client' crl_lists "$CRL" "$serial"
+    ok_if 'server copy deleted' test ! -e "$E/clients/alice.ovpn"
+    has 'the session step runs' 'cannot start new connections' "$out"
+    grep -q 'CRL repaired' "$STUB_LOG"; rc_is 'repair is audited' 0 "$?"
+    out=$(menu '0\n')
+    lacks 'alert gone' 'NOT blocked' "$out"
+    has 'header healthy' 'valid' "$out"
+    has 'a second repair has nothing to do' 'Nothing to repair' "$(mgr repair-crl)"
+}
+
+test_repair_runs_from_the_settings_menu() {
+    local out
+    printf '3\nalice\nalice\n0\n' | FAIL_GENCRL=1 bash "$E/manager.sh" >/dev/null 2>&1
+    out=$(menu '8\n2\n\n0\n')
+    has 'menu item exists' 'Repair CRL / finish a revocation' "$out"
+    has 'menu item repairs' 'The CRL is repaired.' "$out"
+}
+
+test_timer_repair_leaves_a_visible_unfinished_revocation() {
+    local out rc
+    menu '4\nalice\n3\n1\n1\n0\n' >/dev/null
+    printf '3\nalice\nalice\n0\n' | FAIL_GENCRL=1 bash "$E/manager.sh" >/dev/null 2>&1
+    out=$(maintain --auto); rc=$?
+    rc_is 'timer repairs the CRL' 0 "$rc"
+    ok_if 'export is still there' test -s "$E/clients/alice.ovpn"
+    out=$(menu '0\n')
+    lacks 'nothing is pending any more' 'NOT blocked' "$out"
+    has 'the leftover is flagged' 'profile still on server: alice' "$out"
+    out=$(mgr repair-crl); rc=$?
+    rc_is 'repair finishes it' 0 "$rc"
+    ok_if 'server copy deleted' test ! -e "$E/clients/alice.ovpn"
+    has 'the session step runs' 'cannot start new connections' "$out"
+    has 'completion is reported' 'unfinished revocation is complete' "$out"
+}
+
+test_restart_from_settings() {
+    local out
+    : > "$STUB_LOG"
+    out=$(menu '8\n3\n1\n0\n0\n')
+    has 'menu item exists' '3  Restart OpenVPN' "$out"
+    has 'it warns about all users' 'drops ALL connected VPN users' "$out"
+    has 'option 1 cancels' 'Cancelled; nothing changed' "$out"
+    if grep -q 'systemctl restart' "$STUB_LOG"; then result 0 'option 1 does not restart'; else result 1 'option 1 does not restart'; fi
+
+    out=$(menu '8\n3\n2\n0\n0\n')
+    has 'option 2 restarts and checks the port' 'listening on UDP 1194' "$out"
+    grep -q 'systemctl restart' "$STUB_LOG"; rc_is 'the service was restarted' 0 "$?"
+    grep -q 'OpenVPN restarted from the menu' "$STUB_LOG"; rc_is 'the restart is audited' 0 "$?"
+
+    out=$(printf '8\n3\n2\n0\n0\n' | FAIL_RESTART=1 bash "$E/manager.sh" 2>&1)
+    has 'a failed restart is urgent and names the log' 'journalctl -u openvpn-server@server.service' "$out"
+    lacks 'a failed restart reports no success' 'listening on UDP' "$out"
+    grep -q 'restart from the menu FAILED' "$STUB_LOG"; rc_is 'the failure is audited' 0 "$?"
+}
+
+test_revoked_name_can_be_issued_again() {
+    local out old new
+    old=$(serial_of "$PKI/issued/alice.crt")
+    revoke_menu alice >/dev/null
+
+    out=$(menu '2\nalice\n0\n')
+    has 'no question is asked: one line explains it' 'old .ovpn files stay blocked' "$out"
+    lacks 'nothing to confirm without per-client settings' 'Choose [1-2' "$out"
+    has 'the new certificate is issued' 'Client "alice" created and verified' "$out"
+    ok_if 'a new profile is written' test -s "$E/clients/alice.ovpn"
+    new=$(serial_of "$PKI/issued/alice.crt")
+    [[ $new != "$old" ]]; rc_is 'the new certificate has its own serial' 0 "$?"
+    rc_is 'old record stays revoked, new one valid' RV "$(state_row alice)"
+    ok_if 'the CRL still lists the old serial' crl_lists "$CRL" "$old"
+    if crl_lists "$CRL" "$new"; then result 0 'the CRL does not list the new serial'; else result 1 'the CRL does not list the new serial'; fi
+    out=$(maintain --check); rc_is 'the CRL stays healthy' 0 "$?"
+    grep -q 'client created again with a used name: alice' "$STUB_LOG"; rc_is 'reuse is audited' 0 "$?"
+
+    out=$(menu '2\nalice\n\n0\n')
+    has 'a name with a valid certificate is refused' 'it still has a valid certificate' "$out"
+
+    out=$(revoke_menu alice)
+    has 'the new certificate can be revoked too' 'alice is revoked.' "$out"
+    rc_is 'both records are revoked' RR "$(state_row alice)"
+    ok_if 'the CRL lists both serials' crl_lists "$CRL" "$new"
+}
+
+test_name_reuse_requires_a_finished_revocation() {
+    local out
+    menu '4\nalice\n3\n1\n1\n0\n' >/dev/null
+    printf '3\nalice\nalice\n0\n' | FAIL_GENCRL=1 bash "$E/manager.sh" >/dev/null 2>&1
+    out=$(menu '2\nalice\n\n0\n')
+    has 'refused while the old certificate is not blocked' 'the published CRL has a problem' "$out"
+    ok_if 'nothing issued' test ! -e "$PKI/issued/alice.crt"
+
+    maintain --auto >/dev/null
+    out=$(menu '2\nalice\n\n0\n')
+    has 'refused while the revocation is unfinished' 'its revocation is unfinished' "$out"
+    mgr repair-crl >/dev/null
+
+    mkdir -p "$PKI/reqs"; : > "$PKI/reqs/alice.req"
+    out=$(menu '2\nalice\n\n0\n')
+    has 'refused while an old request file exists' 'pki/reqs/alice.req is still there' "$out"
+    rm "$PKI/reqs/alice.req"
+
+    out=$(menu '2\nalice\n0\n')
+    has 'allowed once everything is finished' 'Client "alice" created and verified' "$out"
+}
+
+test_name_reuse_asks_only_when_server_settings_exist() {
+    local out
+    revoke_menu alice >/dev/null
+    mkdir -p "$E/server/ccd"; echo 'ifconfig-push 10.8.0.50 255.255.255.0' > "$E/server/ccd/alice"
+    echo 'client-config-dir ccd' >> "$SERVER_CONF"
+    out=$(menu '2\nalice\n1\n\n0\n')
+    has 'the settings file is named' 'ccd/alice and will apply to the new certificate' "$out"
+    ok_if 'answering No issues nothing' test ! -e "$PKI/issued/alice.crt"
+    rc_is 'answering No leaves the index alone' R "$(state_row alice)"
+    out=$(menu '2\nalice\n2\n0\n')
+    has 'answering Yes issues it' 'Client "alice" created and verified' "$out"
+}
+
+test_case_warning_only_for_valid_clients() {
+    local out
+    if [[ ! -e "$PKI/issued/ALICE.crt" ]]; then
+        out=$(menu '2\nALICE\n1\n\n0\n')
+        has 'warns about a valid client with the same letters' 'differing only in letter case: alice' "$out"
+    fi
+    revoke_menu alice >/dev/null
+    out=$(menu '2\nAlice\n0\n')
+    lacks 'a revoked client does not cause the warning' 'letter case' "$out"
+    has 'the client is created' 'Client "Alice" created and verified' "$out"
+}
+
+test_list_hides_revoked_unless_asked() {
+    local out rc
+    menu '2\nbob\n0\n' >/dev/null
+    revoke_menu bob >/dev/null
+    out=$(mgr list)
+    lacks 'default list hides the revoked client' 'REVOKED' "$out"
+    has 'default list still shows active clients' 'alice' "$out"
+    has 'the summary still counts it' '1 valid · 1 revoked' "$out"
+    has 'it says how to see them' 'sudo darban list --all' "$out"
+    out=$(mgr list --all)
+    has 'list --all shows it' 'REVOKED' "$out"
+    has 'list --all names it' 'bob' "$out"
+    has 'the header still counts it' '1 revoked' "$(menu '0\n')"
+    out=$(mgr status --all); rc=$?
+    rc_is '--all is refused elsewhere' 2 "$rc"
+    revoke_menu alice >/dev/null
+    out=$(mgr list)
+    has 'only revoked clients: says so' 'No active clients' "$out"
+    has 'only revoked clients: still counts them' '2 revoked' "$out"
+}
+
+test_menu_groups_profile_files_together() {
+    local out
+    out=$(menu '0\n')
+    has 'revoke sits with clients' '3  Revoke client' "$out"
+    has 'sharing has its own group' 'SHARE' "$out"
+    has 'sharing is in that group' '4  Share a profile' "$out"
+    has 'active links are in that group' '5  Active links' "$out"
+    has 'delete is in that group' '6  Delete server copy' "$out"
+    out=$(menu '7\n0\n0\n')
+    has 'settings holds the hostname' 'VPN hostname' "$out"
+    lacks 'settings no longer holds maintenance' 'Restart OpenVPN' "$out"
+    out=$(menu '8\n1\n0\n0\n')
+    has 'maintenance runs diagnostics' 'Revocation (CRL)' "$out"
+}
+
+test_setup_menu_and_commands() {
+    local out rc
+    out=$(menu '0\n')
+    has 'the main menu offers setup' '9  Setup (update, uninstall, remove all)' "$out"
+    out=$(menu '9\n0\n0\n')
+    has 'setup shows the installed version' "installed: v$(cat "$REPO/VERSION")" "$out"
+    has 'help names the commands' 'uninstall  remove this tool' "$(bash "$E/manager.sh" help </dev/null 2>&1)"
+    [[ $(bash "$E/manager.sh" version </dev/null 2>&1) == "$(cat "$REPO/VERSION")" ]]; rc_is 'VERSION matches the manager' 0 "$?"
+}
+
+fake_release() {
+    # A release directory served by a stand-in curl; its installer only leaves a marker.
+    local fixture=$E/fixture
+    RELEASE=$E/release; MARKER=$E/installed
+    mkdir -p "$fixture/setup" "$RELEASE"
+    printf '#!/usr/bin/env bash\necho "installer ran" > "$MARKER"\n' > "$fixture/setup/install.sh"
+    tar -C "$fixture" -czf "$RELEASE/darban-ovpn.tar.gz" setup
+    (cd "$RELEASE" && sha256sum darban-ovpn.tar.gz > SHA256SUMS)
+    echo 9.9.9 > "$RELEASE/VERSION"
+    cat > "$E/bin/curl" <<'STUB'
+#!/usr/bin/env bash
+out=''; url=''
+while (( $# )); do case $1 in -o) out=$2; shift 2 ;; --proto|--tlsv1.2|--retry|--max-time) if [[ $1 == --tlsv1.2 ]]; then shift; else shift 2; fi ;; -*) shift ;; *) url=$1; shift ;; esac; done
+echo "curl $url" >> "$STUB_LOG"
+if [[ -n ${CURL_FAIL:-} ]]; then exit 22; fi
+if [[ -n $out ]]; then cp "$RELEASE/${url##*/}" "$out"; else cat "$RELEASE/${url##*/}"; fi
+STUB
+    chmod +x "$E/bin/curl"
+    # The test user is not root; everything else in get.sh runs unchanged.
+    sed -e 's/^\[\[ \$EUID == 0 \]\] .*/:/' -e "s#^SERVER_CONF=.*#SERVER_CONF=$SERVER_CONF#" "$REPO/setup/get.sh" > "$E/get.sh"
+    export RELEASE MARKER
+}
+
+test_get_sh_verifies_before_installing() {
+    local out rc
+    fake_release
+    out=$(bash "$E/get.sh" 2>&1 </dev/null); rc=$?
+    rc_is 'a good release installs' 0 "$rc"
+    ok_if 'the installer ran' test -s "$MARKER"
+    grep -q 'releases/latest/download/darban-ovpn.tar.gz' "$STUB_LOG"; rc_is 'default is the latest release' 0 "$?"
+
+    rm -f "$MARKER"; : > "$STUB_LOG"
+    out=$(bash "$E/get.sh" --version v1.2.3 2>&1 </dev/null)
+    grep -q 'releases/download/v1.2.3/' "$STUB_LOG"; rc_is 'a version can be pinned' 0 "$?"
+    : > "$STUB_LOG"
+    out=$(bash "$E/get.sh" --version v1.2.3-rc.1 2>&1 </dev/null)
+    grep -q 'releases/download/v1.2.3-rc.1/' "$STUB_LOG"; rc_is 'a pre-release can be pinned' 0 "$?"
+    out=$(bash "$E/get.sh" --version 'v1;reboot' 2>&1 </dev/null); rc=$?
+    rc_not0 'a malformed version is refused' "$rc"
+
+    rm -f "$MARKER"
+    echo tampered >> "$RELEASE/darban-ovpn.tar.gz"
+    out=$(bash "$E/get.sh" 2>&1 </dev/null); rc=$?
+    rc_not0 'a changed archive is refused' "$rc"
+    has 'it says why' 'Checksum mismatch' "$out"
+    ok_if 'the installer did not run' test ! -e "$MARKER"
+
+    : > "$RELEASE/SHA256SUMS"
+    out=$(bash "$E/get.sh" 2>&1 </dev/null); rc=$?
+    rc_not0 'a release without a checksum is refused' "$rc"
+    ok_if 'the installer did not run' test ! -e "$MARKER"
+
+    fake_release
+    CURL_FAIL=1 out=$(CURL_FAIL=1 bash "$E/get.sh" 2>&1 </dev/null); rc=$?
+    rc_not0 'a failed download is reported' "$rc"
+    ok_if 'the installer did not run' test ! -e "$MARKER"
+}
+
+test_get_sh_sets_up_a_server_only_when_there_is_none() {
+    local out rc
+    fake_release
+    printf '#!/usr/bin/env bash\necho "server setup ran" >> "$MARKER.setup"\n' > "$E/fixture/setup/server-setup.sh"
+    tar -C "$E/fixture" -czf "$RELEASE/darban-ovpn.tar.gz" setup
+    (cd "$RELEASE" && sha256sum darban-ovpn.tar.gz > SHA256SUMS)
+    # The test has no terminal, so the fallback to the real terminal is replaced by the test's stdin.
+    sed -i 's#</dev/tty#</dev/null#' "$E/get.sh"
+
+    out=$(bash "$E/get.sh" 2>&1 </dev/null); rc=$?
+    rc_is 'an existing server installs' 0 "$rc"
+    ok_if 'an existing server skips the server setup' test ! -e "$MARKER.setup"
+    ok_if 'the installer ran' test -s "$MARKER"
+
+    rm -f "$MARKER"; mv "$SERVER_CONF" "$E/conf.keep"
+    out=$(bash "$E/get.sh" 2>&1 </dev/null); rc=$?
+    rc_is 'a cancelled server setup ends cleanly' 0 "$rc"
+    ok_if 'a blank server runs the server setup' test -s "$MARKER.setup"
+    ok_if 'no server: the installer does not run' test ! -e "$MARKER"
+    mv "$E/conf.keep" "$SERVER_CONF"
+}
+
+test_update_from_the_menu() {
+    local out
+    fake_release
+    # The installed copy of get.sh, as setup/install.sh places it.
+    cp "$E/get.sh" "$E/lib/get.sh"
+    out=$(menu '9\n1\n1\n0\n0\n')
+    has 'the new version is offered' 'Install v9.9.9' "$out"
+    has 'option 1 keeps this version' 'Cancelled; nothing changed' "$out"
+    ok_if 'nothing was installed' test ! -e "$MARKER"
+
+    echo "$(cat "$REPO/VERSION")" > "$RELEASE/VERSION"
+    out=$(menu '9\n1\n0\n0\n')
+    has 'same version: nothing to do' 'This is the latest version' "$out"
+    echo 0.0.1 > "$RELEASE/VERSION"
+    out=$(menu '9\n1\n0\n0\n')
+    has 'an older release is never offered' 'This is the latest version' "$out"
+    echo 'not a version' > "$RELEASE/VERSION"
+    out=$(menu '9\n1\n0\n0\n')
+    has 'a bad version file is refused' 'does not state a valid version' "$out"
+    out=$(CURL_FAIL=1 bash "$E/manager.sh" update </dev/null 2>&1)
+    has 'no network is reported' 'Could not reach GitHub' "$out"
+
+    echo 9.9.9 > "$RELEASE/VERSION"
+    out=$(bash "$E/manager.sh" update 2>&1 <<<'9.9.9')
+    has 'confirming installs the release' 'Updated to v9.9.9' "$out"
+    ok_if 'the installer ran' test -s "$MARKER"
+}
+
+test_uninstall_removes_only_the_tool() {
+    local out rc lib=$E/fake-lib sbin=$E/fake-sbin units=$E/fake-units before
+    mkdir -p "$lib" "$sbin" "$units"
+    : > "$lib/common.sh"; : > "$sbin/darban"; : > "$sbin/darban-crl-maintain"
+    : > "$units/darban-crl.timer"; : > "$units/darban-crl.service"
+    : > "$units/openvpn-server@.service"
+    sed -e "s#^LIB=.*#LIB=$lib#" -e "s#^SBIN=.*#SBIN=$sbin#" -e "s#^UNITS=.*#UNITS=$units#" \
+        -e 's/^\[\[ \$EUID == 0 \]\] .*/:/' "$REPO/setup/uninstall.sh" > "$E/lib/uninstall.sh"
+    before=$(cat "$PKI/index.txt" "$CRL" "$SERVER_CONF" | sha256sum)
+
+    out=$(bash "$E/lib/uninstall.sh" 2>&1 </dev/null); rc=$?
+    rc_is 'the script alone needs --yes' 2 "$rc"
+    ok_if 'nothing removed without --yes' test -e "$sbin/darban"
+
+    out=$(menu '9\n5\n1\n0\n0\n')
+    has 'the CRL consequence is stated' 'Nothing will renew the CRL' "$out"
+    has 'option 1 keeps the tool' 'Cancelled; nothing changed' "$out"
+    ok_if 'nothing removed on No' test -e "$sbin/darban"
+
+    out=$(bash "$E/manager.sh" uninstall 2>&1 <<<'uninstall')
+    has 'confirming removes the tool' 'was removed' "$out"
+    ok_if 'the tool is gone' test ! -e "$sbin/darban"
+    ok_if 'the library is gone' test ! -e "$lib"
+    ok_if 'the timer is gone' test ! -e "$units/darban-crl.timer"
+    ok_if 'other units stay' test -e "$units/openvpn-server@.service"
+    [[ $before == "$(cat "$PKI/index.txt" "$CRL" "$SERVER_CONF" | sha256sum)" ]]; rc_is 'PKI, CRL and server.conf are untouched' 0 "$?"
+}
+
+prepare_blank_server() {
+    # A fresh Ubuntu 24.04 stand-in: no server.conf, no PKI, and stubs for what the setup calls.
+    # Easy-RSA is the same stand-in as elsewhere, restored from a template PKI at init-pki.
+    local conf_dir=$E/setup-root
+    mv "$PKI" "$E/pki-template"
+    rm -f "$SERVER_CONF" "$CRL" "$E/server/server.crt" "$E/server/tls-crypt.key" "$E/cfg/domain" "$E/cfg/config"
+    mkdir -p "$conf_dir/keyrings" "$conf_dir/sources" "$conf_dir/sysctl" "$conf_dir/modules" "$conf_dir/units" "$E/setup"
+    printf 'ID=ubuntu\nVERSION_ID="24.04"\n' > "$conf_dir/os-release"
+    cat > "$E/bin/easyrsa-setup" <<STUB
+#!/usr/bin/env bash
+case \$1 in
+  init-pki) cp -r "$E/pki-template" "$PKI"; rm -f "$PKI/issued/alice.crt" ;;
+  build-ca) ;;
+  *) exec bash "$E/bin/easyrsa" "\$@" ;;
+esac
+STUB
+    cat > "$E/bin/apt-get" <<'STUB'
+#!/usr/bin/env bash
+echo "apt-get $*" >> "$STUB_LOG"
+if [[ " $* " == *" -s "* ]]; then
+    case " $* " in
+      *" purge "*) on=0; for a; do if (( on )); then echo "Remv $a"; fi; [[ $a == purge ]] && on=1; done; if [[ -n ${REMV_EXTRA:-} ]]; then echo "Remv $REMV_EXTRA"; fi ;;
+      *" autoremove "*) for a in ${AUTOREMOVE:-}; do echo "Remv $a"; done ;;
+      *" install openvpn "*) for a in openvpn easy-rsa socat nftables liblzo2-2; do echo "Inst $a"; done ;;
+      *) printf '%s\n' ${APT_PLAN:-Inst linux-image-virtual-hwe-24.04 Inst linux-modules-7.0.0-42-generic} | awk 'NR%2==1 {a=$0; next} {print a, $0}' ;;
+    esac
+fi
+exit 0
+STUB
+    cat > "$E/bin/dpkg-query" <<'STUB'
+#!/usr/bin/env bash
+name=${!#}
+if [[ -n ${KERNEL_PRESENT:-} && $name == linux-image-virtual-hwe-24.04 ]]; then printf 'install ok installed'; exit 0; fi
+for p in ${INSTALLED_PKGS:-}; do if [[ $p == "$name" ]]; then printf 'install ok installed'; exit 0; fi; done
+exit 1
+STUB
+    printf '#!/usr/bin/env bash\necho amd64\n' > "$E/bin/dpkg"
+    cat > "$E/bin/openvpn" <<'STUB'
+#!/usr/bin/env bash
+if [[ $1 == --version ]]; then echo "OpenVPN ${FAKE_OPENVPN_VERSION:-2.7.8} x86_64-pc-linux-gnu"; exit 0; fi
+if [[ $1 == --genkey ]]; then echo 'tls-crypt key' > "$3"; exit 0; fi
+STUB
+    cat > "$E/bin/curl" <<'STUB'
+#!/usr/bin/env bash
+while (( $# )); do if [[ $1 == -o ]]; then echo '-----BEGIN PGP PUBLIC KEY BLOCK-----' > "$2"; fi; shift; done
+STUB
+    cat > "$E/bin/ip" <<'STUB'
+#!/usr/bin/env bash
+case " $* " in
+  *" route get "*) echo '1.1.1.1 via 192.0.2.1 dev eth0 src 203.0.113.50 uid 0' ;;
+  *" route show default "*) echo 'default via 192.0.2.1 dev eth0 proto dhcp' ;;
+  *" route show "*) printf 'default via 192.0.2.1 dev eth0\n192.0.2.0/24 dev eth0\n172.20.0.0/16 dev docker0\n'; if [[ -n ${FAKE_ROUTE:-} ]]; then echo "$FAKE_ROUTE dev tun7"; fi ;;
+esac
+STUB
+    for stub in nft modprobe; do printf '#!/usr/bin/env bash\necho "%s $*" >> "$STUB_LOG"\n' "$stub" > "$E/bin/$stub"; done
+    printf '#!/usr/bin/env bash\necho "sysctl $*" >> "$STUB_LOG"\nif [[ ${1:-} == -n ]]; then echo "${FORWARD_BEFORE:-0}"; fi\n' > "$E/bin/sysctl"
+    printf '#!/usr/bin/env bash\nexit 1\n' > "$E/bin/modinfo"
+    printf '#!/usr/bin/env bash\nif [[ -n ${FAKE_CONTAINER:-} ]]; then exit 0; fi\nexit 1\n' > "$E/bin/systemd-detect-virt"
+    printf '#!/usr/bin/env bash\nif [[ ${1:-} == -r ]]; then echo "${KERNEL_RUN:-6.8.0-50-generic}"; else exec /usr/bin/uname "$@"; fi\n' > "$E/bin/uname"
+    chmod +x "$E/bin/"*
+    sed -e 's/^\[\[ \$EUID == 0 \]\] .*/:/' -e 's/^    \[\[ \$EUID == 0 \]\] .*/    :/' \
+        -e "s#^OS_RELEASE=.*#OS_RELEASE=$conf_dir/os-release#" -e "s#^PKI=.*#PKI=$PKI#" \
+        -e "s#^EASYRSA_BIN=.*#EASYRSA_BIN=$E/bin/easyrsa-setup#" -e "s#^SERVER_DIR=.*#SERVER_DIR=$E/server#" \
+        -e "s#^CONFIG_DIR=.*#CONFIG_DIR=$E/cfg#" -e "s#^APT_KEY=.*#APT_KEY=$conf_dir/keyrings/key.asc#" \
+        -e "s#^APT_LIST=.*#APT_LIST=$conf_dir/sources/openvpn.list#" -e "s#^SYSCTL_FILE=.*#SYSCTL_FILE=$conf_dir/sysctl/darban.conf#" \
+        -e "s#^MODULES_FILE=.*#MODULES_FILE=$conf_dir/modules/darban.conf#" -e "s#^NAT_UNIT=.*#NAT_UNIT=$conf_dir/units/nat.service#" \
+        -e "s#^TUN_DEV=.*#TUN_DEV=\${FAKE_TUN:-/dev/null}#" "$REPO/setup/server-setup.sh" > "$E/setup/server-setup.sh"
+    SETUP_ROOT=$conf_dir
+}
+setup_run() { bash "$E/setup/server-setup.sh" "$@" 2>&1 </dev/null; }
+
+test_server_setup_builds_a_server_the_manager_accepts() {
+    local out rc
+    prepare_blank_server
+    out=$(setup_run --host VPN.Example.COM --port 21194 --subnet 10.9.0.0 --dns '9.9.9.9 149.112.112.112' --yes); rc=$?
+    rc_is 'setup finishes' 0 "$rc"
+    has 'it names the kernel it will install' 'linux-image-virtual-hwe-24.04' "$out"
+    has 'it warns about the provider firewall' 'Open UDP 21194' "$out"
+    has 'it says a reboot is needed for DCO' 'reboot when convenient' "$out"
+    grep -q 'build.openvpn.net/debian/openvpn/stable noble main' "$SETUP_ROOT/sources/openvpn.list"; rc_is 'the stable OpenVPN channel is used' 0 "$?"
+    grep -q -- '-y -q --no-install-recommends install openvpn easy-rsa socat nftables linux-image-virtual-hwe-24.04' "$STUB_LOG"; rc_is 'recommended packages are not installed' 0 "$?"
+    if grep -q 'linux-headers\|linux-firmware\|linux-modules-extra' "$STUB_LOG"; then result 0 'no headers, firmware or extra modules are requested'; else result 1 'no headers, firmware or extra modules are requested'; fi
+    grep -q 'masquerade' "$E/cfg/nat.nft"; rc_is 'NAT rule written' 0 "$?"
+    grep -q 'oifname "eth0"' "$E/cfg/nat.nft"; rc_is 'NAT uses the default interface' 0 "$?"
+    grep -q 'ip_forward=1' "$SETUP_ROOT/sysctl/darban.conf"; rc_is 'forwarding enabled' 0 "$?"
+    if grep -Eq '^(compress|comp-lzo|fragment|tls-auth)' "$SERVER_CONF"; then result 0 'nothing in server.conf disables DCO'; else result 1 'nothing in server.conf disables DCO'; fi
+
+    out=$(bash -c 'set -uo pipefail; source "$E/lib/common.sh"; darban_preflight && darban_crl_configured && darban_verify_crl "$DARBAN_CRL" && darban_server_serial >/dev/null' 2>&1); rc=$?
+    rc_is 'the checks the installer runs accept this server' 0 "$rc"
+    out=$(maintain --check); rc_is 'the CRL maintainer accepts it' 0 "$?"
+    out=$(menu '2\nfirst\n0\n')
+    has 'the manager creates a client on it' 'Client "first" created and verified' "$out"
+    lacks 'the server certificate is not listed' 'darban-server' "$(mgr list)"
+    has 'the profile uses the chosen address and port' 'remote vpn.example.com 21194' "$(cat "$E/clients/first.ovpn")"
+    grep -q '^server 10.9.0.0 255.255.255.0' "$SERVER_CONF"; rc_is 'the chosen network is used' 0 "$?"
+    grep -q 'dhcp-option DNS 9.9.9.9' "$SERVER_CONF"; rc_is 'the first DNS server is pushed' 0 "$?"
+    grep -q 'dhcp-option DNS 149.112.112.112' "$SERVER_CONF"; rc_is 'the second DNS server is pushed' 0 "$?"
+    grep -q 'redirect-gateway' "$SERVER_CONF"; rc_is 'full tunnel is the default' 0 "$?"
+    grep -q '10.9.0.0/24' "$E/cfg/nat.nft"; rc_is 'NAT uses the chosen network' 0 "$?"
+    grep -q 'DOWNLOAD_SSH_HOST=203.0.113.50' "$E/cfg/config"; rc_is 'downloads use the public IP' 0 "$?"
+    has 'status sees the unix-socket management' 'Management interface' "$(mgr status)"
+
+    out=$(setup_run --port 21194 --yes); rc=$?
+    rc_not0 'a second run is refused' "$rc"
+    has 'it says nothing changed' 'Nothing was changed' "$out"
+}
+
+test_server_setup_refuses_or_changes_nothing() {
+    local out rc
+    prepare_blank_server
+    printf 'ID=ubuntu\nVERSION_ID="22.04"\n' > "$SETUP_ROOT/os-release"
+    out=$(setup_run --port 21194 --yes); rc=$?
+    rc_not0 'another Ubuntu version is refused' "$rc"
+    has 'it names the supported version' 'Ubuntu 24.04 only' "$out"
+    printf 'ID=ubuntu\nVERSION_ID="24.04"\n' > "$SETUP_ROOT/os-release"
+
+    out=$(setup_run --port 80 --yes); rc=$?
+    rc_not0 'a bad port is refused' "$rc"
+
+    : > "$STUB_LOG"
+    out=$(printf '\n21194\n1\n' | bash "$E/setup/server-setup.sh" 2>&1); rc=$?
+    has 'Enter accepts the detected public IP' 'Address   203.0.113.50' "$out"
+    rc_is 'answering No ends cleanly' 0 "$rc"
+    has 'it says nothing changed' 'Cancelled; nothing was changed' "$out"
+    ok_if 'no server.conf after No' test ! -e "$SERVER_CONF"
+    ok_if 'no PKI after No' test ! -e "$PKI"
+    if grep -q ' install openvpn' "$STUB_LOG"; then result 0 'nothing installed after No'; else result 1 'nothing installed after No'; fi
+
+    out=$(APT_PLAN='Inst linux-image-virtual-hwe-24.04 Inst linux-firmware' setup_run --port 21194 --yes); rc=$?
+    rc_not0 'a plan with firmware stops the setup' "$rc"
+    has 'it says why' 'firmware or graphics' "$out"
+    ok_if 'nothing was configured' test ! -e "$SERVER_CONF"
+
+    out=$(FAKE_OPENVPN_VERSION=2.6.19 setup_run --port 21194 --yes); rc=$?
+    rc_not0 'an old OpenVPN stops the setup' "$rc"
+    has 'it names the version' 'but got 2.6.19' "$out"
+    ok_if 'no server.conf with an old OpenVPN' test ! -e "$SERVER_CONF"
+}
+
+test_server_setup_questions() {
+    local out rc
+    prepare_blank_server
+    out=$(setup_run --host 'bad_name!' --port 21194 --yes); rc=$?
+    rc_not0 'a bad address is refused' "$rc"
+    out=$(setup_run --host 999.1.1.1 --port 21194 --yes); rc=$?
+    rc_not0 'an impossible IP is refused' "$rc"
+    out=$(setup_run --subnet 8.8.8.0 --port 21194 --yes); rc=$?
+    rc_not0 'a public network is refused' "$rc"
+    out=$(setup_run --subnet 10.8.0.5 --port 21194 --yes); rc=$?
+    rc_not0 'a network not ending in .0 is refused' "$rc"
+    out=$(setup_run --subnet 172.20.5.0 --port 21194 --yes); rc=$?
+    rc_not0 'an overlapping network is refused' "$rc"
+    has 'it names the route' 'overlaps the existing route 172.20.0.0/16' "$out"
+    out=$(setup_run --dns '1.1.1.1 8.8.8.8 9.9.9.9' --port 21194 --yes); rc=$?
+    rc_not0 'three DNS servers are refused' "$rc"
+    out=$(setup_run --dns 'not-an-ip' --port 21194 --yes); rc=$?
+    rc_not0 'a bad DNS server is refused' "$rc"
+    out=$(FAKE_TUN=/nonexistent setup_run --port 21194 --yes); rc=$?
+    rc_not0 'a missing TUN device is refused' "$rc"
+    has 'it says what to do' 'does not offer a TUN device' "$out"
+    ok_if 'nothing was configured by the refusals' test ! -e "$SERVER_CONF"
+
+    out=$(printf 'bad_name!\n10.0.0.5\n80\n21194\n1\n' | bash "$E/setup/server-setup.sh" 2>&1); rc=$?
+    rc_is 'wrong answers are asked again' 0 "$rc"
+    has 'a private address gets a warning' 'private address' "$out"
+    has 'the plan shows the address' '10.0.0.5' "$out"
+    has 'the network is not asked: the default is shown' '10.8.0.0/24' "$out"
+    has 'it says where to change the defaults' 'Settings' "$out"
+    has 'the plan shows the default DNS' '1.1.1.1 8.8.8.8' "$out"
+
+    out=$(setup_run --host 203.0.113.9 --port 21194 --split-tunnel --yes); rc=$?
+    rc_is 'split tunnel finishes' 0 "$rc"
+    if grep -q 'redirect-gateway\|dhcp-option' "$SERVER_CONF"; then result 0 'split tunnel pushes no route or DNS'; else result 1 'split tunnel pushes no route or DNS'; fi
+    grep -qx '203.0.113.9' "$E/cfg/domain"; rc_is 'an IP address is saved as the client address' 0 "$?"
+    lacks 'split tunnel has no DNS line' 'DNS  ' "$out"
+}
+
+test_server_setup_in_a_container_installs_no_kernel() {
+    local out rc
+    prepare_blank_server
+    : > "$STUB_LOG"
+    out=$(FAKE_CONTAINER=1 setup_run --port 21194 --yes); rc=$?
+    rc_is 'setup finishes in a container' 0 "$rc"
+    has 'it explains the host kernel' 'uses the host kernel' "$out"
+    if grep -q 'linux-image' "$STUB_LOG"; then result 0 'no kernel is planned or installed'; else result 1 'no kernel is planned or installed'; fi
+    has 'it does not ask for a reboot' 'This is a container' "$out"
+}
+
+test_server_setup_ufw_rules_are_asked_and_removed() {
+    local out rc
+    prepare_blank_server
+    cat > "$E/bin/ufw" <<'STUB'
+#!/usr/bin/env bash
+echo "ufw $*" >> "$STUB_LOG"
+if [[ ${1:-} == status ]]; then echo 'Status: active'; fi
+STUB
+    chmod +x "$E/bin/ufw"
+    : > "$STUB_LOG"
+    out=$(setup_run --port 21194 --yes); rc=$?
+    rc_is 'setup finishes with ufw active' 0 "$rc"
+    if grep -q 'ufw allow' "$STUB_LOG"; then result 0 '--yes alone leaves ufw alone'; else result 1 '--yes alone leaves ufw alone'; fi
+    has 'it prints the commands' 'ufw allow 21194/udp' "$out"
+
+    fresh
+    prepare_blank_server
+    cat > "$E/bin/ufw" <<'STUB'
+#!/usr/bin/env bash
+echo "ufw $*" >> "$STUB_LOG"
+if [[ ${1:-} == status ]]; then echo 'Status: active'; fi
+STUB
+    chmod +x "$E/bin/ufw"
+    : > "$STUB_LOG"
+    out=$(setup_run --port 21194 --open-ufw --yes); rc=$?
+    rc_is 'setup with --open-ufw finishes' 0 "$rc"
+    grep -q 'ufw allow 21194/udp' "$STUB_LOG"; rc_is 'the port rule is added' 0 "$?"
+    grep -q 'ufw route allow in on tun0 out on eth0' "$STUB_LOG"; rc_is 'the forwarding rule is added' 0 "$?"
+    install_removal_scripts
+    : > "$STUB_LOG"
+    out=$(bash "$E/lib/remove-server.sh" --yes 2>&1 </dev/null); rc=$?
+    rc_is 'removal finishes' 0 "$rc"
+    grep -q 'ufw delete allow 21194/udp' "$STUB_LOG"; rc_is 'the port rule is removed' 0 "$?"
+    grep -q 'ufw route delete allow in on tun0 out on eth0' "$STUB_LOG"; rc_is 'the forwarding rule is removed' 0 "$?"
+}
+
+test_server_certificate_expiry_is_in_the_header() {
+    local out
+    out=$(menu '0\n')
+    lacks 'a long-lived server certificate gives no alert' 'Server certificate expires' "$out"
+    sed -i 's/^EXPIRY_WARN_DAYS=.*/EXPIRY_WARN_DAYS=5000/' "$E/manager.sh"
+    out=$(menu '0\n')
+    has 'a certificate near expiry gives an alert' 'Server certificate expires' "$out"
+}
+
+test_port_change_reports_a_failed_rollback_truthfully() {
+    local out
+    cat > "$E/bin/systemctl" <<'STUB'
+#!/usr/bin/env bash
+echo "systemctl $*" >> "$STUB_LOG"
+q=0; for a; do [[ $a == --quiet ]] && q=1; done
+case " $* " in
+  *" restart "*) exit 1 ;;
+  *" is-failed "*) ((q)) || echo active; exit 1 ;;
+  *" is-active "*) ((q)) || echo active; exit 0 ;;
+esac
+exit 0
+STUB
+    out=$(menu '7\n2\n21194\n21194\n0\n0\n')
+    lacks 'it never claims the port did not change' 'The port was NOT changed' "$out"
+    has 'it says the rollback did not finish' 'The rollback did not finish' "$out"
+}
+
+test_server_setup_keeps_an_existing_setup_safe() {
+    local out rc
+    prepare_blank_server
+    mkdir -p "$PKI"
+    out=$(setup_run --port 21194 --yes); rc=$?
+    rc_not0 'a PKI it did not create is refused' "$rc"
+    has 'it names the PKI' 'this setup did not create it' "$out"
+    rm -rf "$PKI"
+
+    : > "$STUB_LOG"
+    out=$(KERNEL_PRESENT=1 setup_run --port 21194 --yes); rc=$?
+    rc_is 'an installed kernel is fine' 0 "$rc"
+    has 'it says so' 'is already installed' "$out"
+    grep -q 'install openvpn easy-rsa socat nftables$' "$STUB_LOG"; rc_is 'the kernel is not installed again' 0 "$?"
+}
+
+install_removal_scripts() {
+    # The scripts as install.sh places them, with every path pointing into this fake server.
+    local root=$SETUP_ROOT
+    mkdir -p "$E/fake-sbin" "$E/fake-units" "$E/backups" "$E/tool-backups" "$E/fake-lib"
+    : > "$E/fake-sbin/darban"; : > "$E/fake-units/darban-crl.timer"; : > "$E/tool-backups/old"
+    sed -e 's/^\[\[ \$EUID == 0 \]\] .*/:/' \
+        -e "s#^PKI=.*#PKI=$PKI#" -e "s#^SERVER_DIR=.*#SERVER_DIR=$E/server#" -e "s#^OUT_DIR=.*#OUT_DIR=$E/clients#" \
+        -e "s#^CONFIG_DIR=.*#CONFIG_DIR=$E/cfg#" -e "s#^APT_KEY=.*#APT_KEY=$root/keyrings/key.asc#" \
+        -e "s#^APT_LIST=.*#APT_LIST=$root/sources/openvpn.list#" -e "s#^SYSCTL_FILE=.*#SYSCTL_FILE=$root/sysctl/darban.conf#" \
+        -e "s#^MODULES_FILE=.*#MODULES_FILE=$root/modules/darban.conf#" -e "s#^NAT_UNIT=.*#NAT_UNIT=$root/units/nat.service#" \
+        -e "s#^BACKUP_DIR=.*#BACKUP_DIR=$E/backups#" -e "s#^TOOL_BACKUPS=.*#TOOL_BACKUPS=$E/tool-backups#" \
+        -e "s#^LOCK_FILE=.*#LOCK_FILE=$E/run/lock#" "$REPO/setup/remove-server.sh" > "$E/lib/remove-server.sh"
+    sed -e "s#^LIB=.*#LIB=$E/fake-lib#" -e "s#^SBIN=.*#SBIN=$E/fake-sbin#" -e "s#^UNITS=.*#UNITS=$E/fake-units#" \
+        -e 's/^\[\[ \$EUID == 0 \]\] .*/:/' "$REPO/setup/uninstall.sh" > "$E/lib/uninstall.sh"
+}
+built_server() {
+    prepare_blank_server
+    # nftables was already on this server, so the setup must not count it as its own.
+    INSTALLED_PKGS=nftables setup_run --port 21194 --yes >/dev/null
+    install_removal_scripts
+    menu '2\nfirst\n0\n' >/dev/null
+}
+
+test_remove_everything_removes_only_what_setup_added() {
+    local out rc log
+    built_server
+    : > "$STUB_LOG"
+    echo 'other tool data' > "$E/unrelated"
+
+    out=$(printf '1\n1\n1\n' | bash "$E/manager.sh" remove-all 2>&1); rc=$?
+    has 'it states the consequence' 'stops working for good' "$out"
+    has 'answering No keeps everything' 'Cancelled; nothing changed' "$out"
+    ok_if 'the CA stays after No' test -s "$PKI/ca.crt"
+    ok_if 'no backup is made before the last answer' test -z "$(ls "$E/backups")"
+
+    out=$(printf '1\n1\nremove-everything\n' | bash "$E/manager.sh" remove-all 2>&1); rc=$?
+    rc_is 'full removal finishes' 0 "$rc"
+    log=$(cat "$STUB_LOG")
+    has 'the setup packages are purged' '-y -q purge easy-rsa openvpn socat' "$log"
+    lacks 'a package that was already there stays' 'purge easy-rsa nftables' "$log"
+    lacks 'a package that was already there stays (any order)' 'socat nftables' "$log"
+    if grep -q 'autoremove$' <<<"$(grep -v -- ' -s ' <<<"$log")"; then result 0 'real autoremove is never run'; else result 1 'real autoremove is never run'; fi
+    lacks 'the kernel stays unless asked' 'purge linux-' "$log"
+    for path in "$PKI" "$E/server" "$E/clients" "$E/cfg" "$SETUP_ROOT/sources/openvpn.list" "$SETUP_ROOT/keyrings/key.asc" "$SETUP_ROOT/sysctl/darban.conf" "$SETUP_ROOT/modules/darban.conf" "$SETUP_ROOT/units/nat.service" "$E/fake-sbin/darban" "$E/fake-units/darban-crl.timer" "$E/tool-backups"; do
+        ok_if "gone: ${path##*/}" test ! -e "$path"
+    done
+    ok_if 'unrelated files stay' test -s "$E/unrelated"
+    has 'forwarding goes back to what it was' 'net.ipv4.ip_forward=0' "$log"
+    local backup
+    backup=$(ls "$E"/backups/darban-backup-*.tar.gz)
+    ok_if 'a backup exists' test -s "$backup"
+    tar -tzPf "$backup" | grep -q 'pki/private/ca.key'; rc_is 'the backup holds the CA key' 0 "$?"
+    tar -tzPf "$backup" | grep -q 'clients/first.ovpn'; rc_is 'the backup holds the profiles' 0 "$?"
+}
+
+test_remove_everything_backup_choice() {
+    local out rc
+    built_server
+    out=$(printf '2\n1\nremove-everything\n' | bash "$E/manager.sh" remove-all 2>&1); rc=$?
+    rc_is 'removal without a backup finishes' 0 "$rc"
+    has 'option 2 skips the backup' 'No backup will be made' "$out"
+    ok_if 'no backup file exists' test -z "$(ls "$E/backups")"
+}
+
+test_remove_everything_refuses_a_server_it_did_not_set_up() {
+    local out rc
+    prepare_blank_server
+    INSTALLED_PKGS=nftables setup_run --port 21194 --yes >/dev/null
+    install_removal_scripts
+    rm -f "$E/cfg/.server-setup-started"
+    : > "$STUB_LOG"
+    out=$(bash "$E/manager.sh" remove-all 2>&1 </dev/null); rc=$?
+    rc_not0 'the menu action refuses' "$rc"
+    has 'it explains' 'was not set up by this tool' "$out"
+    out=$(bash "$E/lib/remove-server.sh" --yes 2>&1 </dev/null); rc=$?
+    rc_not0 'the script refuses by itself' "$rc"
+    ok_if 'the CA stays' test -s "$PKI/ca.crt"
+    ok_if 'server.conf stays' test -s "$SERVER_CONF"
+    if grep -q 'purge' "$STUB_LOG"; then result 0 'nothing is purged'; else result 1 'nothing is purged'; fi
+
+    out=$(bash "$E/lib/remove-server.sh" 2>&1 </dev/null); rc=$?
+    rc_is 'without --yes it only explains' 2 "$rc"
+}
+
+test_remove_everything_never_takes_other_packages() {
+    local out rc log
+    built_server
+    : > "$STUB_LOG"
+    out=$(REMV_EXTRA=some-other-tool AUTOREMOVE='liblzo2-2 foreign-orphan' bash "$E/lib/remove-server.sh" --yes 2>&1 </dev/null); rc=$?
+    rc_is 'removal finishes' 0 "$rc"
+    log=$(grep -v -- ' -s ' "$STUB_LOG")
+    lacks 'nothing is purged if another package would go too' 'purge' "$log"
+    has 'it reports what was kept' 'would also remove: some-other-tool' "$out"
+    ok_if 'the server files are still removed' test ! -e "$E/server"
+
+    built_server
+    : > "$STUB_LOG"
+    out=$(AUTOREMOVE='liblzo2-2 foreign-orphan' bash "$E/lib/remove-server.sh" --yes 2>&1 </dev/null)
+    log=$(grep -v -- ' -s ' "$STUB_LOG")
+    has 'a dependency of the setup is cleaned up' 'purge liblzo2-2' "$log"
+    lacks 'another program orphan stays' 'foreign-orphan' "$log"
+}
+
+test_remove_everything_kernel_rules() {
+    local out rc log
+    prepare_blank_server
+    export APT_PLAN='Inst linux-image-virtual-hwe-24.04 Inst linux-image-7.0.0-42-generic'
+    INSTALLED_PKGS=nftables setup_run --port 21194 --yes >/dev/null
+    install_removal_scripts
+    [[ $(KERNEL_RUN=7.0.0-42-generic bash "$E/lib/remove-server.sh" --kernel-status) == running ]]; rc_is 'the running kernel is reported' 0 "$?"
+    [[ $(KERNEL_RUN=6.8.0-50-generic bash "$E/lib/remove-server.sh" --kernel-status) == removable ]]; rc_is 'another kernel is removable' 0 "$?"
+
+    : > "$STUB_LOG"
+    out=$(KERNEL_RUN=7.0.0-42-generic bash "$E/lib/remove-server.sh" --yes --kernel 2>&1 </dev/null); rc=$?
+    rc_not0 'removing the running kernel is refused' "$rc"
+    ok_if 'nothing else was removed either' test -s "$PKI/ca.crt"
+
+    out=$(printf '1\n1\nremove-everything\n' | KERNEL_RUN=7.0.0-42-generic bash "$E/manager.sh" remove-all 2>&1)
+    has 'the menu says the kernel stays' 'the system is running it now' "$out"
+    log=$(grep -v -- ' -s ' "$STUB_LOG")
+    lacks 'the running kernel is not purged' 'linux-image' "$log"
+
+    fresh
+    prepare_blank_server
+    INSTALLED_PKGS=nftables setup_run --port 21194 --yes >/dev/null
+    install_removal_scripts
+    : > "$STUB_LOG"
+    out=$(printf '1\n2\nremove-everything\n' | KERNEL_RUN=6.8.0-50-generic bash "$E/manager.sh" remove-all 2>&1); rc=$?
+    rc_is 'removal with the kernel finishes' 0 "$rc"
+    log=$(grep -v -- ' -s ' "$STUB_LOG")
+    has 'the chosen kernel is purged' 'purge linux-image-7.0.0-42-generic linux-image-virtual-hwe-24.04' "$log"
+    unset APT_PLAN
+}
+
+test_install_picks_a_free_network_by_itself() {
+    local out rc
+    prepare_blank_server
+    out=$(FAKE_ROUTE=10.8.0.0/24 setup_run --port 21194 --yes); rc=$?
+    rc_is 'setup finishes' 0 "$rc"
+    grep -q '^server 10.9.0.0 255.255.255.0' "$SERVER_CONF"; rc_is 'a taken default moves to the next free network' 0 "$?"
+}
+
+conf_has() { grep -q -- "$1" "$SERVER_CONF"; }
+fail_restart_when() {
+    # systemctl stand-in: restart fails only while server.conf holds this text, so a rollback can succeed.
+    cat > "$E/bin/systemctl" <<STUB
+#!/usr/bin/env bash
+echo "systemctl \$*" >> "\$STUB_LOG"
+q=0; for a; do [[ \$a == --quiet ]] && q=1; done
+case " \$* " in
+  *" restart "*) if grep -q -- '$1' "\$SERVER_CONF"; then exit 1; fi ;;
+  *" is-failed "*) ((q)) || echo active; exit 1 ;;
+  *" is-active "*) ((q)) || echo active; exit 0 ;;
+  *" is-enabled "*) echo enabled; exit 0 ;;
+esac
+exit 0
+STUB
+}
+
+test_advanced_settings_are_applied_and_rolled_back() {
+    local out before
+    built_server
+    out=$(menu '7\n3\n0\n0\n0\n')
+    has 'settings offers Advanced' '3  Advanced' "$out"
+    has 'it shows the routing' 'full tunnel' "$out"
+    has 'it shows the DNS' '1.1.1.1 8.8.8.8' "$out"
+    has 'it shows the network' '10.8.0.0/24' "$out"
+    has 'it shows the ciphers' 'AES-256-GCM' "$out"
+
+    : > "$STUB_LOG"
+    out=$(menu '7\n3\n2\n9.9.9.9 8.8.4.4\n1\n0\n0\n0\n')
+    has 'option 1 changes nothing' 'Cancelled; nothing changed' "$out"
+    if conf_has 'DNS 9.9.9.9'; then result 0 'the DNS stays after No'; else result 1 'the DNS stays after No'; fi
+    if grep -q 'systemctl restart' "$STUB_LOG"; then result 0 'no restart after No'; else result 1 'no restart after No'; fi
+    out=$(menu '7\n3\n2\nnot-an-ip\n\n0\n0\n0\n')
+    has 'a bad DNS is asked again' 'Enter one or two IPv4 addresses' "$out"
+
+    out=$(menu '7\n3\n2\n9.9.9.9 8.8.4.4\n2\n0\n0\n0\n')
+    has 'the DNS change is confirmed' 'Applied: DNS 9.9.9.9 8.8.4.4' "$out"
+    conf_has 'dhcp-option DNS 9.9.9.9'; rc_is 'the new DNS is in server.conf' 0 "$?"
+    if conf_has 'dhcp-option DNS 1.1.1.1'; then result 0 'the old DNS is gone'; else result 1 'the old DNS is gone'; fi
+    grep -q 'systemctl restart' "$STUB_LOG"; rc_is 'OpenVPN was restarted' 0 "$?"
+    grep -q 'server.conf changed: DNS' "$STUB_LOG"; rc_is 'the change is audited' 0 "$?"
+
+    out=$(menu '7\n3\n1\n2\n0\n0\n0\n')
+    has 'split tunnel is applied' 'Applied: split tunnel' "$out"
+    if conf_has 'redirect-gateway'; then result 0 'split: no redirect'; else result 1 'split: no redirect'; fi
+    if conf_has 'dhcp-option DNS'; then result 0 'split: no DNS push'; else result 1 'split: no DNS push'; fi
+    out=$(menu '7\n3\n2\n0\n0\n0\n')
+    has 'split: DNS is explained, not asked' 'keep their own DNS' "$out"
+    out=$(menu '7\n3\n1\n2\n0\n0\n0\n')
+    has 'full tunnel is applied' 'Applied: full tunnel' "$out"
+    conf_has 'redirect-gateway'; rc_is 'full: redirect is back' 0 "$?"
+    conf_has 'dhcp-option DNS 1.1.1.1'; rc_is 'full: default DNS is back' 0 "$?"
+
+    out=$(menu '7\n3\n3\n8.8.8.0\n\n0\n0\n0\n')
+    has 'a public network is asked again' 'Enter a private network' "$out"
+    out=$(menu '7\n3\n3\n172.20.5.0\n0\n0\n0\n')
+    has 'an overlapping network is refused' 'overlaps the existing route 172.20.0.0/16' "$out"
+    out=$(menu '7\n3\n3\n10.50.0.0\n2\n0\n0\n0\n')
+    has 'the network change is confirmed' 'Applied: VPN network 10.50.0.0/24' "$out"
+    conf_has '^server 10.50.0.0 255.255.255.0'; rc_is 'server.conf has the new network' 0 "$?"
+    grep -q 'ip saddr 10.50.0.0/24' "$E/cfg/nat.nft"; rc_is 'NAT follows the new network' 0 "$?"
+
+    out=$(menu '7\n3\n4\nBF-CBC\n\n0\n0\n0\n')
+    has 'a non-AEAD cipher is refused' 'Use only the allowed names' "$out"
+    out=$(menu '7\n3\n4\nAES-256-GCM\n2\n0\n0\n0\n')
+    has 'the ciphers change' 'Applied: data ciphers AES-256-GCM' "$out"
+    conf_has '^data-ciphers AES-256-GCM$'; rc_is 'one data-ciphers line remains' 0 "$?"
+    out=$(menu '7\n3\n5\n10 5\n\n0\n0\n0\n')
+    has 'a too short timeout is refused' 'at least twice the first' "$out"
+    out=$(menu '7\n3\n5\n15 90\n2\n0\n0\n0\n')
+    conf_has '^keepalive 15 90$'; rc_is 'keepalive changes' 0 "$?"
+    out=$(menu '7\n3\n6\n4\n2\n0\n0\n0\n')
+    conf_has '^verb 4$'; rc_is 'log detail changes' 0 "$?"
+
+    before=$(cat "$SERVER_CONF")
+    cp "$E/cfg/nat.nft" "$E/nat.before"
+    fail_restart_when 'keepalive 20 120'
+    out=$(menu '7\n3\n5\n20 120\n2\n0\n0\n0\n')
+    has 'a service that does not come back is rolled back' 'Rolled back' "$out"
+    has 'it says nothing changed' 'Nothing was changed' "$out"
+    [[ $before == "$(cat "$SERVER_CONF")" ]]; rc_is 'server.conf is exactly as before' 0 "$?"
+    fail_restart_when '^server 10.60.0.0'
+    out=$(menu '7\n3\n3\n10.60.0.0\n2\n0\n0\n0\n')
+    [[ $before == "$(cat "$SERVER_CONF")" ]]; rc_is 'a failed network change restores server.conf' 0 "$?"
+    cmp -s "$E/cfg/nat.nft" "$E/nat.before"; rc_is 'a failed network change restores NAT' 0 "$?"
+}
+
+test_advanced_network_needs_nat_from_this_tool() {
+    local out
+    echo 'server 10.8.0.0 255.255.255.0' >> "$SERVER_CONF"
+    out=$(menu '7\n3\n3\n0\n0\n0\n')
+    has 'an existing server keeps its own NAT' 'was not set up by this tool' "$out"
+    sed -i '/^server /d' "$SERVER_CONF"
+    out=$(menu '7\n3\n3\n0\n0\n0\n')
+    has 'another layout is refused' 'another layout' "$out"
+}
+
+test_advanced_download_access_and_client_lifetime() {
+    local out end days
+    echo '# my note' >> "$E/cfg/config"
+    out=$(menu '7\n3\n7\nsrv.example.com\n2200\n\n0\n0\n0\n')
+    has 'download access is saved' 'Saved: root@srv.example.com:2200' "$out"
+    grep -q '^DOWNLOAD_SSH_HOST=srv.example.com$' "$E/cfg/config"; rc_is 'the host is in the file' 0 "$?"
+    grep -q '^DOWNLOAD_SSH_PORT=2200$' "$E/cfg/config"; rc_is 'the port is in the file' 0 "$?"
+    grep -q '^# my note$' "$E/cfg/config"; rc_is 'other lines stay' 0 "$?"
+    out=$(menu '7\n3\n7\nbad_host!\n\n99999\n\nBAD USER\n\n0\n0\n0\n')
+    has 'a bad host is asked again' 'Enter a hostname or an IPv4 address' "$out"
+    has 'a bad port is asked again' 'from 1 to 65535' "$out"
+    has 'a bad user is asked again' 'valid Linux user name' "$out"
+    out=$(menu '7\n3\n8\n5000\n0\n0\n0\n')
+    has 'a bad lifetime is refused' 'Nothing changed' "$out"
+    out=$(menu '7\n3\n8\n100\n0\n0\n0\n')
+    has 'the lifetime is saved' 'New clients last: 100 days' "$out"
+    out=$(menu '2\nshortlived\n0\n')
+    has 'a client is created' 'Client "shortlived" created' "$out"
+    end=$(openssl x509 -in "$PKI/issued/shortlived.crt" -noout -enddate | sed 's/notAfter=//')
+    days=$(( ($(date -u -d "$end" +%s) - $(date -u +%s)) / 86400 ))
+    (( days >= 98 && days <= 100 )); rc_is "the new client lasts 100 days (got $days)" 0 "$?"
+    out=$(menu '7\n3\n8\n0\n0\n0\n0\n')
+    has 'the default can be restored' 'Easy-RSA default' "$out"
+    if grep -q CLIENT_CERT_DAYS "$E/cfg/config"; then result 0 'the setting is removed'; else result 1 'the setting is removed'; fi
+    has 'status still works' 'Revocation (CRL)' "$(mgr status)"
+}
+
+start_links_stub() {
+    # systemctl stand-in that really runs the link server, so the tests fetch real HTTPS.
+    LINKS_PIDFILE=$E/links.pid
+    mv "$E/bin/systemctl" "$E/bin/systemctl.real"
+    cat > "$E/bin/systemctl" <<STUB
+#!/usr/bin/env bash
+if [[ " \$* " == *" restart darban-links.service "* ]]; then
+    echo "systemctl \$*" >> "\$STUB_LOG"
+    if [[ -s "$LINKS_PIDFILE" ]]; then kill "\$(cat "$LINKS_PIDFILE")" 2>/dev/null; sleep 0.3; fi
+    source "$E/cfg/links.env"
+    python3 -I "$REPO/lib/linkd.py" --dir "$E/links" --cert "$E/cfg/link-cert.pem" --key "$E/cfg/link-key.pem" --host "\$LINK_HOST" --port "\$LINK_PORT" --interval 0.2 --idle-exit 1 >>"$E/links.log" 2>&1 </dev/null &
+    echo \$! > "$LINKS_PIDFILE"
+    exit 0
+fi
+exec bash "$E/bin/systemctl.real" "\$@"
+STUB
+    chmod +x "$E/bin/systemctl"
+    # A local address needs no certificate question, and a high port needs no privileges.
+    LINK_TEST_PORT=$(( 20000 + RANDOM % 20000 ))
+    echo 127.0.0.1 > "$E/cfg/domain"
+    printf 'LINK_PORT=%s\n' "$LINK_TEST_PORT" >> "$E/cfg/config"
+}
+stop_links_stub() { if [[ -s ${LINKS_PIDFILE:-/nonexistent} ]]; then kill "$(cat "$LINKS_PIDFILE")" 2>/dev/null; fi; }
+web() { /usr/bin/curl -ks --max-time 10 "$@"; }
+new_link() { menu "4\n${1:-alice}\n1\n1\n${2:-1}\n0\n" | grep -oE 'https://[^ ]+/l/[0-9a-f]{64}'; }
+
+test_temporary_link_end_to_end() {
+    local url base second out code head
+    start_links_stub
+    out=$(menu '4\nalice\n1\n1\n1\n0\n')
+    has 'the link is shown' "https://127.0.0.1:$LINK_TEST_PORT/l/" "$out"
+    has 'it says how long it works' '1 hour, one person, one time' "$out"
+    has 'it warns about the firewall' "TCP $LINK_TEST_PORT must be open" "$out"
+    has 'it warns about the self-signed certificate' 'self-signed' "$out"
+    url=$(grep -oE 'https://[^ ]+/l/[0-9a-f]{64}' <<<"$out")
+    base=${url%/l/*}
+    ok_if 'no copy stays in the download folder' test ! -e "$E/clients/alice.ovpn"
+    if find "$E/links" -type f | grep -q "${url##*/}"; then result 0 'the token itself is not stored'; else result 1 'the token itself is not stored'; fi
+
+    for code in 1 2 3; do out=$(web "$url"); done
+    has 'opening shows the button' 'Get my profile' "$out"
+    lacks 'opening does not reveal the profile' 'BEGIN' "$out"
+    head=$(web -D - -o /dev/null "$url")
+    has 'responses are not cached' 'no-store' "$head"
+    has 'responses keep the address private' 'no-referrer' "$head"
+
+    has 'active links shows it unopened' 'not opened' "$(menu '5\n\n0\n')"
+    second=$(web -o /dev/null -w '%{redirect_url}' -X POST "$url")
+    has 'pressing the button moves on' '/c/' "$second"
+    [[ $(web -o /dev/null -w '%{http_code}' "$url") == 410 ]]; rc_is 'the link cannot be opened again' 0 "$?"
+    [[ $(web -o /dev/null -w '%{http_code}' -X POST "$url") == 410 ]]; rc_is 'the link cannot be claimed again' 0 "$?"
+    has 'active links shows it opened' 'opened' "$(menu '5\n\n0\n')"
+    out=$(web "$second")
+    has 'the page offers the app' "openvpn://import-profile/https://127.0.0.1:$LINK_TEST_PORT/c/" "$out"
+    head=$(web -D - -o "$E/got.ovpn" "$second/file")
+    has 'the file type is what OpenVPN clients expect' 'application/x-openvpn-profile' "$head"
+    has 'it downloads under the client name' 'alice.ovpn' "$head"
+    grep -q '<key>' "$E/got.ovpn"; rc_is 'the real profile arrives' 0 "$?"
+    web -o /dev/null "$second/file"; web -o /dev/null "$second/file"
+    [[ $(web -o /dev/null -w '%{http_code}' "$second/file") == 410 ]]; rc_is 'the file stops after its downloads' 0 "$?"
+    ok_if 'no profile copy is left' test -z "$(find "$E/links" -name '*.ovpn')"
+
+    [[ $(web -o /dev/null -w '%{http_code}' "$base/l/$(printf 'a%.0s' {1..64})") == 410 ]]; rc_is 'an unknown link looks the same as a used one' 0 "$?"
+    [[ $(web -o /dev/null -w '%{http_code}' "$base/etc/passwd") == 410 ]]; rc_is 'other paths give nothing' 0 "$?"
+    if grep -Eq '[0-9a-f]{64}' "$E/links.log"; then result 0 'no token reaches the log'; else result 1 'no token reaches the log'; fi
+    grep -q 'link used: alice' "$E/links.log"; rc_is 'use of the link is logged' 0 "$?"
+    grep -q 'temporary link created: alice' "$STUB_LOG"; rc_is 'creating the link is audited' 0 "$?"
+    stop_links_stub
+}
+
+test_temporary_link_expiry_cancel_and_revoke() {
+    local url meta out
+    start_links_stub
+    url=$(new_link alice)
+    meta=$(ls "$E"/links/*.meta)
+    sed -i 's/^expires=.*/expires=1000/' "$meta"
+    [[ $(web -o /dev/null -w '%{http_code}' "$url") == 410 ]]; rc_is 'an expired link is refused' 0 "$?"
+    [[ $(web -o /dev/null -w '%{http_code}' -X POST "$url") == 410 ]]; rc_is 'an expired link cannot be claimed' 0 "$?"
+    has 'active links drops an expired link' 'No active links' "$(menu '5\n0\n')"
+
+    url=$(new_link alice 2)
+    out=$(menu '5\n1\n0\n')
+    has 'a link can be cancelled' 'cancelled' "$out"
+    [[ $(web -o /dev/null -w '%{http_code}' "$url") == 410 ]]; rc_is 'a cancelled link is refused' 0 "$?"
+    ok_if 'a cancelled link leaves no copy' test -z "$(find "$E/links" -name '*.ovpn')"
+
+    url=$(new_link alice 3)
+    revoke_menu alice >/dev/null
+    [[ $(web -o /dev/null -w '%{http_code}' "$url") == 410 ]]; rc_is 'revoking a client ends its links' 0 "$?"
+    ok_if 'revoking leaves no copy' test -z "$(find "$E/links" -name '*.ovpn')"
+    stop_links_stub
+}
+
+test_link_server_ends_when_idle() {
+    local url pid second attempt
+    start_links_stub
+    url=$(new_link alice)
+    pid=$(cat "$LINKS_PIDFILE")
+    kill -0 "$pid"; rc_is 'the server runs while a link exists' 0 "$?"
+    sleep 2
+    kill -0 "$pid"; rc_is 'it stays up while the link is waiting' 0 "$?"
+    menu '5\n1\n0\n' >/dev/null
+    for attempt in 1 2 3 4 5 6 7 8 9 10; do kill -0 "$pid" 2>/dev/null || break; sleep 0.5; done
+    if kill -0 "$pid" 2>/dev/null; then result 0 'it ends when no link is left'; else result 1 'it ends when no link is left'; fi
+    stop_links_stub
+}
+
+test_share_questions() {
+    local out
+    out=$(menu '4\nalice\n4\n0\n')
+    has 'Later keeps the file' 'Kept on the server' "$out"
+    ok_if 'the file is on the server' test -s "$E/clients/alice.ovpn"
+    out=$(menu '4\nalice\n3\n1\n2\n0\n')
+    has 'only the chosen command is shown' '~/Downloads/' "$out"
+    lacks 'other commands are not shown' 'USERPROFILE' "$out"
+    lacks 'sftp is not shown' 'sftp://' "$out"
+    out=$(menu '4\nalice\n3\n1\n3\n0\n')
+    has 'sftp can be chosen' 'sftp://root@' "$out"
+    lacks 'scp is not shown then' 'scp -P' "$out"
+    out=$(menu '2\nbob\n0\n')
+    has 'a script still gets every command' 'USERPROFILE' "$out"
+    has 'a script gets every command, sftp too' 'sftp://' "$out"
+}
+
+test_share_password() {
+    local out password
+    out=$(menu '4\nalice\n3\n2\n1\n0\n')
+    has 'the password is shown once' 'shown only now' "$out"
+    password=$(grep -A1 'shown only now' <<<"$out" | tail -n 1)
+    [[ $password =~ ^[A-Za-z0-9]{16,}$ ]]; rc_is 'the password is long and random' 0 "$?"
+    grep -q 'ENCRYPTED PRIVATE KEY' "$E/clients/alice.ovpn"; rc_is 'the key in the profile is locked' 0 "$?"
+    if grep -q 'BEGIN PRIVATE KEY' "$E/clients/alice.ovpn"; then result 0 'no open key in the profile'; else result 1 'no open key in the profile'; fi
+    sed -n '/<key>/,/<\/key>/p' "$E/clients/alice.ovpn" | sed '1d;$d' > "$E/locked.key"
+    openssl pkey -in "$E/locked.key" -passin "pass:$password" -noout 2>/dev/null; rc_is 'the password opens it' 0 "$?"
+    openssl pkey -in "$E/locked.key" -passin pass:wrong -noout 2>/dev/null; rc_not0 'a wrong password does not' "$?"
+    grep -q 'BEGIN PRIVATE KEY' "$PKI/private/alice.key"; rc_is 'the key in the PKI stays usable' 0 "$?"
+    if grep -rq "$password" "$E/stub.log"; then result 0 'the password is not logged'; else result 1 'the password is not logged'; fi
+}
+
+test_share_qr_and_link_port() {
+    local out
+    start_links_stub
+    printf '#!/usr/bin/env bash\necho "qrencode $*" >> "$STUB_LOG"; echo QRCODE-DRAWN\n' > "$E/bin/qrencode"
+    chmod +x "$E/bin/qrencode"
+    out=$(menu '4\nalice\n2\n1\n1\n0\n')
+    has 'the QR code is drawn' 'QRCODE-DRAWN' "$out"
+    grep -q 'qrencode -t ANSIUTF8 https://127.0.0.1' "$STUB_LOG"; rc_is 'the QR holds the link' 0 "$?"
+    stop_links_stub
+
+    out=$(menu '7\n3\n9\nabc\n\n0\n0\n0\n')
+    has 'a bad link port is asked again' 'from 1 to 65535' "$out"
+    out=$(menu '7\n3\n9\n30123\n0\n0\n0\n')
+    has 'the link port is saved' 'Saved: TCP 30123' "$out"
+    grep -q '^LINK_PORT=30123$' "$E/cfg/config"; rc_is 'it is in the file' 0 "$?"
+}
+
+test_link_certificate_for_a_hostname() {
+    local out
+    start_links_stub
+    echo vpn.example.com > "$E/cfg/domain"
+    out=$(menu '4\nalice\n1\n1\n1\n1\n0\n')
+    has 'a hostname offers a trusted certificate' "Let's Encrypt" "$out"
+    has 'declining falls back to self-signed' 'self-signed' "$out"
+    has 'the link uses the hostname' "https://vpn.example.com:$LINK_TEST_PORT/l/" "$out"
+    openssl x509 -in "$E/cfg/link-cert.pem" -noout -checkhost vpn.example.com | grep -q 'does match'; rc_is 'the certificate fits the hostname' 0 "$?"
+    menu '5\n1\n0\n' >/dev/null
+    out=$(menu '4\nalice\n1\n1\n1\n0\n')
+    lacks 'a usable certificate is not asked about again' "Let's Encrypt" "$out"
+    menu '5\n1\n0\n' >/dev/null
+
+    rm -f "$E/cfg/link-cert.pem" "$E/cfg/link-key.pem"
+    printf '#!/usr/bin/env bash\necho "certbot $*" >> "$STUB_LOG"; exit 1\n' > "$E/bin/certbot"
+    chmod +x "$E/bin/certbot"
+    out=$(menu '4\nalice\n1\n1\n1\n2\n0\n')
+    has 'a failed request explains itself' 'certbot could not get a certificate' "$out"
+    has 'and still gives a working link' "https://vpn.example.com:$LINK_TEST_PORT/l/" "$out"
+    grep -q 'certbot certonly --standalone' "$STUB_LOG"; rc_is 'certbot was asked' 0 "$?"
+    stop_links_stub
+}
+
+test_about_and_contact_are_shown() {
+    local out
+    has 'the main menu shows the project' 'github.com/MohZeh/darban-ovpn' "$(menu '0\n')"
+    has 'the main menu shows the email' 'zehtabex@gmail.com' "$(menu '0\n')"
+    out=$(bash "$E/manager.sh" about 2>&1 </dev/null)
+    has 'about shows the address' 'https://github.com/MohZeh/darban-ovpn' "$out"
+    has 'about shows the email' 'zehtabex@gmail.com' "$out"
+    has 'about shows the license' 'MIT' "$out"
+    has 'about states independence' 'Not affiliated with OpenVPN Inc.' "$out"
+    has 'help shows the contact' 'zehtabex@gmail.com' "$(bash "$E/manager.sh" help 2>&1 </dev/null)"
+    has 'the Setup menu has About' 'Not affiliated' "$(menu '9\n4\n0\n0\n')"
+    [[ $(bash "$E/manager.sh" version 2>&1 </dev/null) =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[a-z]+\.[0-9]+)?$ ]]; rc_is 'version stays machine-readable' 0 "$?"
+}
+
+set_installed_version() { sed -i "s/^DARBAN_VERSION=.*/DARBAN_VERSION=$1/" "$E/manager.sh"; }
+test_update_knows_pre_releases() {
+    local out
+    fake_release
+    cp "$E/get.sh" "$E/lib/get.sh"
+    printf 'Fixed things.\n\033[31mno escape\n' > "$RELEASE/RELEASE-NOTES.txt"
+    set_installed_version 1.0.0-beta.1
+    echo 1.0.0 > "$RELEASE/VERSION"
+    out=$(menu '9\n1\n1\n0\n0\n')
+    has 'the final release is newer than its beta' 'Install v1.0.0' "$out"
+    has 'its notes are shown' 'Fixed things.' "$out"
+    if [[ $out == *$'\033'* ]]; then result 0 'escape codes in notes are removed'; else result 1 'escape codes in notes are removed'; fi
+    echo 1.0.0-rc.1 > "$RELEASE/VERSION"
+    has 'an rc is newer than a beta' 'Install v1.0.0-rc.1' "$(menu '9\n1\n1\n0\n0\n')"
+    echo 1.0.0-alpha.1 > "$RELEASE/VERSION"
+    has 'an alpha is older than a beta' 'This is the latest version' "$(menu '9\n1\n0\n0\n')"
+    set_installed_version 1.0.0
+    echo 1.0.0-rc.9 > "$RELEASE/VERSION"
+    has 'an rc is older than the final release' 'This is the latest version' "$(menu '9\n1\n0\n0\n')"
+    echo 1.0.1 > "$RELEASE/VERSION"
+    has 'a higher version is newer' 'Install v1.0.1' "$(menu '9\n1\n1\n0\n0\n')"
+    echo 1.10.0 > "$RELEASE/VERSION"
+    set_installed_version 1.9.0
+    has 'numbers compare as numbers' 'Install v1.10.0' "$(menu '9\n1\n1\n0\n0\n')"
+}
+
+test_update_notice_in_the_header() {
+    local out attempt
+    fake_release
+    set_installed_version 1.0.0
+    lacks 'nothing is checked when it is off' 'Update available' "$(menu '0\n')"
+    ok_if 'no check was made' test ! -e "$E/cfg/.latest-version"
+
+    has 'Setup shows it is off' 'Daily update notice' "$(menu '9\n0\n0\n')"
+    menu '9\n3\n0\n0\n' >/dev/null
+    if grep -q '^UPDATE_CHECK=no' "$E/cfg/config"; then result 0 'the setting can be turned on'; else result 1 'the setting can be turned on'; fi
+    menu '0\n' >/dev/null
+    for attempt in 1 2 3 4 5 6 7 8 9 10; do [[ -s $E/cfg/.latest-version ]] && break; sleep 0.3; done
+    ok_if 'a background check stored the version' test -s "$E/cfg/.latest-version"
+    has 'the header announces it' 'Update available: v9.9.9' "$(menu '0\n')"
+    ok_if 'nothing was installed by the notice' test ! -e "$MARKER"
+    grep -c 'releases/latest/download/VERSION' "$STUB_LOG" > "$E/calls.before"
+    menu '0\n' >/dev/null; sleep 0.5
+    [[ $(grep -c 'releases/latest/download/VERSION' "$STUB_LOG") == "$(cat "$E/calls.before")" ]]; rc_is 'it checks at most once a day' 0 "$?"
+
+    echo 'bad; version' > "$E/cfg/.latest-version"
+    lacks 'a damaged stored version is ignored' 'Update available' "$(menu '0\n')"
+    echo 0.0.1 > "$E/cfg/.latest-version"
+    lacks 'an older version is not announced' 'Update available' "$(menu '0\n')"
+
+    rm -f "$E/cfg/.latest-version"
+    CURL_FAIL=1 bash "$E/manager.sh" </dev/null >/dev/null 2>&1
+    for attempt in 1 2 3 4 5 6 7 8 9 10; do [[ -e $E/cfg/.latest-version ]] && break; sleep 0.3; done
+    ok_if 'a failed check is remembered too' test -e "$E/cfg/.latest-version"
+    lacks 'no internet shows nothing' 'Update available' "$(menu '0\n')"
+
+    menu '9\n3\n0\n0\n' >/dev/null
+    grep -q '^UPDATE_CHECK=no' "$E/cfg/config"; rc_is 'the setting can be turned off' 0 "$?"
+}
+
+test_restore_previous_version() {
+    local out backup=$E/backups-tool/20260101T000000
+    mkdir -p "$E/sbin" "$E/units"
+    has 'nothing stored is said plainly' 'No previous version is stored' "$(menu '9\n2\n0\n0\n')"
+    mkdir -p "$backup/sbin" "$backup/lib" "$backup/units"
+    printf '#!/usr/bin/env bash\nDARBAN_VERSION=0.9.0\n' > "$backup/sbin/darban"
+    echo 'old lib' > "$backup/lib/old-marker"
+    echo 'old unit' > "$backup/units/darban-crl.timer"
+    out=$(menu '9\n2\n1\n0\n0\n')
+    has 'it names the version' 'Go back to v0.9.0?' "$out"
+    has 'option 1 keeps this version' 'Cancelled; nothing changed' "$out"
+    ok_if 'nothing is restored on No' test ! -e "$E/sbin/darban"
+    out=$(menu '9\n2\n2\n')
+    has 'it restores' 'Restored v0.9.0' "$out"
+    ok_if 'the program is back' test -s "$E/sbin/darban"
+    ok_if 'the library is back' test -s "$E/lib/old-marker"
+    ok_if 'the units are back' test -s "$E/units/darban-crl.timer"
+    ok_if 'that backup is used up' test ! -e "$backup"
+    ok_if 'the CA was not touched' test -s "$PKI/ca.crt"
+    grep -q 'restored previous version' "$STUB_LOG"; rc_is 'the restore is audited' 0 "$?"
+}
+
+mapfile -t TESTS < <(declare -F | awk '$3 ~ /^test_/ {print $3}' | sort)
+for t in "${TESTS[@]}"; do
+    [[ -z $FILTER || $t == *"$FILTER"* ]] || continue
+    CURRENT=$t
+    printf '%s\n' "$t"
+    fresh
+    "$t"
+done
+printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
+if (( FAIL > 0 )); then printf 'Failed:\n'; printf '  %s\n' "${FAILED[@]}"; exit 1; fi
