@@ -1,0 +1,49 @@
+#!/usr/bin/env bash
+# Darban OVPN — unattended daily CRL health / renewal.
+set -Eeuo pipefail
+umask 077
+source /usr/local/lib/darban/common.sh
+
+darban_require_root
+mode=${1:---check}
+case "$#:$mode:${2:-}" in
+    0:--check:|1:--check:|1:--auto:|1:--renew:) ;;
+    # Deliberately un-revokes what a restored CA database no longer lists; the timer never does this.
+    2:--renew:--allow-crl-shrink) DARBAN_ALLOW_CRL_SHRINK=1 ;;
+    *) darban_error 'Usage: darban-crl-maintain [--check|--auto|--renew [--allow-crl-shrink]]'; exit 2 ;;
+esac
+darban_preflight
+darban_crl_configured || { darban_error "Expected exactly one crl-verify pointing to $DARBAN_CRL."; exit 1; }
+trap darban_tmp_cleanup EXIT
+# Wait out an interactive manager operation instead of skipping today's run.
+darban_lock 600
+
+now=$(date -u +%s)
+threshold=$((now + 60*86400))
+if darban_verify_crl "$DARBAN_CRL"; then
+    expiry=$(darban_crl_expiry_epoch "$DARBAN_CRL")
+    printf 'CRL is signed, current, and covers all revoked certificates. Expiry: %s\n' "$(openssl crl -in "$DARBAN_CRL" -noout -nextupdate)"
+else
+    expiry=0
+    darban_error 'Current CRL requires urgent repair.'
+fi
+if [[ $mode == --check ]]; then
+    (( expiry > now )) || exit 1
+    if (( expiry <= threshold )); then
+        printf 'WARNING: CRL expires within 60 days; unattended renewal is due.\n'
+    fi
+    exit 0
+fi
+if [[ $mode == --auto && $expiry -gt $threshold ]]; then
+    printf 'CRL is healthy; renewal is not due.\n'
+    exit 0
+fi
+printf 'Generating a fresh CRL with Easy-RSA...\n'
+if ! env EASYRSA_PKI="$DARBAN_PKI" EASYRSA_BATCH=1 "$DARBAN_EASYRSA" gen-crl </dev/null; then
+    darban_error 'CRL generation failed. Existing published CRL was not replaced.'; exit 1
+fi
+darban_verify_crl "$DARBAN_PKI/crl.pem" || { darban_error 'Generated CRL invalid/incomplete; publication blocked.'; exit 1; }
+new_expiry=$(darban_crl_expiry_epoch "$DARBAN_PKI/crl.pem")
+(( new_expiry > threshold )) || { darban_error 'Generated CRL has less than 60 days validity; publication blocked.'; exit 1; }
+darban_publish_crl "$DARBAN_PKI/crl.pem"
+printf 'CRL published safely. %s\n' "$(openssl crl -in "$DARBAN_CRL" -noout -nextupdate)"

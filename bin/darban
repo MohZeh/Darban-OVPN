@@ -1,0 +1,2148 @@
+#!/usr/bin/env bash
+# Darban OVPN — existing OpenVPN 2.7 / Easy-RSA 3 server.
+# Scope: manage client credentials and the explicit server listening port only.
+set -Eeuo pipefail
+umask 077
+source /usr/local/lib/darban/common.sh
+source /usr/local/lib/darban/ui.sh
+
+DARBAN_VERSION=1.0.0-beta.1
+DARBAN_REPO=MohZeh/darban-ovpn
+DARBAN_URL=https://github.com/$DARBAN_REPO
+DARBAN_EMAIL=zehtabex@gmail.com
+BACKUP_ROOT=/var/backups/darban
+SBIN_DIR=/usr/local/sbin
+UNIT_DIR=/etc/systemd/system
+LINK_DIR=/run/darban-links
+DEFAULT_CLIENT_DNS='1.1.1.1 8.8.8.8'
+CONF_TEMP=''
+OUT_DIR=/root/openvpn-clients
+CONFIG_DIR=/etc/darban
+DOMAIN_FILE=$CONFIG_DIR/domain
+UPDATE_CACHE=$CONFIG_DIR/.latest-version
+LINK_ENV=$CONFIG_DIR/links.env
+LINK_CERT=$CONFIG_DIR/link-cert.pem
+LINK_KEY=$CONFIG_DIR/link-key.pem
+CONFIG_FILE=$CONFIG_DIR/config
+TLS_KEY=$DARBAN_SERVER_DIR/tls-crypt.key
+DEFAULT_DATA_CIPHERS=AES-256-GCM:AES-128-GCM
+PORT_BACKUPS_KEPT=5
+EXPIRY_WARN_DAYS=30
+# Download hints; overridden by $CONFIG_FILE (see load_config). Empty host disables them.
+DOWNLOAD_SSH_HOST=''
+DOWNLOAD_SSH_PORT=22
+DOWNLOAD_SSH_USER=root
+# Days a new client certificate lasts; empty means the Easy-RSA default.
+CLIENT_CERT_DAYS=''
+# TCP port of temporary links; empty means the first free one is chosen when it is first needed.
+LINK_PORT=''
+# The menu looks for a new release at most once a day; no turns that off.
+UPDATE_CHECK=yes
+CONFIG_ISSUES=()
+# Normalized serial of the certificate OpenVPN serves; never listed, exported or revoked.
+SERVER_SERIAL=''
+# Action subshell exit codes besides 0 (done), 1 (refused/failed, reason printed) and 130 (Ctrl+C).
+RC_NO_PAUSE=10
+RC_QUIT=12
+ACTION_RC=0
+DARBAN_INT=0
+SESSIONS_RESTARTED=0
+ACTION_RUNNING=0
+# Revoked clients are history: list_clients hides them unless LIST_ALL is set, and counts them in LIST_HIDDEN.
+LIST_ALL=0
+LIST_HIDDEN=0
+PROFILE_PASSWORD=''
+CHOSEN=1
+
+# ---------- validation ----------
+valid_name() { [[ $1 =~ ^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$ && $1 != server ]]; }
+# Names of certificates that already exist: wider than valid_name (new clients stay strict), yet still
+# safe as a file name and as one word of an Easy-RSA argument or a management-interface command.
+valid_link_port() { [[ $1 =~ ^[0-9]{1,5}$ ]] && (( 10#$1 >= 1 && 10#$1 <= 65535 )); }
+valid_client_days() { [[ $1 =~ ^[0-9]{1,4}$ ]] && (( 10#$1 >= 1 && 10#$1 <= 3650 )); }
+valid_existing_name() { [[ $1 =~ ^[A-Za-z0-9][A-Za-z0-9._@+-]{0,127}$ && $1 != server ]]; }
+
+# ---------- action runner ----------
+# Interrupts are ignored while CA/CRL or server.conf changes are half-applied; children inherit this.
+critical_begin() { trap '' INT TERM HUP; }
+critical_end() { trap 'exit 130' INT TERM HUP; }
+run_action() {
+    # errexit is ignored inside any function called from if/||/&&, so each action runs in its
+    # own subshell with errexit really on, temp-file cleanup, Ctrl+C = cancel, and (optionally)
+    # the CA lock held only for the duration of that action. The status lands in ACTION_RC.
+    local lock=$1 rc=0
+    shift
+    set +e
+    ACTION_RUNNING=1
+    (
+        set -e
+        trap 'ui_restore; darban_tmp_cleanup' EXIT
+        critical_end
+        if [[ $lock == locked ]]; then darban_lock; fi
+        "$@"
+    )
+    rc=$?
+    set -e
+    ACTION_RUNNING=0
+    DARBAN_INT=0
+    ACTION_RC=$rc
+    case $rc in
+        0|1|"$RC_NO_PAUSE") ;;
+        130) say; info 'Cancelled.' ;;
+        "$RC_IDLE"|"$RC_QUIT") exit 0 ;;
+        *) warn "Operation aborted unexpectedly (status $rc); see messages above." ;;
+    esac
+}
+menu_action() {
+    # menu_action <locked|unlocked> <title> <function>: clean screen, run, then let the user read the result.
+    local lock=$1 title=$2
+    shift 2
+    clear_screen
+    section "$title"
+    run_action "$lock" "$@"
+    if (( ACTION_RC != RC_NO_PAUSE )); then say; pause; fi
+}
+
+# ---------- configuration and server facts ----------
+load_config() {
+    local key value
+    CONFIG_ISSUES=()
+    [[ -f $CONFIG_FILE ]] || { CONFIG_ISSUES+=("$CONFIG_FILE is missing; download commands are disabled."); return 0; }
+    # Parsed as data, never sourced.
+    while IFS='=' read -r key value || [[ -n $key ]]; do
+        [[ $key =~ ^[[:space:]]*(#|$) ]] && continue
+        case $key in
+            DOWNLOAD_SSH_HOST) DOWNLOAD_SSH_HOST=$value ;;
+            DOWNLOAD_SSH_PORT) DOWNLOAD_SSH_PORT=$value ;;
+            DOWNLOAD_SSH_USER) DOWNLOAD_SSH_USER=$value ;;
+            CLIENT_CERT_DAYS) CLIENT_CERT_DAYS=$value ;;
+            LINK_PORT) LINK_PORT=$value ;;
+            UPDATE_CHECK) UPDATE_CHECK=$value ;;
+            *) CONFIG_ISSUES+=("Unknown setting ignored in $CONFIG_FILE: $key") ;;
+        esac
+    done <"$CONFIG_FILE"
+    if [[ -n $DOWNLOAD_SSH_HOST ]] && ! valid_ipv4 "$DOWNLOAD_SSH_HOST" && ! valid_domain "$DOWNLOAD_SSH_HOST"; then
+        CONFIG_ISSUES+=("Invalid DOWNLOAD_SSH_HOST in $CONFIG_FILE."); DOWNLOAD_SSH_HOST=''
+    fi
+    if ! [[ $DOWNLOAD_SSH_PORT =~ ^[0-9]{1,5}$ ]] || (( 10#$DOWNLOAD_SSH_PORT < 1 || 10#$DOWNLOAD_SSH_PORT > 65535 )); then
+        CONFIG_ISSUES+=("Invalid DOWNLOAD_SSH_PORT in $CONFIG_FILE."); DOWNLOAD_SSH_HOST=''
+    fi
+    if ! [[ $DOWNLOAD_SSH_USER =~ ^[a-z_][a-z0-9_-]{0,31}$ ]]; then
+        CONFIG_ISSUES+=("Invalid DOWNLOAD_SSH_USER in $CONFIG_FILE."); DOWNLOAD_SSH_HOST=''
+    fi
+    if [[ -n $CLIENT_CERT_DAYS ]] && ! valid_client_days "$CLIENT_CERT_DAYS"; then
+        CONFIG_ISSUES+=("Invalid CLIENT_CERT_DAYS in $CONFIG_FILE; using the default."); CLIENT_CERT_DAYS=''
+    fi
+    if [[ $UPDATE_CHECK != yes && $UPDATE_CHECK != no ]]; then
+        CONFIG_ISSUES+=("Invalid UPDATE_CHECK in $CONFIG_FILE; using yes."); UPDATE_CHECK=yes
+    fi
+    if [[ -n $LINK_PORT ]] && ! valid_link_port "$LINK_PORT"; then
+        CONFIG_ISSUES+=("Invalid LINK_PORT in $CONFIG_FILE; choosing a free port."); LINK_PORT=''
+    fi
+    if [[ -z $DOWNLOAD_SSH_HOST ]] && (( ${#CONFIG_ISSUES[@]} == 0 )); then
+        CONFIG_ISSUES+=("DOWNLOAD_SSH_HOST is not set in $CONFIG_FILE; download commands are disabled.")
+    fi
+}
+setup() {
+    local cmd
+    darban_require_root
+    darban_preflight
+    [[ -s $TLS_KEY ]] || { darban_error 'OpenVPN tls-crypt.key is missing.'; return 1; }
+    for cmd in systemctl ss find cp chmod chown timeout; do command -v "$cmd" >/dev/null || { darban_error "Missing dependency: $cmd"; return 1; }; done
+    install -d -o root -g root -m 700 "$CONFIG_DIR" "$OUT_DIR"
+    SERVER_SERIAL=$(darban_server_serial) || {
+        darban_error "Cannot read the server certificate from server.conf (one 'cert' directive or an inline <cert> block)."; return 1;
+    }
+    load_config
+}
+server_port() {
+    awk '$1=="port" {n++; if ($2 !~ /^[0-9]+$/) bad=1; else port=$2} END {if(n!=1 || bad) exit 1; print port}' "$DARBAN_SERVER_CONF"
+}
+server_proto_ok() {
+    [[ $(awk '$1=="proto" {n++; proto=$2} END {if(n!=1) print "invalid"; else print proto}' "$DARBAN_SERVER_CONF") == udp4 ]]
+}
+server_tls_ok() {
+    # Profiles embed $TLS_KEY in a <tls-crypt> block, so the server must use exactly that mode and key.
+    local path
+    awk '$1=="tls-auth" || $1=="tls-crypt-v2" || $1 ~ /^<(tls-auth|tls-crypt|tls-crypt-v2)>/ {bad=1} END {exit bad}' "$DARBAN_SERVER_CONF" || return 1
+    path=$(darban_conf_single tls-crypt) || return 1
+    [[ $(darban_conf_path "$path") -ef $TLS_KEY ]]
+}
+server_data_ciphers() {
+    # Mirror the server's negotiable list so profiles cannot drift from it.
+    local value rc=0
+    value=$(darban_conf_single data-ciphers) || rc=$?
+    if (( rc == 1 )); then value=$DEFAULT_DATA_CIPHERS; elif (( rc != 0 )); then return 1; fi
+    [[ $value =~ ^[A-Za-z0-9_:-]+$ ]] || return 1
+    printf '%s\n' "$value"
+}
+profile_preconditions() {
+    valid_domain "$(domain)" || { warn "The VPN hostname is not set yet. Set it first: Settings ${S_CRUMB} 1."; return 1; }
+    server_port >/dev/null || { warn 'Cannot detect a unique OpenVPN server port in server.conf.'; return 1; }
+    server_proto_ok || { warn 'Profile generation only supports the existing udp4 configuration.'; return 1; }
+    server_tls_ok || {
+        warn "server.conf must contain exactly one 'tls-crypt' directive using $TLS_KEY (no tls-auth, tls-crypt-v2 or inline keys)."; return 1;
+    }
+    server_data_ciphers >/dev/null || { warn 'server.conf data-ciphers is repeated or malformed.'; return 1; }
+}
+domain() { [[ -s $DOMAIN_FILE ]] && head -n 1 "$DOMAIN_FILE" || true; }
+
+# ---------- dates ----------
+cert_end_epoch() {
+    local line
+    line=$(openssl x509 -in "$1" -noout -enddate 2>/dev/null) || return 1
+    date -u -d "${line#notAfter=}" +%s
+}
+days_until() { printf '%d\n' $(( ($1 - $(date -u +%s)) / 86400 )); }
+describe_expiry() {
+    # "2029-02-05 (820 days)" / "2026-10-01 (EXPIRED)"
+    local epoch=$1 days
+    days=$(days_until "$epoch")
+    if (( epoch <= $(date -u +%s) )); then
+        printf '%s (%sEXPIRED%s)\n' "$(date -u -d "@$epoch" +%Y-%m-%d)" "$C_RED" "$C_RESET"
+    elif (( days <= EXPIRY_WARN_DAYS )); then
+        printf '%s (%s%d days%s)\n' "$(date -u -d "@$epoch" +%Y-%m-%d)" "$C_YELLOW" "$days" "$C_RESET"
+    else
+        printf '%s (%d days)\n' "$(date -u -d "@$epoch" +%Y-%m-%d)" "$days"
+    fi
+}
+
+# ---------- CA index ----------
+client_index_rows() {
+    # Never parse tab-separated CA records with shell read: empty fields cause shifts.
+    awk -F '\t' 'NF>=6 && $6 ~ /\/CN=/ {
+        cn=$6; sub(/^.*\/CN=/,"",cn); sub(/\/.*/,"",cn);
+        printf "%s\t%s\t%s\t%s\n",cn,$1,$2,$4
+    }' "$DARBAN_PKI/index.txt"
+}
+client_effective_rows() {
+    # One row per name, sorted: the single valid record of a reissued name, otherwise its newest record.
+    client_index_rows | awk -F '\t' '
+        !($1 in seen) {seen[$1]=1; order[++n]=$1}
+        $2=="V" {valid[$1]=1; row[$1]=$0}
+        $2!="V" && !($1 in valid) {row[$1]=$0}
+        END {for (i=1; i<=n; i++) print row[order[i]]}' | sort -t $'\t' -k1,1
+}
+client_index_count() {
+    DARBAN_TARGET=$1 awk -F '\t' 'NF>=6 {cn=$6; sub(/^.*\/CN=/,"",cn); sub(/\/.*/,"",cn); if($6 ~ /\/CN=/ && cn==ENVIRON["DARBAN_TARGET"]) n++} END {print n+0}' "$DARBAN_PKI/index.txt"
+}
+client_index_lookup() {
+    # "state<TAB>serial" for a name. Revoked and expired history of a reissued name does not make it
+    # ambiguous: only more than one VALID record does, and then the output is just "AMBIGUOUS".
+    DARBAN_TARGET=$1 awk -F '\t' '
+        NF>=6 && $6 ~ /\/CN=/ {
+            cn=$6; sub(/^.*\/CN=/,"",cn); sub(/\/.*/,"",cn)
+            if (cn==ENVIRON["DARBAN_TARGET"]) {
+                n++; state=$1; serial=$4
+                if ($1=="V") {valid++; valid_serial=$4}
+            }
+        }
+        END {
+            if (valid>1) print "AMBIGUOUS"
+            else if (valid==1) printf "V\t%s\n", valid_serial
+            else if (n>0) printf "%s\t%s\n", state, serial
+        }' "$DARBAN_PKI/index.txt"
+}
+client_index_status() { local row; row=$(client_index_lookup "$1"); printf '%s\n' "${row%%$'\t'*}"; }
+client_index_serial() { local row; row=$(client_index_lookup "$1"); [[ $row != *$'\t'* ]] || printf '%s\n' "${row#*$'\t'}"; }
+index_state_of_serial() {
+    # State of one exact certificate, which a reissued name's status cannot tell.
+    local want rows state expiry serial
+    want=$(darban_norm_serial "$1") || return 1
+    rows=$(darban_index_rows) || return 1
+    while IFS=$'\t' read -r state expiry serial; do
+        if [[ $(darban_norm_serial "$serial") == "$want" ]]; then printf '%s\n' "$state"; return 0; fi
+    done <<<"$rows"
+    return 1
+}
+is_server_serial() { [[ $(darban_norm_serial "$1" 2>/dev/null) == "$SERVER_SERIAL" ]]; }
+safe_text() { printf '%s' "${1//[^[:print:]]/?}"; }
+join_lines() { sort -u | awk '{s = s (s == "" ? "" : ", ") $0} END {print s}'; }
+client_cert_safe() {
+    # The server's own certificate (whatever its CN) and any server-capable certificate
+    # must never be exported into a client profile or revoked from this menu.
+    local crt=$DARBAN_PKI/issued/$1.crt serial
+    serial=$(openssl x509 -in "$crt" -noout -serial 2>/dev/null) || return 1
+    ! is_server_serial "${serial#serial=}" && darban_cert_is_client_only "$crt"
+}
+revoke_block_reason() {
+    # Why a certificate the CA still counts as valid cannot be revoked here. Empty when it can be,
+    # and for names with no valid certificate, where the question does not arise.
+    local name=$1 state serial file_serial crt=$DARBAN_PKI/issued/$1.crt
+    state=$(client_index_status "$name")
+    case $state in
+        V) ;;
+        AMBIGUOUS) printf 'several valid certificates share this name; this tool will not guess which one to revoke\n'; return 0 ;;
+        *) return 0 ;;
+    esac
+    if ! valid_existing_name "$name"; then printf 'this tool cannot manage this name safely\n'; return 0; fi
+    serial=$(client_index_serial "$name")
+    if [[ ! -s $crt ]]; then printf 'pki/issued/%s.crt is missing; restore it from pki/certs_by_serial/%s.pem\n' "$name" "$serial"; return 0; fi
+    if ! file_serial=$(openssl x509 -in "$crt" -noout -serial 2>/dev/null); then printf 'pki/issued/%s.crt is unreadable\n' "$name"; return 0; fi
+    if [[ $(darban_norm_serial "${file_serial#serial=}") != "$(darban_norm_serial "$serial")" ]]; then
+        printf 'pki/issued/%s.crt is not the certificate the CA lists as valid (serial %s)\n' "$name" "$serial"; return 0
+    fi
+    if ! client_cert_safe "$name"; then printf 'this certificate can act as a server, so this menu will not touch it\n'; fi
+}
+export_block_reason() {
+    # Why a valid certificate cannot be put into a profile; empty when it can be.
+    local name=$1 reason key=$DARBAN_PKI/private/$1.key crt=$DARBAN_PKI/issued/$1.crt key_hash cert_hash
+    reason=$(revoke_block_reason "$name")
+    if [[ -n $reason ]]; then printf '%s\n' "$reason"; return 0; fi
+    [[ $(client_index_status "$name") == V ]] || return 0
+    if ! openssl x509 -in "$crt" -noout -checkend 0 >/dev/null 2>&1; then printf 'the certificate has expired\n'; return 0; fi
+    if [[ ! -s $key ]]; then printf 'its private key pki/private/%s.key is missing\n' "$name"; return 0; fi
+    key_hash=$(openssl pkey -in "$key" -passin pass: -pubout -outform DER 2>/dev/null | openssl dgst -sha256) || key_hash=''
+    cert_hash=$(openssl x509 -in "$crt" -pubkey -noout 2>/dev/null | openssl pkey -pubin -outform DER 2>/dev/null | openssl dgst -sha256) || cert_hash=''
+    if [[ -z $key_hash || $key_hash != "$cert_hash" ]]; then printf 'its private key does not match the certificate\n'; fi
+}
+client_valid() { [[ $(client_index_status "$1") == V && -z $(export_block_reason "$1") ]]; }
+name_taken() {
+    [[ $(client_index_count "$1") != 0 || -e $DARBAN_PKI/issued/$1.crt || -e $DARBAN_PKI/private/$1.key || -e $OUT_DIR/$1.ovpn ]]
+}
+similar_names() {
+    # Clients with a valid certificate whose name differs only in letter case ("Ali" vs "ali"), comma-separated.
+    client_index_rows | awk -F '\t' -v t="$1" '$2=="V" && tolower($1)==tolower(t) && $1!=t {print $1}' | join_lines
+}
+revocation_pending_names() {
+    # Revoked, unexpired clients the active CRL does not list: revoked in the CA, not yet blocked by OpenVPN.
+    local cn status expiry serial norm now e list rows
+    local -A listed=()
+    now=$(date -u +%s)
+    if darban_crl_signature_ok "$DARBAN_CRL"; then
+        list=$(darban_crl_serials "$DARBAN_CRL") || return 1
+        while IFS= read -r serial; do
+            [[ -n $serial ]] || continue
+            norm=$(darban_norm_serial "$serial") || return 1
+            listed["$norm"]=1
+        done <<<"$list"
+    fi
+    rows=$(client_index_rows) || return 1
+    while IFS=$'\t' read -r cn status expiry serial; do
+        [[ $status == R ]] || continue
+        norm=$(darban_norm_serial "$serial") || return 1
+        [[ -v listed[$norm] ]] && continue
+        # An unreadable date counts as not expired.
+        e=$(darban_index_expiry_epoch "$expiry" 2>/dev/null) || e=$((now + 1))
+        if (( e > now )); then printf '%s\n' "$cn"; fi
+    done <<<"$rows"
+}
+revoked_with_profile() {
+    # A normal revocation deletes the server copy, so a copy left behind marks an unfinished one.
+    local cn status expiry serial rows
+    rows=$(client_effective_rows) || return 1
+    while IFS=$'\t' read -r cn status expiry serial; do
+        if [[ $status == R ]] && profile_path "$cn" >/dev/null; then printf '%s\n' "$cn"; fi
+    done <<<"$rows"
+}
+client_stats() {
+    # Prints: valid revoked expired expiring-soon
+    local cn status expiry serial e now valid=0 revoked=0 expired=0 soon=0
+    now=$(date -u +%s)
+    while IFS=$'\t' read -r cn status expiry serial; do
+        if is_server_serial "$serial"; then continue; fi
+        e=$(darban_index_expiry_epoch "$expiry" 2>/dev/null || echo 0)
+        if [[ $status == R ]]; then
+            revoked=$((revoked + 1))
+        elif [[ $status == V ]] && (( e > now )); then
+            valid=$((valid + 1))
+            if (( e - now <= EXPIRY_WARN_DAYS * 86400 )); then soon=$((soon + 1)); fi
+        else
+            expired=$((expired + 1))
+        fi
+    done < <(client_index_rows)
+    printf '%d %d %d %d\n' "$valid" "$revoked" "$expired" "$soon"
+}
+profile_path() {
+    local name=$1
+    [[ -s $OUT_DIR/$name.ovpn ]] || return 1
+    printf '%s\n' "$OUT_DIR/$name.ovpn"
+}
+# Predicates deciding which clients each picker offers.
+can_reexport() { client_valid "$1"; }
+can_delete_export() { profile_path "$1" >/dev/null; }
+show_blocked() {
+    # show_blocked "<name>: <reason>"...: certificates this action cannot use, and why.
+    local line
+    (( $# > 0 )) || return 0
+    say
+    say 'Valid, but not available for this action:'
+    for line in "$@"; do bullet "$line"; done
+}
+can_revoke() { [[ $(client_index_status "$1") == V && -z $(revoke_block_reason "$1") ]]; }
+pick_client() {
+    # pick_client <question> <predicate> [reason-function]: numbered list of matching clients;
+    # sets PICKED to a name. Returns 1 when cancelled or when nothing matches.
+    # Clients the reason function explains are listed apart, so a valid certificate never just vanishes.
+    local question=$1 predicate=$2 explain=${3:-} cn status expiry serial e i extra reason
+    local -a names=() notes=() blocked=()
+    while IFS=$'\t' read -r cn status expiry serial; do
+        if is_server_serial "$serial"; then continue; fi
+        if ! "$predicate" "$cn"; then
+            reason=''
+            if [[ -n $explain ]]; then reason=$("$explain" "$cn") || reason=''; fi
+            if [[ -n $reason ]]; then blocked+=("$(safe_text "$cn"): $reason"); fi
+            continue
+        fi
+        e=$(darban_index_expiry_epoch "$expiry" 2>/dev/null || echo 0)
+        extra=''
+        if (( e > 0 )); then extra="expires $(describe_expiry "$e")"; fi
+        if profile_path "$cn" >/dev/null; then extra+=" $S_SEP profile on server"; fi
+        names+=("$cn"); notes+=("$extra")
+    done < <(client_effective_rows)
+    if (( ${#names[@]} == 0 )); then
+        info 'No clients are available for this action.'
+        show_blocked "${blocked[@]}"
+        return 1
+    fi
+    say "$question"
+    for i in "${!names[@]}"; do
+        printf '  %s%3d%s  %-24s %s%s%s\n' "$C_CYAN" $((i + 1)) "$C_RESET" "${names[i]}" "$C_DIM" "${notes[i]}" "$C_RESET"
+    done
+    show_blocked "${blocked[@]}"
+    say
+    while :; do
+        if ! ask 'Number or name (Enter = cancel): ' || [[ -z $REPLY ]]; then cancelled; return 1; fi
+        if [[ $REPLY =~ ^[0-9]+$ ]] && (( 10#$REPLY >= 1 && 10#$REPLY <= ${#names[@]} )); then
+            PICKED=${names[10#$REPLY - 1]}; return 0
+        fi
+        for cn in "${names[@]}"; do
+            if [[ $cn == "$REPLY" ]]; then PICKED=$cn; return 0; fi
+        done
+        warn "\"$REPLY\" is not in the list above. Enter its number or exact name."
+    done
+}
+
+# ---------- profiles and downloads ----------
+assemble_profile() {
+    # Every step is checked explicitly: callers use this from an if, where errexit does not apply.
+    local name=$1 host=$2 port=$3 ciphers=$4
+    cat <<EOF || return 1
+client
+dev tun
+proto udp4
+remote $host $port
+resolv-retry infinite
+nobind
+remote-cert-tls server
+tls-version-min 1.2
+data-ciphers $ciphers
+auth-nocache
+persist-tun
+verb 3
+
+<ca>
+EOF
+    openssl x509 -in "$DARBAN_PKI/ca.crt" -outform PEM || return 1
+    printf '</ca>\n<cert>\n' || return 1
+    openssl x509 -in "$DARBAN_PKI/issued/$name.crt" -outform PEM || return 1
+    printf '</cert>\n<key>\n' || return 1
+    if [[ -n $PROFILE_PASSWORD ]]; then
+        openssl pkey -in "$DARBAN_PKI/private/$name.key" -aes256 -passout stdin <<<"$PROFILE_PASSWORD" || return 1
+    else
+        cat -- "$DARBAN_PKI/private/$name.key" || return 1
+    fi
+    printf '</key>\n<tls-crypt>\n' || return 1
+    cat -- "$TLS_KEY" || return 1
+    printf '</tls-crypt>\n'
+}
+profile_complete() {
+    awk '/^<(ca|cert|key|tls-crypt)>$/ {o[$0]++} /^<\/(ca|cert|key|tls-crypt)>$/ {c[$0]++}
+        END {exit !(o["<ca>"]==1 && o["<cert>"]==1 && o["<key>"]==1 && o["<tls-crypt>"]==1 &&
+                    c["</ca>"]==1 && c["</cert>"]==1 && c["</key>"]==1 && c["</tls-crypt>"]==1)}' "$1"
+}
+write_profile() {
+    local name=$1 replace=${2:-no} host port ciphers outfile tmp
+    client_valid "$name" || { warn 'The client certificate/key is missing, expired, server-capable or does not match.'; return 1; }
+    profile_preconditions || return 1
+    host=$(domain)
+    port=$(server_port) || return 1
+    ciphers=$(server_data_ciphers) || return 1
+    outfile="$OUT_DIR/$name.ovpn"
+    if [[ -e $outfile && $replace != yes ]]; then warn "Profile exists and will not be replaced: $outfile"; return 1; fi
+    tmp=$(mktemp "$OUT_DIR/.profile.XXXXXXXX") || return 1
+    darban_tmp_register "$tmp"
+    if ! assemble_profile "$name" "$host" "$port" "$ciphers" >"$tmp" || ! profile_complete "$tmp"; then
+        rm -f -- "$tmp"; warn 'Could not assemble profile.'; return 1
+    fi
+    chmod 600 "$tmp" || return 1
+    if ! mv -f -- "$tmp" "$outfile"; then rm -f -- "$tmp"; return 1; fi
+}
+security_note() {
+    printf '%s%s This file contains a private key; do not share or publish it.%s\n' "$C_YELLOW" "$S_WARN" "$C_RESET" || true
+}
+download_panel() {
+    # download_panel <file> <title> [windows|unix|sftp]. Commands are printed uncolored, unindented and one
+    # per line, so copying them from the terminal never picks up escape codes or frame characters.
+    local file=$1 title=$2 only=${3:-all} name filename current_remote expected cert_exp target
+    filename=${file##*/}
+    name=${filename%.ovpn}
+    ok "$title"
+    hr
+    current_remote=$(grep -m1 '^remote ' "$file" || true)
+    kv File "$file"
+    if [[ -n $current_remote ]]; then
+        kv Server "$(awk '{print $2 ":" $3 "/UDP"}' <<<"$current_remote")"
+    else
+        kv Server unknown
+    fi
+    if cert_exp=$(cert_end_epoch "$DARBAN_PKI/issued/$name.crt"); then kv 'Valid to' "$(describe_expiry "$cert_exp")"; fi
+    expected="remote $(domain) $(server_port 2>/dev/null || printf '?')"
+    if [[ $current_remote != "$expected" ]]; then
+        warn "This file points to ${current_remote#remote } but the server is now ${expected#remote }. Share it again (menu 4) first."
+    fi
+    say
+    if [[ -z $DOWNLOAD_SSH_HOST ]]; then
+        warn "Download commands unavailable: set DOWNLOAD_SSH_HOST (and DOWNLOAD_SSH_PORT/USER) in $CONFIG_FILE."
+    else
+        target=$DOWNLOAD_SSH_USER@$DOWNLOAD_SSH_HOST
+        if [[ $only == all || $only == windows ]]; then
+            say '  Windows (PowerShell):'
+            printf 'scp -P %s %s:%s "$env:USERPROFILE\\Downloads\\%s"\n' "$DOWNLOAD_SSH_PORT" "$target" "$file" "$filename" || true
+            say
+        fi
+        if [[ $only == all || $only == unix ]]; then
+            say '  macOS / Linux:'
+            printf 'scp -P %s %s:%s ~/Downloads/\n' "$DOWNLOAD_SSH_PORT" "$target" "$file" || true
+            say
+        fi
+        if [[ $only == all || $only == sftp ]]; then
+            say '  WinSCP / FileZilla (SFTP):'
+            printf 'sftp://%s:%s%s\n' "$target" "$DOWNLOAD_SSH_PORT" "$file" || true
+            say
+        fi
+    fi
+    security_note
+    hr
+}
+offer_delete_copy() {
+    # Doubles as the "press Enter" pause after a download panel.
+    local file=$1
+    (( UI_TTY )) || return 0
+    if confirm_choice 'Finished downloading? The server copy can be deleted now.' 'Keep it and return to the menu' 'Delete the server copy' danger; then
+        rm -f -- "$file"
+        ok "Server copy deleted: $file"
+        audit "profile deleted from server: $file"
+        pause
+    fi
+}
+
+# ---------- actions ----------
+set_domain() {
+    local old value tmp resolved
+    old=$(domain)
+    kv Current "${old:-not set}"
+    say
+    info 'Only NEW or re-exported .ovpn files use the hostname.'
+    info 'Use a DNS-only record (no Cloudflare orange-cloud proxy) for this UDP service.'
+    say
+    prompt_valid 'New hostname, e.g. vpn.example.com (Enter = cancel): ' valid_domain \
+        'Not a valid DNS name. Example: vpn.example.com' || return 0
+    value=${REPLY,,}
+    [[ $value != "$old" ]] || { info 'Same as the current hostname; nothing changed.'; return 0; }
+    if command -v getent >/dev/null; then
+        resolved=$(getent ahostsv4 "$value" 2>/dev/null | awk 'NR==1 {print $1}' || true)
+        if [[ -z $resolved ]]; then
+            warn 'This hostname does not resolve to an IPv4 address yet. Check the DNS record before clients use it.'
+        elif valid_ipv4 "$DOWNLOAD_SSH_HOST" && [[ $resolved != "$DOWNLOAD_SSH_HOST" ]]; then
+            warn "It resolves to $resolved, but this VPS is $DOWNLOAD_SSH_HOST. Make sure that is intentional."
+        else
+            ok "Resolves to $resolved."
+        fi
+    fi
+    confirm_choice "Save $value as the VPN hostname?" 'No, keep the current one' "Save $value" normal || { cancelled; return 0; }
+    tmp=$(mktemp "$CONFIG_DIR/.domain.XXXXXXXX") || return 1
+    darban_tmp_register "$tmp"
+    if ! printf '%s\n' "$value" >"$tmp" || ! chmod 600 "$tmp" || ! mv -f -- "$tmp" "$DOMAIN_FILE"; then
+        fail 'Could not save the hostname.'; return 1
+    fi
+    audit "VPN hostname changed: ${old:-unset} -> $value"
+    ok 'Saved.'
+    info 'Profiles downloaded earlier still use the old hostname; share them again (menu 4).'
+}
+list_clients() {
+    local cn status expiry serial e now label rank days name_w=6 out line cell color profile shown reason pending
+    local valid=0 revoked=0 expired=0 soon=0 hidden=0
+    local -a rows=()
+    now=$(date -u +%s)
+    while IFS=$'\t' read -r cn status expiry serial; do
+        if is_server_serial "$serial"; then continue; fi
+        if [[ $status == R ]] && (( ! LIST_ALL )); then hidden=$((hidden + 1)); continue; fi
+        e=$(darban_index_expiry_epoch "$expiry" 2>/dev/null || echo 0)
+        case $status in
+            V) if (( e > now )); then label=VALID rank=1; else label=EXPIRED rank=2; fi ;;
+            R) label=REVOKED rank=3 ;;
+            E) label=EXPIRED rank=2 ;;
+            *) label=$status rank=4 ;;
+        esac
+        if (( e == 0 )); then label=BAD-DATE; fi
+        rows+=("$rank"$'\t'"$cn"$'\t'"$label"$'\t'"$e")
+        if (( ${#cn} > name_w )); then name_w=${#cn}; fi
+    done < <(client_index_rows)
+    LIST_HIDDEN=$hidden
+    revoked=$hidden
+    if (( ${#rows[@]} == 0 && hidden == 0 )); then info 'No clients yet. Create one with menu 2.'; return 0; fi
+    (( name_w <= 32 )) || name_w=32
+    if (( ${#rows[@]} > 0 )); then
+        printf -v out '  %s%-*s  %-8s  %-10s  %5s  %s%s\n' "$C_BOLD" "$name_w" CLIENT STATUS EXPIRES DAYS PROFILE "$C_RESET"
+    else
+        out=$'  No active clients.\n'
+    fi
+    while IFS=$'\t' read -r rank cn label e; do
+        [[ -n $cn ]] || continue
+        shown=$(safe_text "$cn")
+        if (( ${#shown} > name_w )); then shown="${shown:0:name_w-1}$S_ELL"; fi
+        case $label in VALID) color=$C_GREEN ;; REVOKED) color=$C_DIM ;; *) color=$C_RED ;; esac
+        printf -v cell '%-8s' "$label"
+        printf -v line '  %-*s  %s%s%s  ' "$name_w" "$shown" "$color" "$cell" "$C_RESET"
+        if (( e > 0 )); then line+=$(date -u -d "@$e" +%Y-%m-%d); else line+='?         '; fi
+        if [[ $label == VALID ]]; then
+            days=$(( (e - now) / 86400 ))
+            if (( days <= EXPIRY_WARN_DAYS )); then
+                soon=$((soon + 1)); printf -v cell '%5d' "$days"; line+="  $C_YELLOW$cell$C_RESET"
+            else
+                printf -v cell '%5d' "$days"; line+="  $cell"
+            fi
+            valid=$((valid + 1))
+        else
+            line+="      -"
+            if [[ $label == REVOKED ]]; then revoked=$((revoked + 1)); else expired=$((expired + 1)); fi
+        fi
+        # The server copy belongs to a reissued name's valid certificate, not to its revoked history.
+        profile='-'
+        if { [[ $label == VALID ]] || [[ $(client_index_status "$cn") != V ]]; } && profile_path "$cn" >/dev/null; then profile="$S_OK on server"; fi
+        out+="$line  $profile"$'\n'
+    done < <(printf '%s\n' "${rows[@]}" | sort -t $'\t' -k1,1n -k2,2)
+    printf -v line '\n  %d valid %s %d revoked %s %d expired' "$valid" "$S_SEP" "$revoked" "$S_SEP" "$expired"
+    out+=$line
+    if (( soon > 0 )); then out+=" $S_SEP $C_YELLOW$soon expiring within $EXPIRY_WARN_DAYS days$C_RESET"; fi
+    if (( LIST_ALL )); then
+        out+=$'\n'"  ${C_DIM}Revoked clients stay in the CA index because the CRL depends on them.${C_RESET}"$'\n'
+    elif (( hidden > 0 )); then
+        out+=$'\n'"  ${C_DIM}Revoked clients are hidden. To see them: sudo darban list --all${C_RESET}"$'\n'
+    else
+        out+=$'\n'
+    fi
+    while IFS=$'\t' read -r cn status expiry serial; do
+        if is_server_serial "$serial"; then continue; fi
+        reason=$(revoke_block_reason "$cn") || reason=''
+        if [[ -n $reason ]]; then out+=$'\n'"  $C_YELLOW$S_WARN$C_RESET $(safe_text "$cn") cannot be revoked here: $reason"; fi
+    done < <(client_effective_rows)
+    pending=$(revocation_pending_names | join_lines) || pending=''
+    if [[ -n $pending ]]; then out+=$'\n'"  $C_RED$S_WARN$C_RESET Revoked but NOT blocked yet: $(safe_text "$pending") $S_ARROW Maintenance $S_CRUMB 2"; fi
+    out+=$'\n'
+    emit "$out"
+}
+list_menu() {
+    list_clients
+    (( UI_TTY && LIST_HIDDEN > 0 )) || return 0
+    say
+    confirm_choice 'Show revoked clients too?' 'No, back to the menu' "Show $LIST_HIDDEN revoked" normal || no_pause
+    clear_screen
+    section 'Clients, including revoked'
+    LIST_ALL=1
+    list_clients
+}
+name_reuse_block_reason() {
+    # Why a name already in the CA history cannot get a new certificate; empty when it safely can.
+    # OpenVPN rejects the old certificate by serial, so the old one must be proven blocked first.
+    local name=$1 state serial file
+    state=$(client_index_status "$name")
+    case $state in
+        V|AMBIGUOUS) printf 'it still has a valid certificate.\n'; return 0 ;;
+    esac
+    serial=$(client_index_serial "$name")
+    if [[ -n $serial ]] && is_server_serial "$serial"; then printf 'it belongs to the server certificate.\n'; return 0; fi
+    if ! darban_verify_crl "$DARBAN_CRL" >/dev/null 2>&1; then printf 'the published CRL has a problem; fix it first: Maintenance %s 2.\n' "$S_CRUMB"; return 0; fi
+    if [[ -n $(revoked_with_profile | grep -Fx -- "$name") ]]; then printf 'its revocation is unfinished; finish it first: Maintenance %s 2.\n' "$S_CRUMB"; return 0; fi
+    # Each of these would make Easy-RSA refuse, or would pair the new certificate with an old file.
+    for file in "issued/$name.crt" "private/$name.key" "reqs/$name.req"; do
+        if [[ -e $DARBAN_PKI/$file ]]; then printf 'pki/%s is still there.\n' "$file"; return 0; fi
+    done
+    if [[ -e $OUT_DIR/$name.ovpn ]]; then printf '%s is still there.\n' "$OUT_DIR/$name.ovpn"; fi
+}
+client_settings_file() {
+    # The per-client server settings OpenVPN would apply to this name (fixed IP, routes), if any.
+    local dir
+    dir=$(darban_conf_single client-config-dir 2>/dev/null) || return 1
+    dir=$(darban_conf_path "$dir")
+    [[ -f $dir/$1 ]] || return 1
+    printf '%s\n' "$dir/$1"
+}
+confirm_name_reuse() {
+    # The old certificate is already proven blocked, so reusing the name is routine. The one thing
+    # that silently carries over is the per-client server configuration, and only that is asked about.
+    local name=$1 file
+    if ! file=$(client_settings_file "$name"); then
+        info "\"$name\" was revoked before. Its old .ovpn files stay blocked; only the new file will connect."
+        return 0
+    fi
+    say
+    warn "Server settings for this name exist in $file and will apply to the new certificate."
+    confirm_choice "Issue a new certificate for $name with those settings?" 'No, choose another name' 'Yes, issue it' caution "$name"
+}
+create_client() {
+    local name similar reason reused=0 rc=0
+    profile_preconditions || return 1
+    info 'Allowed: letters, digits, _ and - (max 64), e.g. ali-laptop.'
+    say
+    while :; do
+        prompt_valid 'New client name (Enter = cancel): ' valid_name \
+            'Use 1-64 letters, digits, _ or -, starting with a letter or digit (not "server").' || return 0
+        name=$REPLY
+        reused=0
+        if name_taken "$name"; then
+            reason=$(name_reuse_block_reason "$name")
+            if [[ -n $reason ]]; then
+                warn "\"$name\" cannot be used: $reason"
+                continue
+            fi
+            confirm_name_reuse "$name" || { say; continue; }
+            reused=1
+        fi
+        break
+    done
+    similar=$(similar_names "$name")
+    if [[ -n $similar ]]; then
+        warn "Existing name(s) differing only in letter case: $similar"
+        confirm_choice "Create \"$name\" anyway?" 'No, do not create it' "Create $name" caution || { cancelled; return 0; }
+    fi
+    info "Issuing a certificate and unencrypted private key for $name${S_ELL}"
+    critical_begin
+    if [[ -n $CLIENT_CERT_DAYS ]]; then
+        EASYRSA_CERT_EXPIRE=$CLIENT_CERT_DAYS run_easyrsa build-client-full "$name" nopass || rc=$?
+    else
+        run_easyrsa build-client-full "$name" nopass || rc=$?
+    fi
+    critical_end
+    if (( rc != 0 )); then fail 'Certificate issuance failed. Inspect the PKI state before trying again.'; return 1; fi
+    if (( reused )); then audit "client created again with a used name: $name"; else audit "client created: $name"; fi
+    info "Building the .ovpn profile${S_ELL}"
+    if ! write_profile "$name" no; then
+        fail 'The certificate was issued but the .ovpn export failed. Use Share (menu 4) instead of creating it again.'; return 1
+    fi
+    say
+    if (( ! UI_TTY )); then
+        # A script has nobody to answer the sharing questions.
+        download_panel "$OUT_DIR/$name.ovpn" "Client \"$name\" created and verified"
+        no_pause
+    fi
+    ok "Client \"$name\" created and verified"
+    say
+    share_client "$name"
+    pause
+    no_pause
+}
+# ---------- sharing ----------
+share_profile() {
+    profile_preconditions || return 1
+    pick_client 'Share which client?' can_reexport export_block_reason || return 0
+    write_profile "$PICKED" yes || return 1
+    audit "profile rebuilt: $PICKED"
+    clear_screen
+    share_client "$PICKED"
+}
+share_client() {
+    # share_client <name>: asks how the profile travels and shows only that method.
+    local name=$1 method
+    choose_one "How will $name get this profile?" \
+        'Temporary link: send it to the user' \
+        'QR code: scan it with the phone' \
+        'My own computer: scp or sftp command' \
+        'Later: keep it on the server for now' || CHOSEN=4
+    method=$CHOSEN
+    if (( method == 4 )); then
+        info "Kept on the server: $OUT_DIR/$name.ovpn. Share it from menu 4, or delete it from menu 6."
+        return 0
+    fi
+    say
+    choose_profile_password
+    if [[ -n $PROFILE_PASSWORD ]]; then write_profile "$name" yes || return 1; fi
+    say
+    case $method in
+        1) share_by_link "$name" no ;;
+        2) share_by_link "$name" yes ;;
+        3) share_by_download "$name" ;;
+    esac
+    if [[ -n $PROFILE_PASSWORD ]]; then
+        say
+        printf '%sProfile password, shown only now. Send it another way than the file or link:%s\n' "$C_BOLD" "$C_RESET" || true
+        printf '%s\n' "$PROFILE_PASSWORD" || true
+    fi
+}
+choose_profile_password() {
+    PROFILE_PASSWORD=''
+    if confirm_choice 'Lock the private key with a password?' 'No password' 'Yes, make a password' normal; then
+        PROFILE_PASSWORD=$(openssl rand -base64 48 | tr -dc 'A-Za-z0-9' | cut -c1-20)
+        (( ${#PROFILE_PASSWORD} >= 16 )) || { fail 'Could not create a password.'; return 1; }
+    fi
+}
+share_by_download() {
+    local name=$1 only
+    choose_one 'Where will you download it?' 'Windows (PowerShell)' 'macOS or Linux' 'WinSCP or FileZilla (SFTP)' || CHOSEN=1
+    case $CHOSEN in 1) only=windows ;; 2) only=unix ;; *) only=sftp ;; esac
+    say
+    download_panel "$OUT_DIR/$name.ovpn" "Profile for \"$name\" rebuilt" "$only"
+    offer_delete_copy "$OUT_DIR/$name.ovpn"
+}
+tcp_port_open() { timeout 1 bash -c 'exec 3<>"/dev/tcp/127.0.0.1/$0"' "$1" 2>/dev/null; }
+choose_link_port() {
+    # The first free one is remembered, so links keep working on a port the firewall already allows.
+    local candidate
+    if [[ -n $LINK_PORT ]]; then return 0; fi
+    for candidate in 443 8443 9443; do
+        if ! tcp_port_open "$candidate"; then
+            LINK_PORT=$candidate
+            save_config || warn 'Could not save the link port.'
+            return 0
+        fi
+    done
+    fail 'Ports 443, 8443 and 9443 are all in use. Choose one: Settings > Advanced > Share link port.'
+    return 1
+}
+host_is_ip() { [[ $1 =~ ^[0-9.]+$ ]]; }
+link_cert_usable() {
+    # Valid for at least another day, and for the address clients will open.
+    local host=$1 check
+    [[ -s $LINK_CERT && -s $LINK_KEY ]] || return 1
+    openssl x509 -in "$LINK_CERT" -noout -checkend 86400 >/dev/null 2>&1 || return 1
+    if host_is_ip "$host"; then check=-checkip; else check=-checkhost; fi
+    openssl x509 -in "$LINK_CERT" -noout "$check" "$host" 2>/dev/null | grep -q 'does match'
+}
+link_cert_is_trusted() { [[ -L $LINK_CERT ]]; }
+get_trusted_cert() {
+    # Let's Encrypt, for a hostname only. It needs TCP 80 from the internet for a moment.
+    local host=$1 marker=$CONFIG_DIR/.server-setup-started
+    say
+    info "A trusted certificate for $host avoids a browser warning, and is needed for the app to import from the link."
+    info 'It uses certbot from Ubuntu and needs TCP port 80 open and free for a moment. Choosing yes accepts the Let'"'"'s Encrypt subscriber agreement.'
+    confirm_choice 'Get a free Let'"'"'s Encrypt certificate?' 'No, use a self-signed certificate' 'Yes, get a certificate' normal || return 1
+    if tcp_port_open 80; then warn 'TCP port 80 is in use, so certbot cannot answer on it.'; return 1; fi
+    if ! command -v certbot >/dev/null; then
+        info "Installing certbot${S_ELL}"
+        apt-get -o DPkg::Lock::Timeout=120 -y -q --no-install-recommends install certbot >/dev/null || { warn 'Could not install certbot.'; return 1; }
+        if [[ -e $marker ]]; then printf 'package certbot\ncertbot_cert darban\n' >>"$marker" || true; fi
+    fi
+    info "Requesting a certificate for $host${S_ELL}"
+    certbot certonly --standalone --non-interactive --agree-tos --register-unsafely-without-email --cert-name darban -d "$host" \
+        --deploy-hook 'systemctl try-restart darban-links.service' >/dev/null 2>&1 || {
+        warn 'certbot could not get a certificate. Check that the DNS record points here and TCP 80 is open in the provider firewall.'
+        return 1
+    }
+    rm -f -- "$LINK_CERT" "$LINK_KEY"
+    ln -s /etc/letsencrypt/live/darban/fullchain.pem "$LINK_CERT"
+    ln -s /etc/letsencrypt/live/darban/privkey.pem "$LINK_KEY"
+    ok 'Trusted certificate installed.'
+}
+make_self_signed_cert() {
+    local host=$1 san
+    if host_is_ip "$host"; then san=IP:$host; else san=DNS:$host; fi
+    rm -f -- "$LINK_CERT" "$LINK_KEY"
+    openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes -keyout "$LINK_KEY" -out "$LINK_CERT" -days 90 \
+        -subj "/CN=$host" -addext "subjectAltName=$san" >/dev/null 2>&1 || { fail 'Could not create a certificate for the link.'; return 1; }
+    chmod 600 "$LINK_KEY" "$LINK_CERT"
+}
+ensure_link_cert() {
+    local host=$1
+    if link_cert_usable "$host"; then return 0; fi
+    if ! host_is_ip "$host" && get_trusted_cert "$host"; then return 0; fi
+    make_self_signed_cert "$host"
+}
+start_link_service() {
+    local attempt
+    printf 'LINK_HOST=%s\nLINK_PORT=%s\n' "$1" "$LINK_PORT" >"$LINK_ENV" || return 1
+    chmod 600 "$LINK_ENV" || return 1
+    systemctl restart darban-links.service || return 1
+    for attempt in 1 2 3 4 5 6; do
+        if tcp_port_open "$LINK_PORT"; then return 0; fi
+        sleep 0.5
+    done
+    return 1
+}
+remove_links_for() {
+    # A revoked client must not stay reachable through a link that is still open.
+    local meta
+    [[ -d $LINK_DIR ]] || return 0
+    for meta in "$LINK_DIR"/*.meta; do
+        [[ -e $meta ]] || continue
+        if grep -qx "name=$1" "$meta"; then rm -f -- "$meta" "${meta%.meta}.ovpn"; fi
+    done
+}
+share_by_link() {
+    local name=$1 want_qr=$2 host minutes label token key now expires url temp
+    command -v python3 >/dev/null || { fail 'python3 is needed for temporary links. Install it: apt install python3'; return 1; }
+    host=$(domain)
+    valid_endpoint_for_link "$host" || { warn "Set the VPN hostname first: Settings $S_CRUMB 1."; return 1; }
+    choose_one 'How long should the link work?' '1 hour' '15 minutes' '24 hours' || CHOSEN=1
+    case $CHOSEN in
+        2) minutes=15 label='15 minutes' ;;
+        3) minutes=1440 label='24 hours' ;;
+        *) minutes=60 label='1 hour' ;;
+    esac
+    choose_link_port || return 1
+    ensure_link_cert "$host" || return 1
+    install -d -m 700 "$LINK_DIR" || return 1
+    token=$(openssl rand -hex 32) || return 1
+    key=$(printf '%s' "$token" | sha256sum | awk '{print $1}')
+    now=$(date -u +%s)
+    expires=$(( now + minutes * 60 ))
+    install -m 600 "$OUT_DIR/$name.ovpn" "$LINK_DIR/$key.ovpn" || return 1
+    # The .meta file appears last: until then, the link does not exist for the server.
+    temp=$LINK_DIR/$key.tmp
+    printf 'name=%s\nexpires=%s\ncreated=%s\nstate=waiting\nuses=1\n' "$name" "$expires" "$now" >"$temp" || return 1
+    mv -f -- "$temp" "$LINK_DIR/$key.meta" || return 1
+    if ! start_link_service "$host"; then
+        rm -f -- "$LINK_DIR/$key.meta" "$LINK_DIR/$key.ovpn"
+        fail "The link service did not start on TCP $LINK_PORT. Check: journalctl -u darban-links.service -n 30 --no-pager"
+        return 1
+    fi
+    # The link holds its own copy, so nothing stays behind in the download folder.
+    rm -f -- "$OUT_DIR/$name.ovpn"
+    audit "temporary link created: $name, valid for $label"
+    url=https://$host
+    if [[ $LINK_PORT != 443 ]]; then url+=:$LINK_PORT; fi
+    url+=/l/$token
+    ok "Temporary link for \"$name\""
+    hr
+    kv Valid "$label, one person, one time"
+    kv Cancel 'menu 5'
+    say
+    printf '%s\n' "$url" || true
+    say
+    if [[ $want_qr == yes ]]; then show_qr "$url"; fi
+    warn "TCP $LINK_PORT must be open in your provider firewall."
+    if ! link_cert_is_trusted; then
+        warn 'The certificate is self-signed: the browser shows a warning, and importing directly into the app may not work; use the download button.'
+        info "Certificate fingerprint: $(openssl x509 -in "$LINK_CERT" -noout -fingerprint -sha256 | sed 's/^.*=//')"
+    fi
+    info 'Anyone with this link can get this profile. If the user finds it already used, revoke the client and issue a new one.'
+    hr
+}
+valid_endpoint_for_link() { [[ -n $1 ]] && { valid_ipv4 "$1" || valid_domain "$1"; }; }
+show_qr() {
+    local marker=$CONFIG_DIR/.server-setup-started
+    if ! command -v qrencode >/dev/null; then
+        if confirm_choice 'The small qrencode package is needed to draw the QR code. Install it?' 'No, just show the link' 'Install qrencode' normal; then
+            apt-get -o DPkg::Lock::Timeout=120 -y -q --no-install-recommends install qrencode >/dev/null || warn 'Could not install qrencode.'
+            if command -v qrencode >/dev/null && [[ -e $marker ]]; then printf 'package qrencode\n' >>"$marker" || true; fi
+        fi
+    fi
+    if command -v qrencode >/dev/null; then
+        qrencode -t ANSIUTF8 "$1" || warn 'Could not draw the QR code; use the link above.'
+        say
+    fi
+}
+active_links() {
+    local meta name state expires now minutes i
+    local -a files=()
+    now=$(date -u +%s)
+    if [[ -d $LINK_DIR ]]; then
+        for meta in "$LINK_DIR"/*.meta; do
+            [[ -e $meta ]] || continue
+            expires=$(awk -F= '$1=="expires" {print $2}' "$meta")
+            if [[ ! $expires =~ ^[0-9]+$ ]] || (( expires <= now )); then
+                rm -f -- "$meta" "${meta%.meta}.ovpn"
+                continue
+            fi
+            files+=("$meta")
+        done
+    fi
+    if (( ${#files[@]} == 0 )); then info 'No active links. Create one from menu 4.'; return 0; fi
+    printf '  %s%3s  %-24s %-10s %s%s\n' "$C_BOLD" '' CLIENT STATUS 'TIME LEFT' "$C_RESET"
+    for i in "${!files[@]}"; do
+        name=$(awk -F= '$1=="name" {print $2}' "${files[i]}")
+        state=$(awk -F= '$1=="state" {print $2}' "${files[i]}")
+        expires=$(awk -F= '$1=="expires" {print $2}' "${files[i]}")
+        minutes=$(( (expires - now + 59) / 60 ))
+        if [[ $state == waiting ]]; then state='not opened'; else state=opened; fi
+        printf '  %s%3d%s  %-24s %-10s %d min\n' "$C_CYAN" $((i + 1)) "$C_RESET" "$(safe_text "$name")" "$state" "$minutes"
+    done
+    say
+    while :; do
+        if ! ask 'Number to cancel (Enter = back): ' || [[ -z $REPLY ]]; then return 0; fi
+        if [[ $REPLY =~ ^[0-9]+$ ]] && (( 10#$REPLY >= 1 && 10#$REPLY <= ${#files[@]} )); then
+            meta=${files[10#$REPLY - 1]}
+            name=$(awk -F= '$1=="name" {print $2}' "$meta")
+            rm -f -- "$meta" "${meta%.meta}.ovpn"
+            audit "temporary link cancelled: $name"
+            ok "Link for \"$(safe_text "$name")\" cancelled."
+            return 0
+        fi
+        warn "\"$REPLY\" is not in the list above."
+    done
+}
+delete_export() {
+    local path
+    pick_client 'Delete the server-side .ovpn copy of which client?' can_delete_export || return 0
+    path=$OUT_DIR/$PICKED.ovpn
+    info 'The certificate stays valid and the profile can be re-exported later.'
+    info 'Copies already downloaded to devices are not affected.'
+    confirm_choice "Delete $path?" 'No, keep it' 'Delete the server copy' danger || { cancelled; return 0; }
+    rm -f -- "$path"
+    audit "profile deleted from server: $path"
+    ok "Deleted: $path"
+}
+run_easyrsa() {
+    # Easy-RSA's own notices (e.g. "now run gen-crl") contradict the automated flow and bury the
+    # result, so its output is kept out of sight and shown only when it fails.
+    local log rc=0
+    log=$(mktemp "${TMPDIR:-/tmp}/darban-easyrsa.XXXXXXXX") || return 1
+    darban_tmp_register "$log"
+    env EASYRSA_PKI="$DARBAN_PKI" EASYRSA_BATCH=1 "$DARBAN_EASYRSA" "$@" </dev/null >"$log" 2>&1 || rc=$?
+    if (( rc != 0 )); then
+        fail "Easy-RSA '$1' failed (status $rc). Its output:"
+        sed 's/^/    /' "$log" >&2 || true
+    fi
+    rm -f -- "$log"
+    return "$rc"
+}
+mgmt_kill_client() {
+    # Disconnect one CN through a password-less management interface on localhost TCP or a
+    # unix socket. Returns 0 = killed, 3 = no such session, 2 = no usable interface, 1 = failed.
+    local name=$1 spec addr port extra reply
+    spec=$(awk '$1=="management" {n++; s=$2 "\t" $3 "\t" $4} END {if(n==1) print s}' "$DARBAN_SERVER_CONF")
+    [[ -n $spec ]] || return 2
+    IFS=$'\t' read -r addr port extra <<<"$spec"
+    [[ -z $extra ]] || return 2
+    if [[ $port == unix ]]; then
+        addr=$(darban_conf_path "$addr")
+        command -v socat >/dev/null && [[ -S $addr ]] || return 2
+        reply=$(printf 'kill %s\nquit\n' "$name" | timeout 10 socat -t 2 - "UNIX-CONNECT:$addr" 2>/dev/null) || return 1
+    else
+        [[ $addr == 127.0.0.1 || $addr == localhost || $addr == ::1 ]] && [[ $port =~ ^[0-9]+$ ]] || return 2
+        reply=$(timeout 10 bash -c 'exec 3<>"/dev/tcp/$1/$2" && printf "kill %s\nquit\n" "$3" >&3 && cat <&3' _ "$addr" "$port" "$name" 2>/dev/null) || return 1
+    fi
+    [[ $reply == *"SUCCESS: common name '$name' found"* ]] && return 0
+    [[ $reply == *"ERROR: common name '$name' not found"* ]] && return 3
+    printf '%s\n' "$reply" >&2 || true
+    return 1
+}
+mgmt_available() { [[ -n $(awk '$1=="management" && NF==3 {print}' "$DARBAN_SERVER_CONF") ]]; }
+disconnect_revoked() {
+    local name=$1 rc=0
+    # One restart already ended every session, including those of the other names being repaired.
+    if (( SESSIONS_RESTARTED )); then return 0; fi
+    if ! valid_existing_name "$name"; then info "Cannot address $(safe_text "$name") through the management interface."; return 0; fi
+    if ! systemctl is-active --quiet "$DARBAN_UNIT"; then warn "OpenVPN service is not active; review its status (Maintenance $S_CRUMB 1)."; return 0; fi
+    info "Disconnecting any active session of $name${S_ELL}"
+    mgmt_kill_client "$name" || rc=$?
+    case $rc in
+        0) ok "Active session of $name disconnected (other users were not affected)."; audit "session disconnected: $name"; return 0 ;;
+        3) ok "$name has no active VPN session."; return 0 ;;
+        1) warn 'The management interface did not confirm the disconnect.' ;;
+        *) info "Single-client disconnect is unavailable (add 'management 127.0.0.1 7505' to server.conf to enable it)." ;;
+    esac
+    say
+    info "$name cannot start new connections. A session already open may last until it renegotiates (up to 1 hour)."
+    if confirm_choice 'Restart OpenVPN now to end it? This drops ALL connected VPN users for a few seconds.' 'No, do not restart' 'Restart OpenVPN' caution; then
+        info "Restarting OpenVPN${S_ELL}"
+        if systemctl restart "$DARBAN_UNIT" && systemctl is-active --quiet "$DARBAN_UNIT"; then
+            ok 'OpenVPN restarted.'
+            SESSIONS_RESTARTED=1
+            audit "OpenVPN restarted to drop revoked client: $name"
+        else
+            urgent 'OpenVPN restart FAILED. The CRL is published; check: journalctl -u openvpn-server@server'
+        fi
+    else
+        info 'Not restarted.'
+    fi
+}
+generate_and_publish_crl() {
+    # generate_and_publish_crl [serial that must be listed]. On failure the previous CRL stays active.
+    local must_list=${1:-}
+    info "Generating and verifying a new CRL${S_ELL}"
+    run_easyrsa gen-crl || { urgent 'CRL generation failed; the previous CRL stays active.'; return 1; }
+    darban_verify_crl "$DARBAN_PKI/crl.pem" || { urgent 'The new CRL is invalid or incomplete; it was not published.'; return 1; }
+    if [[ -n $must_list ]] && ! darban_crl_has_serial "$DARBAN_PKI/crl.pem" "$must_list"; then
+        urgent 'The new CRL omits this client; it was not published.'; return 1
+    fi
+    darban_publish_crl "$DARBAN_PKI/crl.pem" || { urgent 'The CRL was not published; the previous CRL stays active.'; return 1; }
+    ok 'New CRL published to OpenVPN and verified.'
+}
+revoke_and_publish() {
+    local name=$1 client_serial=$2
+    info "Revoking the certificate${S_ELL}"
+    run_easyrsa revoke "$name" || { fail 'Easy-RSA revoke failed. Review the CA index before any retry.'; return 1; }
+    [[ $(index_state_of_serial "$client_serial") == R ]] || {
+        urgent 'The CA index did not mark the certificate revoked. Manual investigation required.'; return 1;
+    }
+    ok 'Marked revoked in the CA index.'
+    audit "client revoked in the CA: $name (serial $client_serial)"
+    generate_and_publish_crl "$client_serial" || {
+        urgent "$name is revoked in the CA, but OpenVPN can still accept it. Do NOT assume it is blocked."
+        info "After fixing the cause, finish this revocation: Maintenance $S_CRUMB 2, or: sudo darban repair-crl"
+        audit "CRL not published after revoking: $name"
+        return 1
+    }
+}
+repair_crl() {
+    # Finishes whatever an interrupted revocation left: the index and published files show what is
+    # missing, so there is no separate state to get out of step with them.
+    local pending leftovers name path publish=0 rc=0
+    local -a targets=() leftover_names=()
+    darban_crl_configured || { warn "server.conf lacks a single 'crl-verify $DARBAN_CRL'; OpenVPN would ignore a CRL. Fix the server first."; return 1; }
+    pending=$(revocation_pending_names) || { fail 'Could not read the CA index.'; return 1; }
+    leftovers=$(revoked_with_profile) || { fail 'Could not read the CA index.'; return 1; }
+    if ! darban_verify_crl "$DARBAN_CRL"; then publish=1; fi
+    if [[ -n $pending ]]; then publish=1; fi
+    if (( ! publish )) && [[ -z $leftovers ]]; then
+        ok 'The CRL is healthy and no revocation is unfinished. Nothing to repair.'
+        return 0
+    fi
+    if (( publish )); then
+        critical_begin
+        generate_and_publish_crl || rc=$?
+        critical_end
+        if (( rc != 0 )); then
+            fail 'Repair failed; see the reason above. Nothing else was changed.'
+            audit 'CRL repair failed'
+            return 1
+        fi
+        audit 'CRL repaired and republished'
+    fi
+    if [[ -n $leftovers ]]; then mapfile -t leftover_names <<<"$leftovers"; fi
+    for name in "${leftover_names[@]}"; do
+        path=$OUT_DIR/$name.ovpn
+        if rm -f -- "$path"; then
+            ok "Server copy deleted: $path"
+            audit "profile deleted from server: $path"
+        else
+            warn "Could not delete the server copy: $path"
+        fi
+    done
+    # Read into an array first: the prompts in disconnect_revoked must read the terminal, not this list.
+    mapfile -t targets < <(printf '%s\n' "$pending" "$leftovers" | awk 'NF' | sort -u)
+    for name in "${targets[@]}"; do disconnect_revoked "$name"; done
+    say
+    if (( publish )); then ok 'The CRL is repaired.'; else ok 'The unfinished revocation is complete.'; fi
+}
+revoke_client() {
+    local name state client_serial db_serial path pending unknown rc=0
+    pending=$(revocation_pending_names | join_lines) || pending=''
+    if [[ -n $pending ]]; then
+        urgent "Revoked but NOT blocked yet: $(safe_text "$pending"). Finish this first: Maintenance $S_CRUMB 2, or: sudo darban repair-crl"
+        say
+    fi
+    pick_client 'Revoke which client?' can_revoke revoke_block_reason || return 0
+    name=$PICKED
+    state=$(client_index_status "$name")
+    [[ $state == V ]] || { warn "Client is not uniquely valid: ${state:-not found}"; return 1; }
+    client_cert_safe "$name" || {
+        warn 'Refused: this is the OpenVPN server certificate or a certificate usable for server authentication.'; return 1;
+    }
+    darban_crl_configured || { warn "server.conf lacks a single 'crl-verify $DARBAN_CRL'; revocation would not be enforced. Fix the server first."; return 1; }
+    # Publishing would be refused after the permanent step, so a rolled-back database stops it here.
+    if darban_crl_signature_ok "$DARBAN_CRL"; then
+        unknown=$(darban_crl_unknown_serials "$DARBAN_CRL") || { fail 'Could not compare the CA database with the published CRL. No changes made.'; return 1; }
+        if [[ -n $unknown ]]; then fail "No changes made. $(darban_rollback_hint)"; return 1; fi
+    fi
+    # A broken CRL must not block an emergency revocation: a complete new CRL is generated and verified below.
+    if ! darban_verify_crl "$DARBAN_CRL"; then
+        warn 'The published CRL is currently unhealthy; this revocation will replace it with a freshly generated, fully verified CRL.'
+    fi
+    client_serial=$(openssl x509 -in "$DARBAN_PKI/issued/$name.crt" -noout -serial | sed 's/^serial=//') || return 1
+    db_serial=$(client_index_serial "$name")
+    [[ $(darban_norm_serial "$client_serial") == "$(darban_norm_serial "$db_serial")" ]] || {
+        warn 'Client certificate serial does not match the CA index. No changes made.'; return 1;
+    }
+    say
+    printf '%sRevoking %s is PERMANENT:%s\n' "$C_BOLD" "$name" "$C_RESET"
+    bullet 'every copy of its .ovpn profile stops working for new connections'
+    bullet 'this certificate can never be restored; only a new one can be issued later'
+    bullet 'the server-side copy is deleted; copies on devices cannot be deleted remotely'
+    say
+    confirm_choice "Revoke $name permanently?" 'No, keep this client' "Revoke $name" danger "$name" || { cancelled; return 0; }
+    say
+    critical_begin
+    revoke_and_publish "$name" "$client_serial" || rc=$?
+    critical_end
+    remove_links_for "$name"
+    (( rc == 0 )) || return 1
+    if path=$(profile_path "$name"); then
+        if rm -f -- "$path"; then ok "Server copy deleted: $path"; else warn 'Could not delete the server copy; the revocation still succeeded.'; fi
+    fi
+    disconnect_revoked "$name"
+    say
+    ok "$name is revoked."
+}
+port_listening() {
+    # UDP socket existence plus separate systemd active check below; provider firewall must be tested externally.
+    [[ -n $(ss -H -lun "sport = :$1" 2>/dev/null) ]]
+}
+wait_for_port() {
+    local port=$1 attempt
+    for attempt in 1 2 3 4 5; do
+        if systemctl is-active --quiet "$DARBAN_UNIT" && port_listening "$port"; then return 0; fi
+        sleep 1
+    done
+    return 1
+}
+host_firewall_check() {
+    # Read-only hint: the manager never edits host firewall rules.
+    local old=$1 new=$2 status rules
+    if command -v ufw >/dev/null && status=$(ufw status 2>/dev/null) && [[ $status == *'Status: active'* ]]; then
+        if ! grep -Eq "^$new(/udp)?[[:space:]]" <<<"$status"; then
+            warn "ufw is active and has no rule for $new/udp (ufw allow $new/udp)."
+        fi
+    fi
+    if command -v nft >/dev/null && rules=$(nft list ruleset 2>/dev/null); then
+        if grep -Eq "dport[^;]*\\b$old\\b" <<<"$rules" && ! grep -Eq "dport[^;]*\\b$new\\b" <<<"$rules"; then
+            warn "Host nftables rules reference port $old but not $new; traffic to the new port may be filtered or not forwarded."
+        fi
+    fi
+}
+apply_port_change() {
+    local old=$1 new=$2 backup=$3 temp
+    temp=$(mktemp "$DARBAN_SERVER_DIR/.darban-serverconf.XXXXXXXX") || return 1
+    darban_tmp_register "$temp"
+    if ! awk -v p="$new" '$1=="port" {$0="port "p} {print}' "$DARBAN_SERVER_CONF" >"$temp"; then
+        rm -f -- "$temp"
+        fail 'Failed to write server.conf; the original is unchanged.'
+        return 1
+    fi
+    apply_server_conf "$temp" "$old" "$new" "$backup"
+}
+apply_server_conf() {
+    # Puts a prepared file in place of server.conf, restarts OpenVPN, and restores the backup if it does not
+    # come back. Returns 0 = applied, 1 = the previous configuration is running again, 2 = the rollback failed.
+    local temp=$1 old=$2 new=$3 backup=$4
+    if ! chmod --reference="$DARBAN_SERVER_CONF" "$temp" || ! chown --reference="$DARBAN_SERVER_CONF" "$temp" ||
+       ! mv -f -- "$temp" "$DARBAN_SERVER_CONF"; then
+        rm -f -- "$temp"
+        fail 'Failed to write server.conf; the original is unchanged.'
+        return 1
+    fi
+    ok "server.conf updated (backup: $backup)."
+    info "Restarting OpenVPN and waiting for UDP $new (up to 5 seconds)${S_ELL}"
+    if ! systemctl restart "$DARBAN_UNIT" || ! wait_for_port "$new"; then
+        warn "OpenVPN did not come up on UDP $new. Restoring the previous server.conf${S_ELL}"
+        cp -a -- "$backup" "$DARBAN_SERVER_CONF" || { urgent "Could not restore server.conf from $backup."; return 2; }
+        if systemctl restart "$DARBAN_UNIT" && wait_for_port "$old"; then
+            ok "Rolled back: OpenVPN is listening on UDP $old with the previous configuration."
+            audit "server.conf change failed; rolled back (UDP $old)"
+        else
+            urgent 'Rollback restart or the previous UDP listener FAILED. Check the OpenVPN service immediately.'
+            return 2
+        fi
+        return 1
+    fi
+}
+prune_port_backups() {
+    # Timestamped names sort chronologically; keep only the newest few.
+    local excess
+    local -a backups
+    mapfile -t backups < <(find "$DARBAN_SERVER_DIR" -maxdepth 1 -type f -name "${DARBAN_SERVER_CONF##*/}.darban-*backup.*" -print | sort)
+    excess=$(( ${#backups[@]} - PORT_BACKUPS_KEPT ))
+    (( excess > 0 )) || return 0
+    rm -f -- "${backups[@]:0:excess}"
+}
+change_port() {
+    local old new backup rc=0
+    old=$(server_port) || { warn 'Expected exactly one port directive in server.conf.'; return 1; }
+    server_proto_ok || { warn 'Only udp4 OpenVPN servers are supported.'; return 1; }
+    systemctl is-active --quiet "$DARBAN_UNIT" || { warn 'OpenVPN service is not active. Refusing to change port.'; return 1; }
+    kv Current "$old/UDP"
+    say
+    while :; do
+        prompt_valid 'New UDP port, 1024-65535 (Enter = cancel): ' valid_port 'Enter a number from 1024 to 65535.' || return 0
+        new=$((10#$REPLY))
+        if [[ $new == "$old" ]]; then info 'Same as the current port; nothing changed.'; return 0; fi
+        if port_listening "$new"; then warn "UDP $new is already used by another program. Choose another port."; continue; fi
+        break
+    done
+    host_firewall_check "$old" "$new"
+    say
+    printf '%sWhat happens next:%s\n' "$C_BOLD" "$C_RESET"
+    bullet 'OpenVPN restarts: all VPN users are disconnected for a few seconds'
+    bullet "if UDP $new is not up within 5 seconds, the previous configuration is restored"
+    bullet 'every downloaded .ovpn must be shared again (menu 4)'
+    warn "Open UDP $new in your provider firewall BEFORE continuing; this tool cannot check it."
+    say
+    confirm_choice "Apply UDP port $new now?" 'No, keep the current port' "Apply port $new" caution "$new" || { cancelled; return 0; }
+    backup="$DARBAN_SERVER_CONF.darban-backup.$(date -u +%Y%m%dT%H%M%S.%N)"
+    cp -a -- "$DARBAN_SERVER_CONF" "$backup" || return 1
+    critical_begin
+    apply_port_change "$old" "$new" "$backup" || rc=$?
+    critical_end
+    if (( rc == 2 )); then fail "The rollback did not finish, so the service may be down. server.conf now has: $(server_port 2>/dev/null || printf 'no single port')"; return 1; fi
+    if (( rc != 0 )); then fail "The port was NOT changed."; return 1; fi
+    prune_port_backups || warn 'Could not prune old server.conf port backups.'
+    audit "OpenVPN port changed: $old -> $new"
+    say
+    ok "OpenVPN is running and listening on UDP $new."
+    info 'Test from a real remote client: local checks cannot prove the provider firewall lets traffic through.'
+    info 'Share profiles again (menu 4) so clients use the new port.'
+}
+# ---------- advanced settings ----------
+conf_value() { awk -v k="$1" '$1==k {$1=""; sub(/^ /,""); v=$0} END {print v}' "$DARBAN_SERVER_CONF"; }
+conf_full_tunnel() { grep -Eq '^[[:space:]]*push[[:space:]]+"redirect-gateway' "$DARBAN_SERVER_CONF"; }
+conf_dns() {
+    awk '$1=="push" && $2=="\"dhcp-option" && $3=="DNS" {gsub(/"/,"",$4); s = s (s == "" ? "" : " ") $4} END {print s}' "$DARBAN_SERVER_CONF"
+}
+conf_ready() {
+    # A change restarts the service, so it needs a healthy starting point and a known port to check.
+    server_port >/dev/null || { warn 'Expected exactly one port directive in server.conf.'; return 1; }
+    systemctl is-active --quiet "$DARBAN_UNIT" || { warn 'OpenVPN service is not active; fix that first (Maintenance).'; return 1; }
+}
+restart_notice() {
+    bullet 'OpenVPN restarts: connected users drop for a few seconds and reconnect by themselves'
+    bullet 'if it does not come back, the previous configuration is restored'
+}
+conf_apply() {
+    # conf_apply <description> <prepared file>: applies it with a backup, a restart and a rollback.
+    local description=$1 temp=$2 port backup rc=0
+    port=$(server_port) || return 1
+    backup="$DARBAN_SERVER_CONF.darban-backup.$(date -u +%Y%m%dT%H%M%S.%N)"
+    cp -a -- "$DARBAN_SERVER_CONF" "$backup" || return 1
+    critical_begin
+    apply_server_conf "$temp" "$port" "$port" "$backup" || rc=$?
+    critical_end
+    if (( rc == 2 )); then fail 'The rollback did not finish, so the service may be down.'; return 2; fi
+    if (( rc != 0 )); then fail 'Nothing was changed.'; return 1; fi
+    prune_port_backups || warn 'Could not prune old server.conf backups.'
+    audit "server.conf changed: $description"
+    ok "Applied: $description. OpenVPN is listening on UDP $port."
+}
+conf_set_directive() {
+    # conf_set_directive <key> <value> <output>: one line for the key, in its old place or at the end.
+    awk -v k="$1" -v v="$2" '$1==k {if (!done) print k " " v; done=1; next} {print} END {if (!done) print k " " v}' "$DARBAN_SERVER_CONF" >"$3"
+}
+new_conf_file() {
+    CONF_TEMP=$(mktemp "$DARBAN_SERVER_DIR/.darban-serverconf.XXXXXXXX") || return 1
+    darban_tmp_register "$CONF_TEMP"
+}
+set_routing() {
+    local dns item
+    conf_ready || return 1
+    if conf_full_tunnel; then
+        kv Current 'full tunnel: all client IPv4 traffic goes through the VPN'
+        say
+        restart_notice
+        bullet 'clients keep their own internet path and DNS'
+        say
+        confirm_choice 'Switch to split tunnel?' 'No, keep the full tunnel' 'Switch to split tunnel' caution split || { cancelled; return 0; }
+        new_conf_file || return 1
+        awk '!($1=="push" && ($2=="\"redirect-gateway" || ($2=="\"dhcp-option" && $3=="DNS")))' "$DARBAN_SERVER_CONF" >"$CONF_TEMP"
+        conf_apply 'split tunnel' "$CONF_TEMP"
+        return
+    fi
+    kv Current 'split tunnel: only traffic for the VPN network'
+    say
+    restart_notice
+    bullet "clients send all IPv4 traffic through this server; DNS: $DEFAULT_CLIENT_DNS unless already set"
+    warn 'The server must do NAT for the VPN network, or clients lose their internet.'
+    say
+    confirm_choice 'Switch to full tunnel?' 'No, keep the split tunnel' 'Switch to full tunnel' caution full || { cancelled; return 0; }
+    dns=$(conf_dns)
+    new_conf_file || return 1
+    cat -- "$DARBAN_SERVER_CONF" >"$CONF_TEMP"
+    printf 'push "redirect-gateway def1 bypass-dhcp"\n' >>"$CONF_TEMP"
+    if [[ -z $dns ]]; then
+        for item in $DEFAULT_CLIENT_DNS; do printf 'push "dhcp-option DNS %s"\n' "$item" >>"$CONF_TEMP"; done
+    fi
+    conf_apply 'full tunnel' "$CONF_TEMP"
+}
+set_dns() {
+    local item current DNS_LIST=''
+    conf_ready || return 1
+    if ! conf_full_tunnel; then
+        info 'In a split tunnel, clients keep their own DNS. Switch to the full tunnel first (item 1).'
+        return 0
+    fi
+    current=$(conf_dns)
+    kv Current "${current:-none pushed}"
+    say
+    prompt_valid 'New DNS servers, one or two IPv4 addresses (Enter = cancel): ' valid_dns 'Enter one or two IPv4 addresses, such as 1.1.1.1 8.8.8.8.' || return 0
+    if [[ $DNS_LIST == "$current" ]]; then info 'Same as the current DNS; nothing changed.'; return 0; fi
+    say
+    restart_notice
+    say
+    confirm_choice "Use $DNS_LIST for clients?" 'No, keep the current DNS' 'Apply and restart OpenVPN' caution "$DNS_LIST" || { cancelled; return 0; }
+    new_conf_file || return 1
+    awk '!($1=="push" && $2=="\"dhcp-option" && $3=="DNS")' "$DARBAN_SERVER_CONF" >"$CONF_TEMP"
+    for item in $DNS_LIST; do printf 'push "dhcp-option DNS %s"\n' "$item" >>"$CONF_TEMP"; done
+    conf_apply "DNS $DNS_LIST" "$CONF_TEMP"
+}
+set_vpn_network() {
+    local current mask candidate clash nat=$CONFIG_DIR/nat.nft nat_saved rc=0
+    conf_ready || return 1
+    read -r current mask < <(awk '$1=="server" {print $2, $3; exit}' "$DARBAN_SERVER_CONF") || true
+    if ! valid_ipv4 "${current:-}" || [[ ${mask:-} != 255.255.255.0 ]]; then
+        warn "This option works with a single 'server A.B.C.0 255.255.255.0' line in server.conf; this server has another layout."
+        return 1
+    fi
+    if [[ ! -f $nat ]]; then
+        warn "NAT on this server was not set up by this tool, so it cannot follow a new network. Change server.conf and NAT together by hand."
+        return 1
+    fi
+    kv Current "$current/24"
+    say
+    prompt_valid 'New VPN network, a private /24 ending in .0 (Enter = cancel): ' valid_subnet 'Enter a private network ending in .0, such as 10.9.0.0.' || return 0
+    candidate=$REPLY
+    if [[ $candidate == "$current" ]]; then info 'Same as the current network; nothing changed.'; return 0; fi
+    if clash=$(subnet_conflict "$candidate"); then warn "$candidate/24 overlaps the existing route $clash. Nothing changed."; return 1; fi
+    say
+    restart_notice
+    bullet 'clients get new VPN addresses when they reconnect; their .ovpn files stay valid'
+    if grep -Eq '^[[:space:]]*(client-config-dir|ifconfig-pool-persist)[[:space:]]' "$DARBAN_SERVER_CONF"; then
+        warn 'Fixed client addresses (client-config-dir, ifconfig-pool-persist) are not updated. Check them afterwards.'
+    fi
+    say
+    confirm_choice "Move the VPN to $candidate/24?" 'No, keep the current network' 'Apply and restart OpenVPN' caution "$candidate" || { cancelled; return 0; }
+    nat_saved=$(mktemp) || return 1
+    darban_tmp_register "$nat_saved"
+    cp -- "$nat" "$nat_saved" || return 1
+    sed -i "s#ip saddr [0-9.]*/24#ip saddr $candidate/24#" "$nat" || return 1
+    if ! nft -f "$nat"; then
+        cp -- "$nat_saved" "$nat" || true
+        fail 'Could not load the new NAT rule. Nothing was changed.'
+        return 1
+    fi
+    new_conf_file || return 1
+    conf_set_directive server "$candidate 255.255.255.0" "$CONF_TEMP"
+    conf_apply "VPN network $candidate/24" "$CONF_TEMP" || rc=$?
+    if (( rc != 0 )); then
+        cp -- "$nat_saved" "$nat" || true
+        nft -f "$nat" || urgent 'Could not restore the previous NAT rule. Check: nft list ruleset'
+        return 1
+    fi
+}
+valid_ciphers() {
+    # AEAD ciphers only: anything else would turn DCO off.
+    local item
+    local -a items
+    IFS=: read -r -a items <<<"$1"
+    (( ${#items[@]} > 0 )) || return 1
+    for item in "${items[@]}"; do
+        case $item in AES-128-GCM|AES-256-GCM|CHACHA20-POLY1305) ;; *) return 1 ;; esac
+    done
+}
+set_ciphers() {
+    local current
+    conf_ready || return 1
+    current=$(conf_value data-ciphers)
+    kv Current "${current:-OpenVPN default}"
+    info 'Allowed: AES-256-GCM, AES-128-GCM, CHACHA20-POLY1305. Others would turn off DCO.'
+    say
+    prompt_valid 'New list, separated by colons (Enter = cancel): ' valid_ciphers 'Use only the allowed names, separated by colons.' || return 0
+    if [[ $REPLY == "$current" ]]; then info 'Same as the current list; nothing changed.'; return 0; fi
+    local value=$REPLY
+    say
+    restart_notice
+    warn 'Clients whose .ovpn has no cipher in common with the new list cannot connect until shared again (menu 4).'
+    say
+    confirm_choice "Use $value?" 'No, keep the current ciphers' 'Apply and restart OpenVPN' caution "$value" || { cancelled; return 0; }
+    new_conf_file || return 1
+    conf_set_directive data-ciphers "$value" "$CONF_TEMP"
+    conf_apply "data ciphers $value" "$CONF_TEMP"
+}
+valid_keepalive() {
+    local interval timeout extra
+    read -r interval timeout extra <<<"$1"
+    [[ -z $extra && $interval =~ ^[0-9]{1,3}$ && $timeout =~ ^[0-9]{1,4}$ ]] || return 1
+    (( 10#$interval >= 1 && 10#$timeout >= 2 * 10#$interval ))
+}
+set_keepalive() {
+    local value
+    conf_ready || return 1
+    kv Current "$(conf_value keepalive)"
+    info 'Two numbers in seconds: how often to ping, and when to give up. The second must be at least twice the first.'
+    say
+    prompt_valid 'New keepalive, such as 10 60 (Enter = cancel): ' valid_keepalive 'Enter two numbers, such as 10 60; the second at least twice the first.' || return 0
+    value=$(printf '%s' "$REPLY" | awk '{print $1, $2}')
+    say
+    restart_notice
+    say
+    confirm_choice "Use keepalive $value?" 'No, keep the current value' 'Apply and restart OpenVPN' caution "$value" || { cancelled; return 0; }
+    new_conf_file || return 1
+    conf_set_directive keepalive "$value" "$CONF_TEMP"
+    conf_apply "keepalive $value" "$CONF_TEMP"
+}
+valid_verb() { [[ $1 =~ ^[0-9]$ ]] && (( $1 <= 6 )); }
+set_verb() {
+    local value
+    conf_ready || return 1
+    kv Current "$(conf_value verb)"
+    info '3 is normal. 4 or more shows more detail, can log private details, and is only for troubleshooting.'
+    say
+    prompt_valid 'New log detail, 0 to 6 (Enter = cancel): ' valid_verb 'Enter a number from 0 to 6.' || return 0
+    value=$REPLY
+    say
+    restart_notice
+    say
+    confirm_choice "Use log detail $value?" 'No, keep the current value' 'Apply and restart OpenVPN' caution "$value" || { cancelled; return 0; }
+    new_conf_file || return 1
+    conf_set_directive verb "$value" "$CONF_TEMP"
+    conf_apply "log detail $value" "$CONF_TEMP"
+}
+save_config() {
+    # Unknown lines are kept; only the settings this tool owns are rewritten.
+    local temp
+    temp=$(mktemp "$CONFIG_DIR/.config.XXXXXXXX") || return 1
+    darban_tmp_register "$temp"
+    if [[ -f $CONFIG_FILE ]]; then
+        awk -F= '$1!="DOWNLOAD_SSH_HOST" && $1!="DOWNLOAD_SSH_PORT" && $1!="DOWNLOAD_SSH_USER" && $1!="CLIENT_CERT_DAYS" && $1!="LINK_PORT" && $1!="UPDATE_CHECK"' "$CONFIG_FILE" >"$temp" || return 1
+    fi
+    printf 'DOWNLOAD_SSH_HOST=%s\nDOWNLOAD_SSH_PORT=%s\nDOWNLOAD_SSH_USER=%s\n' "$DOWNLOAD_SSH_HOST" "$DOWNLOAD_SSH_PORT" "$DOWNLOAD_SSH_USER" >>"$temp" || return 1
+    if [[ -n $CLIENT_CERT_DAYS ]]; then printf 'CLIENT_CERT_DAYS=%s\n' "$CLIENT_CERT_DAYS" >>"$temp" || return 1; fi
+    if [[ -n $LINK_PORT ]]; then printf 'LINK_PORT=%s\n' "$LINK_PORT" >>"$temp" || return 1; fi
+    if [[ $UPDATE_CHECK == no ]]; then printf 'UPDATE_CHECK=no\n' >>"$temp" || return 1; fi
+    chmod 600 "$temp" && mv -f -- "$temp" "$CONFIG_FILE"
+}
+valid_ssh_host() { valid_ipv4 "$1" || valid_domain "$1"; }
+valid_ssh_port() { [[ $1 =~ ^[0-9]{1,5}$ ]] && (( 10#$1 >= 1 && 10#$1 <= 65535 )); }
+valid_ssh_user() { [[ $1 =~ ^[a-z_][a-z0-9_-]{0,31}$ ]]; }
+set_download_access() {
+    local host=$DOWNLOAD_SSH_HOST port=$DOWNLOAD_SSH_PORT user=$DOWNLOAD_SSH_USER
+    info 'Only the scp and sftp commands shown after creating a client use these. No restart is needed.'
+    say
+    while :; do
+        ask "SSH address${host:+ [$host]} (Enter = keep): " || { cancelled; return 0; }
+        if [[ -n $REPLY ]]; then host=$REPLY; fi
+        if valid_ssh_host "$host"; then break; fi
+        warn 'Enter a hostname or an IPv4 address.'; host=$DOWNLOAD_SSH_HOST
+    done
+    while :; do
+        ask "SSH port [$port] (Enter = keep): " || { cancelled; return 0; }
+        if [[ -n $REPLY ]]; then port=$REPLY; fi
+        if valid_ssh_port "$port"; then break; fi
+        warn 'Enter a number from 1 to 65535.'; port=$DOWNLOAD_SSH_PORT
+    done
+    while :; do
+        ask "SSH user [$user] (Enter = keep): " || { cancelled; return 0; }
+        if [[ -n $REPLY ]]; then user=$REPLY; fi
+        if valid_ssh_user "$user"; then break; fi
+        warn 'Enter a valid Linux user name.'; user=$DOWNLOAD_SSH_USER
+    done
+    if [[ $user != root ]]; then warn "$OUT_DIR is readable by root only, so $user also needs access to it."; fi
+    DOWNLOAD_SSH_HOST=$host DOWNLOAD_SSH_PORT=$port DOWNLOAD_SSH_USER=$user
+    save_config || { fail 'Could not save the settings.'; return 1; }
+    audit "download access changed: $user@$host:$port"
+    ok "Saved: $user@$host:$port"
+}
+set_client_days() {
+    kv Current "${CLIENT_CERT_DAYS:-Easy-RSA default}"
+    info 'Applies only to clients created from now on. Certificates are not renewed automatically.'
+    say
+    if ! ask 'Days a new client certificate lasts, 1 to 3650; 0 = Easy-RSA default (Enter = cancel): ' || [[ -z $REPLY ]]; then cancelled; return 0; fi
+    if [[ $REPLY == 0 ]]; then
+        CLIENT_CERT_DAYS=''
+    elif valid_client_days "$REPLY"; then
+        CLIENT_CERT_DAYS=$((10#$REPLY))
+    else
+        warn 'Enter a number from 0 to 3650. Nothing changed.'
+        return 1
+    fi
+    save_config || { fail 'Could not save the settings.'; return 1; }
+    audit "new client lifetime changed: ${CLIENT_CERT_DAYS:-default}"
+    ok "New clients last: ${CLIENT_CERT_DAYS:-Easy-RSA default} ${CLIENT_CERT_DAYS:+days}"
+}
+set_link_port() {
+    kv Current "${LINK_PORT:-chosen when needed}"
+    info 'TCP port of temporary links. It must be open in your provider firewall.'
+    say
+    prompt_valid 'New port, 1 to 65535 (Enter = cancel): ' valid_link_port 'Enter a number from 1 to 65535.' || return 0
+    if tcp_port_open "$REPLY" && ! systemctl is-active --quiet darban-links.service; then
+        warn "TCP $REPLY is already in use by another program. Nothing changed."
+        return 1
+    fi
+    LINK_PORT=$((10#$REPLY))
+    save_config || { fail 'Could not save the setting.'; return 1; }
+    audit "share link port changed: $LINK_PORT"
+    ok "Saved: TCP $LINK_PORT. It applies from the next link."
+}
+restart_openvpn() {
+    local state port rc=0
+    state=$(systemctl is-active "$DARBAN_UNIT" 2>/dev/null || true)
+    kv Service "${state:-unknown}"
+    say
+    info 'Creating and revoking clients do not need a restart.'
+    info 'Use this after editing server.conf by hand, or when the service has stopped.'
+    say
+    confirm_choice 'Restart OpenVPN now? This drops ALL connected VPN users for a few seconds.' 'No, do not restart' 'Restart OpenVPN' caution restart || { cancelled; return 0; }
+    info "Restarting OpenVPN${S_ELL}"
+    port=$(server_port 2>/dev/null) || port=''
+    critical_begin
+    systemctl restart "$DARBAN_UNIT" || rc=$?
+    if (( rc == 0 )); then
+        if [[ -n $port ]]; then
+            wait_for_port "$port" || rc=1
+        else
+            systemctl is-active --quiet "$DARBAN_UNIT" || rc=1
+        fi
+    fi
+    critical_end
+    if (( rc != 0 )); then
+        urgent "OpenVPN did not come back up${port:+ on UDP $port}. Check: journalctl -u $DARBAN_UNIT -n 50 --no-pager"
+        audit 'OpenVPN restart from the menu FAILED'
+        return 1
+    fi
+    audit 'OpenVPN restarted from the menu'
+    if [[ -n $port ]]; then
+        ok "OpenVPN is running and listening on UDP $port."
+    else
+        ok 'OpenVPN is running.'
+        warn 'Could not read a single port from server.conf, so the UDP listener was not checked.'
+    fi
+}
+valid_version() { [[ $1 =~ ^[0-9]+\.[0-9]+\.[0-9]+(-(alpha|beta|rc)\.[0-9]+)?$ ]]; }
+version_is_newer() {
+    # version_is_newer A B: true when A is newer. sort -V alone would put 1.0.0-rc.1 after 1.0.0.
+    local a=$1 b=$2 base_a=${1%%-*} base_b=${2%%-*}
+    [[ $a != "$b" ]] || return 1
+    if [[ $base_a != "$base_b" ]]; then
+        [[ $(printf '%s\n%s\n' "$base_a" "$base_b" | sort -V | tail -n 1) == "$base_a" ]]
+        return
+    fi
+    # The same base: a final release is newer than any pre-release of it.
+    if [[ $a == "$base_a" ]]; then return 0; fi
+    if [[ $b == "$base_b" ]]; then return 1; fi
+    [[ $(printf '%s\n%s\n' "$a" "$b" | sort -V | tail -n 1) == "$a" ]]
+}
+latest_release_version() { curl -fsSL --proto '=https' --tlsv1.2 --max-time 20 "$DARBAN_URL/releases/latest/download/VERSION"; }
+start_update_check() {
+    # In the background and at most once a day, so the menu never waits for the network.
+    [[ $UPDATE_CHECK == yes ]] || return 0
+    command -v curl >/dev/null || return 0
+    if [[ -n $(find "$UPDATE_CACHE" -mmin -1440 2>/dev/null) ]]; then return 0; fi
+    (
+        latest=$(latest_release_version) || latest=''
+        if valid_version "$latest"; then
+            temp=$(mktemp "$UPDATE_CACHE.XXXXXX") && printf '%s\n' "$latest" >"$temp" && mv -f -- "$temp" "$UPDATE_CACHE"
+        else
+            # Remember the attempt too, so a server without internet does not retry on every start.
+            touch -- "$UPDATE_CACHE"
+        fi
+    ) >/dev/null 2>&1 </dev/null &
+    disown
+}
+available_update() {
+    # Prints a newer version known from the last check; nothing otherwise.
+    local cached=''
+    [[ $UPDATE_CHECK == yes && -s $UPDATE_CACHE ]] || return 0
+    IFS= read -r cached <"$UPDATE_CACHE" || true
+    if valid_version "$cached" && version_is_newer "$cached" "$DARBAN_VERSION"; then printf '%s\n' "$cached"; fi
+}
+show_release_notes() {
+    # Escape sequences are removed: this text comes from the network and goes straight to a root terminal.
+    local notes
+    notes=$(curl -fsSL --proto '=https' --tlsv1.2 --max-time 20 "$DARBAN_URL/releases/download/v$1/RELEASE-NOTES.txt" 2>/dev/null | LC_ALL=C tr -d '\000-\010\013-\037\177') || notes=''
+    say
+    if [[ -n $notes ]]; then
+        printf '%sWhat is new in v%s:%s\n' "$C_BOLD" "$1" "$C_RESET" || true
+        printf '%s\n' "$notes" | head -n 25
+    else
+        info "Release notes: $DARBAN_URL/releases/tag/v$1"
+    fi
+}
+update_tool() {
+    local latest
+    command -v curl >/dev/null || { fail 'curl is required to check for updates.'; return 1; }
+    kv Installed "v$DARBAN_VERSION"
+    info "Checking the latest release of $DARBAN_REPO${S_ELL}"
+    latest=$(latest_release_version) || {
+        fail 'Could not reach GitHub or read the latest release.'; return 1;
+    }
+    valid_version "$latest" || { fail 'The release does not state a valid version.'; return 1; }
+    kv Latest "v$latest"
+    if ! version_is_newer "$latest" "$DARBAN_VERSION"; then
+        ok 'This is the latest version.'
+        return 0
+    fi
+    show_release_notes "$latest"
+    say
+    info 'Only this tool is replaced. OpenVPN is not restarted, and clients, the PKI and the CRL stay as they are.'
+    say
+    confirm_choice "Install v$latest now?" 'No, keep this version' "Install v$latest" caution "$latest" || { cancelled; return 0; }
+    bash "$DARBAN_LIB/get.sh" --version "v$latest" || { fail 'The update failed. See the messages above.'; audit "update to v$latest failed"; return 1; }
+    audit "updated: v$DARBAN_VERSION -> v$latest"
+    say
+    ok "Updated to v$latest. Start it again: sudo darban"
+    exit "$RC_QUIT"
+}
+restore_previous() {
+    # Backups are named by time, so the last one is what the latest update replaced.
+    local newest='' dir version
+    if [[ -d $BACKUP_ROOT ]]; then
+        for dir in "$BACKUP_ROOT"/*; do
+            if [[ -f $dir/sbin/darban ]]; then newest=$dir; fi
+        done
+    fi
+    if [[ -z $newest ]]; then info 'No previous version is stored on this server.'; return 0; fi
+    version=$(awk -F= '$1=="DARBAN_VERSION" {print $2; exit}' "$newest/sbin/darban")
+    kv Installed "v$DARBAN_VERSION"
+    kv Previous "v${version:-unknown}"
+    say
+    info 'Only this tool is replaced. OpenVPN is not restarted, and clients, the PKI and the CRL stay as they are.'
+    say
+    confirm_choice "Go back to v${version:-unknown}?" 'No, keep this version' 'Restore the previous version' caution restore || { cancelled; return 0; }
+    critical_begin
+    cp -a -- "$newest/sbin/." "$SBIN_DIR/" && cp -a -- "$newest/lib/." "$DARBAN_LIB/" && cp -a -- "$newest/units/." "$UNIT_DIR/" || {
+        critical_end
+        urgent "The restore did not finish. The files are in $newest."
+        return 1
+    }
+    systemctl daemon-reload
+    rm -rf -- "$newest"
+    critical_end
+    audit "restored previous version: v$DARBAN_VERSION -> v${version:-unknown}"
+    ok "Restored v${version:-unknown}. Start it again: sudo darban"
+    exit "$RC_QUIT"
+}
+toggle_update_notice() {
+    if [[ $UPDATE_CHECK == yes ]]; then UPDATE_CHECK=no; else UPDATE_CHECK=yes; fi
+    save_config || { fail 'Could not save the setting.'; return 1; }
+    if [[ $UPDATE_CHECK == yes ]]; then
+        ok 'The menu now looks for new releases once a day. Nothing is installed without your confirmation.'
+    else
+        rm -f -- "$UPDATE_CACHE"
+        ok 'The menu no longer looks for new releases. "Check for updates" still works.'
+    fi
+}
+about_text() {
+    say "Darban OVPN v$DARBAN_VERSION"
+    say 'OpenVPN server manager for Ubuntu 24.04'
+    say
+    say "  GitHub   $DARBAN_URL"
+    say "  Email    $DARBAN_EMAIL"
+    say '  License  MIT'
+    say
+    say 'Not affiliated with OpenVPN Inc.'
+}
+uninstall_tool() {
+    local expiry=''
+    if expiry=$(darban_crl_expiry_epoch "$DARBAN_CRL" 2>/dev/null); then expiry=$(date -u -d "@$expiry" +%Y-%m-%d); else expiry=unknown; fi
+    printf '%sThis removes the tool, its menu and its daily CRL renewal.%s\n' "$C_BOLD" "$C_RESET"
+    bullet 'OpenVPN, connected users, the PKI, the CRL and server.conf are not touched'
+    bullet "$OUT_DIR and $CONFIG_DIR are kept"
+    warn "Nothing will renew the CRL after this. It expires on $expiry; renew it yourself before then, or OpenVPN may refuse clients."
+    say
+    confirm_choice 'Uninstall Darban OVPN?' 'No, keep it' 'Uninstall' danger uninstall || { cancelled; return 0; }
+    audit 'tool uninstalled'
+    bash "$DARBAN_LIB/uninstall.sh" --yes || { fail 'The uninstall did not finish. See the messages above.'; return 1; }
+    exit "$RC_QUIT"
+}
+remove_everything() {
+    local status
+    local -a options=()
+    if [[ ! -e $CONFIG_DIR/.server-setup-started ]]; then
+        fail 'OpenVPN on this server was not set up by this tool, so it will not be removed. "Uninstall this tool only" is available.'
+        return 1
+    fi
+    printf '%sThis permanently removes the tool, OpenVPN, the CA, every client certificate and every .ovpn file.%s\n' "$C_BOLD" "$C_RESET"
+    bullet 'all VPN users are disconnected now'
+    bullet 'every .ovpn file stops working for good, even if OpenVPN is installed again later'
+    bullet 'a session reaching this server through this VPN ends too; use direct SSH'
+    bullet 'packages are removed only if the setup added them and nothing else needs them'
+    say
+    # Option 1 is the safe default, so anything but an explicit "No backup" keeps one.
+    if confirm_choice 'Keep a backup of the CA, configuration and profiles first?' 'Yes, keep a backup in /root' 'No backup' danger; then
+        info 'No backup will be made.'
+    else
+        options+=(--backup)
+    fi
+    say
+    status=$(bash "$DARBAN_LIB/remove-server.sh" --kernel-status) || status=none
+    case $status in
+        running) info 'The Virtual HWE kernel stays: the system is running it now.' ;;
+        removable)
+            if confirm_choice 'Also remove the Virtual HWE kernel the setup installed?' 'No, keep it' 'Remove the kernel' danger; then
+                options+=(--kernel)
+            fi ;;
+    esac
+    say
+    confirm_choice 'Remove everything now? This cannot be undone.' 'No, keep everything' 'Remove everything' danger remove-everything || { cancelled; return 0; }
+    audit 'removing the tool, OpenVPN, the CA and all profiles'
+    bash "$DARBAN_LIB/remove-server.sh" --yes "${options[@]}" || { fail 'The removal did not finish. See the messages above.'; return 1; }
+    exit "$RC_QUIT"
+}
+check() {
+    # check <ok|bad|warn|info> <text>: one line of the diagnostics checklist.
+    local symbol=$S_INFO color=''
+    case $1 in
+        ok) symbol=$S_OK color=$C_GREEN ;;
+        bad) symbol=$S_BAD color=$C_RED ;;
+        warn) symbol=$S_WARN color=$C_YELLOW ;;
+    esac
+    printf '  %s%s%s %s\n' "$color" "$symbol" "$C_RESET" "$2" || true
+}
+group() { printf '\n %s%s%s\n' "$C_BOLD" "$1" "$C_RESET" || true; }
+check_expiry() {
+    # check_expiry <label> <epoch>
+    if (( $2 <= $(date -u +%s) )); then check bad "$1 EXPIRED on $(date -u -d "@$2" +%Y-%m-%d)"
+    elif (( $(days_until "$2") <= EXPIRY_WARN_DAYS )); then check warn "$1 valid until $(describe_expiry "$2") $S_ARROW renew soon (not automated)"
+    else check ok "$1 valid until $(describe_expiry "$2")"; fi
+}
+health() {
+    local version state enabled dco port e crl_err host resolved next last value issue exports pending
+    group 'OpenVPN'
+    version=$(openvpn --version 2>/dev/null | awk 'NR==1 {print $1, $2}' || true)
+    if [[ -n $version ]]; then check info "$version"; else check warn 'openvpn binary not found in PATH'; fi
+    state=$(systemctl is-active "$DARBAN_UNIT" 2>/dev/null || true)
+    enabled=$(systemctl is-enabled "$DARBAN_UNIT" 2>/dev/null || true)
+    if [[ $state == active ]]; then check ok "Service active (start at boot: ${enabled:-unknown})"; else check bad "Service ${state:-unknown} ($DARBAN_UNIT)"; fi
+    if port=$(server_port); then
+        if port_listening "$port"; then check ok "Listening on UDP $port"; else check bad "Nothing listening on UDP $port"; fi
+    else
+        check bad 'server.conf has no single numeric port directive'
+    fi
+    if [[ -d /sys/module/ovpn ]]; then dco=ovpn; elif [[ -d /sys/module/ovpn_dco_v2 ]]; then dco=ovpn_dco_v2; else dco=''; fi
+    check info "DCO kernel module: ${dco:-not loaded}"
+    if server_tls_ok; then check ok 'tls-crypt key matches what profiles embed'; else check bad "server.conf tls-crypt does not use $TLS_KEY"; fi
+    if value=$(server_data_ciphers); then check info "Data ciphers: $value"; else check bad 'data-ciphers is repeated or malformed'; fi
+    if mgmt_available; then check ok 'Management interface: single-client disconnect available'; else check info 'Management interface: not configured (revocation offers a full restart instead)'; fi
+
+    group 'Certificates'
+    if e=$(cert_end_epoch "$DARBAN_PKI/ca.crt"); then check_expiry 'CA certificate' "$e"; else check bad 'CA certificate unreadable'; fi
+    if e=$(darban_server_cert_pem | openssl x509 -noout -enddate 2>/dev/null) && e=$(date -u -d "${e#notAfter=}" +%s); then
+        check_expiry 'Server certificate' "$e"
+    else
+        check bad 'Server certificate unreadable'
+    fi
+
+    group 'Revocation (CRL)'
+    if ! darban_crl_configured; then
+        check bad "server.conf has no single 'crl-verify $DARBAN_CRL'"
+    elif crl_err=$(C_RED='' C_RESET='' darban_verify_crl "$DARBAN_CRL" 2>&1) && e=$(darban_crl_expiry_epoch "$DARBAN_CRL"); then
+        check ok "Published CRL valid and complete; next update $(describe_expiry "$e")"
+    else
+        check bad "Published CRL problem: ${crl_err##*ERROR: } $S_ARROW Maintenance $S_CRUMB 2"
+    fi
+    pending=$(revocation_pending_names 2>/dev/null | join_lines) || pending=''
+    if [[ -n $pending ]]; then check bad "Revoked but NOT blocked yet: $(safe_text "$pending") $S_ARROW Maintenance $S_CRUMB 2"; fi
+    pending=$(revoked_with_profile 2>/dev/null | join_lines) || pending=''
+    if [[ -n $pending ]]; then check warn "Revocation unfinished, profile still on server: $(safe_text "$pending") $S_ARROW Maintenance $S_CRUMB 2"; fi
+    if systemctl is-active --quiet darban-crl.timer 2>/dev/null; then
+        next=$(systemctl show -p NextElapseUSecRealtime --value darban-crl.timer 2>/dev/null || true)
+        check ok "Daily renewal timer active${next:+; next run $next}"
+    else
+        check bad 'Daily renewal timer (darban-crl.timer) is not active'
+    fi
+    last=$(systemctl show -p Result --value darban-crl.service 2>/dev/null || true)
+    if systemctl is-failed --quiet darban-crl.service 2>/dev/null; then
+        check bad "Last renewal run FAILED $S_ARROW journalctl -u darban-crl.service"
+    else
+        check info "Last renewal run: ${last:-unknown}"
+    fi
+
+    group 'Network (read-only)'
+    value=$(sysctl -n net.ipv4.ip_forward 2>/dev/null || true)
+    case $value in
+        1) check ok 'IPv4 forwarding enabled' ;;
+        0) check bad 'IPv4 forwarding disabled: VPN clients have no internet access' ;;
+        *) check info 'IPv4 forwarding: unknown' ;;
+    esac
+    if nft list table ip darban >/dev/null 2>&1 || nft list table ip mzx_openvpn >/dev/null 2>&1; then check ok 'NAT table for the VPN present'; else check info 'NAT table of this tool not found; NAT may be managed elsewhere'; fi
+
+    group 'Profiles & downloads'
+    host=$(domain)
+    if valid_domain "$host"; then
+        resolved=$(getent ahostsv4 "$host" 2>/dev/null | awk 'NR==1 {print $1}' || true)
+        if [[ -n $resolved ]]; then check ok "VPN hostname $host $S_ARROW $resolved"; else check warn "VPN hostname $host does not resolve to IPv4"; fi
+    else
+        check bad "VPN hostname not set $S_ARROW Settings $S_CRUMB 1"
+    fi
+    if [[ -n $DOWNLOAD_SSH_HOST ]]; then check ok "Download endpoint $DOWNLOAD_SSH_USER@$DOWNLOAD_SSH_HOST:$DOWNLOAD_SSH_PORT"; fi
+    for issue in "${CONFIG_ISSUES[@]}"; do check warn "$issue"; done
+    exports=$(find "$OUT_DIR" -maxdepth 1 -type f -name '*.ovpn' 2>/dev/null | wc -l)
+    if (( exports > 0 )); then
+        check info "$exports profile(s) stored on the server $S_ARROW delete them after download (menu 6)"
+    else
+        check ok 'No profiles left on the server'
+    fi
+}
+
+# ---------- screens ----------
+title_bar() {
+    printf '%s Darban OVPN v%s%s%s\n' "$C_BOLD" "$DARBAN_VERSION" "${1:+ $S_CRUMB $1}" "$C_RESET"
+    hr
+}
+status_block() {
+    local host port state endpoint e valid revoked expired soon clients alert pending leftovers
+    host=$(domain)
+    port=$(server_port 2>/dev/null || printf '?')
+    state=$(systemctl is-active "$DARBAN_UNIT" 2>/dev/null || true)
+    if [[ $state == active ]]; then state="$C_GREEN$S_DOT active$C_RESET"; else state="$C_RED$S_DOT ${state:-not running}$C_RESET"; fi
+    if valid_domain "$host"; then
+        endpoint="$host:$port/UDP"
+    else
+        endpoint="${C_YELLOW}hostname not set $S_ARROW Settings $S_CRUMB 1$C_RESET (port $port/UDP)"
+    fi
+    kv Server "$state $S_SEP $endpoint"
+    if { darban_crl_configured && darban_verify_crl "$DARBAN_CRL"; } >/dev/null 2>&1 && e=$(darban_crl_expiry_epoch "$DARBAN_CRL"); then
+        kv CRL "$C_GREEN$S_OK$C_RESET valid $S_SEP $(days_until "$e") days left"
+    else
+        kv CRL "$C_RED$S_BAD problem$C_RESET $S_ARROW details: Maintenance $S_CRUMB 1, repair: Maintenance $S_CRUMB 2"
+    fi
+    pending=$(revocation_pending_names 2>/dev/null | join_lines) || pending=''
+    leftovers=$(revoked_with_profile 2>/dev/null | join_lines) || leftovers=''
+    read -r valid revoked expired soon < <(client_stats)
+    clients="$valid valid $S_SEP $revoked revoked"
+    if (( expired > 0 )); then clients+=" $S_SEP $expired expired"; fi
+    if (( soon > 0 )); then clients+=" $S_SEP $C_YELLOW$soon expiring soon$C_RESET"; fi
+    kv Clients "$clients"
+    # Alerts live in the header so clearing the screen can never hide them.
+    {
+        if e=$(available_update) && [[ -n $e ]]; then printf '%s\n' "Update available: v$e $S_ARROW Setup $S_CRUMB 1"; fi
+        if [[ -n $pending ]]; then printf '%s\n' "Revoked but NOT blocked yet: $(safe_text "$pending") $S_ARROW Maintenance $S_CRUMB 2"; fi
+        if [[ -n $leftovers ]]; then printf '%s\n' "Revocation unfinished, profile still on server: $(safe_text "$leftovers") $S_ARROW Maintenance $S_CRUMB 2"; fi
+        if systemctl is-failed --quiet darban-crl.service 2>/dev/null; then printf '%s\n' "Last automatic CRL run FAILED $S_ARROW Maintenance $S_CRUMB 1"; fi
+        if ! systemctl is-active --quiet darban-crl.timer 2>/dev/null; then printf '%s\n' "CRL renewal timer is not active $S_ARROW Maintenance $S_CRUMB 1"; fi
+        if e=$(cert_end_epoch "$DARBAN_PKI/ca.crt") && (( $(days_until "$e") <= EXPIRY_WARN_DAYS )); then printf '%s\n' "CA certificate expires $(date -u -d "@$e" +%Y-%m-%d)"; fi
+        if e=$(darban_server_cert_pem | openssl x509 -noout -enddate 2>/dev/null) && e=$(date -u -d "${e#notAfter=}" +%s) && (( $(days_until "$e") <= EXPIRY_WARN_DAYS )); then printf '%s\n' "Server certificate expires $(date -u -d "@$e" +%Y-%m-%d); it is not renewed automatically"; fi
+        printf '%s\n' "${CONFIG_ISSUES[@]}"
+    } | while IFS= read -r alert; do
+        if [[ -n $alert ]]; then printf '  %s%s %s%s\n' "$C_YELLOW" "$S_WARN" "$alert" "$C_RESET"; fi
+    done
+}
+menu_item() { printf '   %s%2s%s  %s\n' "$C_CYAN" "$1" "$C_RESET" "$2" || true; }
+menu_group() { printf ' %s%s%s\n' "$C_BOLD" "$1" "$C_RESET" || true; }
+draw_main() {
+    clear_screen
+    title_bar
+    status_block
+    hr
+    menu_group CLIENTS
+    menu_item 1 'List clients'
+    menu_item 2 'Create client'
+    menu_item 3 'Revoke client (permanent)'
+    menu_group SHARE
+    menu_item 4 'Share a profile (link, QR, download)'
+    menu_item 5 'Active links'
+    menu_item 6 'Delete server copy'
+    menu_group SERVER
+    menu_item 7 'Settings'
+    menu_item 8 'Maintenance & diagnostics'
+    menu_item 9 'Setup (update, uninstall, remove all)'
+    menu_item 0 'Exit'
+    hr
+    printf ' %sInside an action, an empty answer or Ctrl+C cancels.%s\n' "$C_DIM" "$C_RESET"
+    printf ' %s%s %s %s%s\n' "$C_DIM" "${DARBAN_URL#https://}" "$S_SEP" "$DARBAN_EMAIL" "$C_RESET"
+}
+draw_settings() {
+    local host port
+    host=$(domain)
+    port=$(server_port 2>/dev/null || printf '?')
+    clear_screen
+    title_bar Settings
+    menu_item 1 "$(printf '%-24s %s' 'VPN hostname' "${host:-not set}")"
+    menu_item 2 "$(printf '%-24s %s' 'OpenVPN UDP port' "$port")"
+    menu_item 3 'Advanced'
+    menu_item 0 'Back'
+    hr
+}
+draw_advanced() {
+    local network routing dns ciphers keepalive verb download days
+    network=$(awk '$1=="server" {print $2 "/24"; exit}' "$DARBAN_SERVER_CONF")
+    if conf_full_tunnel; then routing='full tunnel'; else routing='split tunnel'; fi
+    dns=$(conf_dns)
+    ciphers=$(conf_value data-ciphers)
+    keepalive=$(conf_value keepalive)
+    verb=$(conf_value verb)
+    download=not set
+    if [[ -n $DOWNLOAD_SSH_HOST ]]; then download=$DOWNLOAD_SSH_USER@$DOWNLOAD_SSH_HOST:$DOWNLOAD_SSH_PORT; fi
+    days=${CLIENT_CERT_DAYS:-Easy-RSA default}
+    clear_screen
+    title_bar "Settings $S_CRUMB Advanced"
+    menu_item 1 "$(printf '%-24s %s' 'Traffic routing' "$routing")"
+    menu_item 2 "$(printf '%-24s %s' 'DNS for clients' "${dns:-none pushed}")"
+    menu_item 3 "$(printf '%-24s %s' 'VPN network' "${network:-not set}")"
+    menu_item 4 "$(printf '%-24s %s' 'Data ciphers' "${ciphers:-OpenVPN default}")"
+    menu_item 5 "$(printf '%-24s %s' 'Keepalive' "${keepalive:-not set}")"
+    menu_item 6 "$(printf '%-24s %s' 'Log detail' "${verb:-OpenVPN default}")"
+    menu_item 7 "$(printf '%-24s %s' 'Download access' "$download")"
+    menu_item 8 "$(printf '%-24s %s' 'New client lifetime' "$days")"
+    menu_item 9 "$(printf '%-24s %s' 'Share link port' "${LINK_PORT:-chosen when needed}")"
+    menu_item 0 'Back'
+    hr
+    printf ' %sItems 1-6 restart OpenVPN; a change that fails is rolled back.%s\n' "$C_DIM" "$C_RESET" || true
+}
+advanced_menu() {
+    local redraw=1
+    while :; do
+        if (( redraw )); then draw_advanced || true; fi
+        redraw=1
+        ask 'Choose [0-9, Enter = back]: ' || return 0
+        case $REPLY in
+            1) menu_action locked 'Traffic routing' set_routing ;;
+            2) menu_action locked 'DNS for clients' set_dns ;;
+            3) menu_action locked 'VPN network' set_vpn_network ;;
+            4) menu_action locked 'Data ciphers' set_ciphers ;;
+            5) menu_action locked 'Keepalive' set_keepalive ;;
+            6) menu_action locked 'Log detail' set_verb ;;
+            7) menu_action locked 'Download access' set_download_access ;;
+            8) menu_action locked 'New client lifetime' set_client_days ;;
+            9) menu_action locked 'Share link port' set_link_port ;;
+            0|'') return 0 ;;
+            *) warn "Unknown option \"$REPLY\". Enter a number from 0 to 9."; redraw=0 ;;
+        esac
+    done
+}
+settings_menu() {
+    local redraw=1
+    while :; do
+        if (( redraw )); then draw_settings || true; fi
+        redraw=1
+        ask 'Choose [0-3, Enter = back]: ' || return 0
+        case $REPLY in
+            1) menu_action locked 'Change VPN hostname' set_domain ;;
+            2) menu_action locked 'Change OpenVPN UDP port' change_port ;;
+            3) advanced_menu ;;
+            0|'') return 0 ;;
+            *) warn "Unknown option \"$REPLY\". Enter a number from 0 to 3."; redraw=0 ;;
+        esac
+    done
+}
+draw_maintenance() {
+    clear_screen
+    title_bar Maintenance
+    menu_item 1 'Diagnostics (read-only)'
+    menu_item 2 'Repair CRL / finish a revocation'
+    menu_item 3 'Restart OpenVPN'
+    menu_item 0 'Back'
+    hr
+}
+maintenance_menu() {
+    local redraw=1
+    while :; do
+        if (( redraw )); then draw_maintenance || true; fi
+        redraw=1
+        ask 'Choose [0-3, Enter = back]: ' || return 0
+        case $REPLY in
+            1) menu_action unlocked 'Diagnostics' health ;;
+            2) menu_action locked 'Repair CRL' repair_crl ;;
+            3) menu_action locked 'Restart OpenVPN' restart_openvpn ;;
+            0|'') return 0 ;;
+            *) warn "Unknown option \"$REPLY\". Enter a number from 0 to 3."; redraw=0 ;;
+        esac
+    done
+}
+draw_setup() {
+    clear_screen
+    title_bar Setup
+    menu_item 1 "$(printf '%-24s %s' 'Check for updates' "installed: v$DARBAN_VERSION")"
+    menu_item 2 'Restore previous version'
+    menu_item 3 "$(printf '%-24s %s' 'Daily update notice' "$UPDATE_CHECK")"
+    menu_item 4 'About'
+    menu_item 5 'Uninstall this tool only'
+    menu_item 6 'Remove everything (tool, OpenVPN, CA)'
+    menu_item 0 'Back'
+    hr
+}
+setup_menu() {
+    local redraw=1
+    while :; do
+        if (( redraw )); then draw_setup || true; fi
+        redraw=1
+        ask 'Choose [0-6, Enter = back]: ' || return 0
+        case $REPLY in
+            # Unlocked: the installer's own CRL check takes the same lock and would wait for this one.
+            1) menu_action unlocked 'Check for updates' update_tool ;;
+            2) menu_action locked 'Restore previous version' restore_previous ;;
+            3) run_action unlocked toggle_update_notice; load_config ;;
+            4) menu_action unlocked 'About' about_text ;;
+            5) menu_action locked 'Uninstall this tool' uninstall_tool ;;
+            6) menu_action locked 'Remove everything' remove_everything ;;
+            0|'') return 0 ;;
+            *) warn "Unknown option \"$REPLY\". Enter a number from 0 to 6."; redraw=0 ;;
+        esac
+    done
+}
+program_exit() {
+    printf '\nBye.\n' || true
+    exit 0
+}
+first_run() {
+    # Profiles cannot be built without a hostname, so guide a fresh install there first.
+    valid_domain "$(domain)" && return 0
+    (( UI_TTY )) || return 0
+    clear_screen
+    title_bar
+    info 'Welcome! The VPN hostname is not set yet; client profiles need it.'
+    if confirm_choice 'Set the VPN hostname now?' 'Not now' 'Set it now' normal '' 2; then
+        menu_action locked 'Change VPN hostname' set_domain
+    fi
+}
+main_menu() {
+    local redraw=1
+    # A trapped (not default) SIGINT lets Ctrl+C cancel only the running action. Outside an action it exits
+    # from inside the trap: bash resumes an interrupted read afterwards, so a flag would wait for Enter.
+    trap 'if (( ACTION_RUNNING )); then DARBAN_INT=1; else program_exit; fi' INT
+    trap ui_restore EXIT
+    start_update_check
+    first_run
+    while :; do
+        if (( redraw )); then draw_main || true; fi
+        redraw=1
+        ask 'Choose [0-9]: ' || program_exit
+        case $REPLY in
+            1) menu_action unlocked 'Clients' list_menu ;;
+            2) menu_action locked 'Create client' create_client ;;
+            3) menu_action locked 'Revoke client (permanent)' revoke_client ;;
+            4) menu_action locked 'Share a profile' share_profile ;;
+            5) menu_action locked 'Active links' active_links ;;
+            6) menu_action locked 'Delete server copy' delete_export ;;
+            7) settings_menu ;;
+            8) maintenance_menu ;;
+            9) setup_menu ;;
+            0) program_exit ;;
+            '') redraw=0 ;;
+            *) warn "Unknown option \"$REPLY\". Enter a number from 0 to 9."; redraw=0 ;;
+        esac
+    done
+}
+usage() {
+    cat <<EOF
+Darban OVPN v$DARBAN_VERSION
+
+Usage: darban [--no-clear] [COMMAND]
+
+Commands:
+  (none)     interactive menu
+  list       print the client table; --all includes revoked clients
+  status     print the diagnostics checklist
+  repair-crl publish a fresh CRL and finish an interrupted revocation
+  update     check for a new release and install it
+  about      show the version, project address and contact
+  uninstall  remove this tool; OpenVPN, the PKI and the CRL are kept
+  remove-all remove this tool, OpenVPN, the CA and all profiles (only after server-setup)
+  version    print the version
+  help       show this help
+
+Options:
+  --no-clear never clear the screen
+
+Environment: NO_COLOR=1 disables colors. Actions are logged: journalctl -t darban
+
+Project: $DARBAN_URL
+Contact: $DARBAN_EMAIL
+EOF
+}
+main() {
+    local cmd=''
+    while (( $# )); do
+        case $1 in
+            --no-clear) UI_CLEAR=0 ;;
+            --all) LIST_ALL=1 ;;
+            -h|--help|help) usage; exit 0 ;;
+            -V|--version|version) printf '%s\n' "$DARBAN_VERSION"; exit 0 ;;
+            about) about_text; exit 0 ;;
+            list|status|repair-crl|update|uninstall|remove-all) [[ -z $cmd ]] || { usage >&2; exit 2; }; cmd=$1 ;;
+            *) printf 'Unknown argument: %s\n\n' "$1" >&2; usage >&2; exit 2 ;;
+        esac
+        shift
+    done
+    if (( LIST_ALL )) && [[ $cmd != list ]]; then printf -- '--all only works with list.\n\n' >&2; usage >&2; exit 2; fi
+    ui_init
+    setup
+    case $cmd in
+        list) run_action unlocked list_clients; exit "$ACTION_RC" ;;
+        status) run_action unlocked health; exit "$ACTION_RC" ;;
+        repair-crl) run_action locked repair_crl; exit "$ACTION_RC" ;;
+        update) run_action unlocked update_tool; exit "$ACTION_RC" ;;
+        uninstall) run_action locked uninstall_tool; exit "$ACTION_RC" ;;
+        remove-all) run_action locked remove_everything; exit "$ACTION_RC" ;;
+    esac
+    main_menu
+}
+main "$@"

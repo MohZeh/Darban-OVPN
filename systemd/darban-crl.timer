@@ -1,0 +1,11 @@
+[Unit]
+Description=Darban OVPN v1.0 daily CRL check
+
+[Timer]
+OnCalendar=*-*-* 04:20:00 UTC
+RandomizedDelaySec=15m
+Persistent=true
+Unit=darban-crl.service
+
+[Install]
+WantedBy=timers.target
