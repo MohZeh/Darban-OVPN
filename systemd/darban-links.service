@@ -1,0 +1,32 @@
+[Unit]
+Description=Darban OVPN temporary profile links
+# Started only while a link exists; the program ends by itself when the last one is gone.
+
+[Service]
+Type=simple
+User=root
+Group=root
+EnvironmentFile=/etc/darban/links.env
+ExecStart=/usr/bin/python3 -I /usr/local/lib/darban/linkd.py --dir /run/darban-links --cert /etc/darban/link-cert.pem --key /etc/darban/link-key.pem --host ${LINK_HOST} --port ${LINK_PORT}
+Restart=no
+UMask=0077
+TasksMax=64
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/run/darban-links
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictNamespaces=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+LockPersonality=true
+SystemCallArchitectures=native
