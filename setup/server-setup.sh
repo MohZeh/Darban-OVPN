@@ -1,0 +1,439 @@
+#!/usr/bin/env bash
+# Prepares a fresh Ubuntu 24.04 VPS: current OpenVPN from the OpenVPN project's stable repository, the
+# Virtual HWE kernel (it ships the in-kernel ovpn module, so no DKMS or headers), a new CA and server.
+# Refuses to run on a server that already has an OpenVPN configuration or a PKI it did not create.
+#   server-setup.sh [--host NAME|IP] [--port N] [--subnet A.B.C.0] [--dns "IP [IP]"] [--split-tunnel] [--open-ufw] [--yes]
+# Only the address and port are asked. --yes takes the defaults for those too, and leaves ufw alone without --open-ufw.
+set -Eeuo pipefail
+umask 077
+cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.."
+source ./lib/common.sh
+source ./lib/ui.sh
+
+OS_RELEASE=/etc/os-release
+PKI=/root/pki
+EASYRSA_BIN=/usr/share/easy-rsa/easyrsa
+SERVER_DIR=/etc/openvpn/server
+CONFIG_DIR=/etc/darban
+APT_KEY=/etc/apt/keyrings/openvpn-repo-public.asc
+APT_LIST=/etc/apt/sources.list.d/openvpn-aptrepo.list
+SYSCTL_FILE=/etc/sysctl.d/99-darban.conf
+MODULES_FILE=/etc/modules-load.d/darban-ovpn.conf
+NAT_UNIT=/etc/systemd/system/darban-nat.service
+TUN_DEV=/dev/net/tun
+UNIT=openvpn-server@server.service
+KERNEL_PKG=linux-image-virtual-hwe-24.04
+SERVER_NAME=darban-server
+DEFAULT_DNS='1.1.1.1 8.8.8.8'
+MIN_BOOT_FREE_KB=150000
+MARKER=$CONFIG_DIR/.server-setup-started
+# Never stop for a question, and never restart services such as sshd behind the user's back.
+export DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=l
+
+die() { fail "$*"; exit 1; }
+port_busy() { [[ -n $(ss -H -lun "sport = :$1" 2>/dev/null) ]]; }
+step() { say; printf '%s%s %s%s\n' "$C_BOLD" "$S_ARROW" "$*" "$C_RESET"; }
+easyrsa() { env EASYRSA_PKI="$PKI" EASYRSA_BATCH=1 "$EASYRSA_BIN" "$@" </dev/null >/dev/null; }
+# A fresh VPS often runs unattended-upgrades right after boot, so wait for the dpkg lock instead of failing.
+apt_run() { apt-get -o DPkg::Lock::Timeout=300 -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold "$@"; }
+in_container() { command -v systemd-detect-virt >/dev/null && systemd-detect-virt --container --quiet; }
+valid_endpoint() { if [[ $1 =~ ^[0-9.]+$ ]]; then valid_ipv4 "$1"; else valid_domain "$1"; fi; }
+check_system() {
+    local id='' version=''
+    [[ $EUID == 0 ]] || die 'Run with sudo/root.'
+    [[ -r $OS_RELEASE ]] || die "Cannot read $OS_RELEASE."
+    id=$(awk -F= '$1=="ID" {gsub(/"/,"",$2); print $2}' "$OS_RELEASE")
+    version=$(awk -F= '$1=="VERSION_ID" {gsub(/"/,"",$2); print $2}' "$OS_RELEASE")
+    [[ $id == ubuntu && $version == 24.04 ]] || die "This setup supports Ubuntu 24.04 only; this is ${id:-unknown} ${version:-unknown}."
+    ARCH=$(dpkg --print-architecture)
+    [[ $ARCH == amd64 || $ARCH == arm64 ]] || die "Unsupported architecture: $ARCH."
+    command -v systemctl >/dev/null || die 'systemd is required.'
+    if [[ -e $SERVER_DIR/server.conf ]]; then die "$SERVER_DIR/server.conf already exists. Nothing was changed."; fi
+    if [[ -e $PKI && ! -e $MARKER ]]; then die "$PKI already exists and this setup did not create it. Nothing was changed."; fi
+    # Some VPS containers do not offer a TUN device at all, and OpenVPN cannot run without one.
+    modprobe tun 2>/dev/null || true
+    [[ -c $TUN_DEV ]] || die "$TUN_DEV is missing. This VPS does not offer a TUN device; ask your provider to enable it."
+    IFACE=$(ip -4 route show default | awk '{for (i=1; i<NF; i++) if ($i=="dev") {print $(i+1); exit}}')
+    [[ $IFACE =~ ^[A-Za-z0-9_.@-]+$ ]] || die 'Cannot detect the network interface of the default route.'
+    LOCAL_IP=$(ip -4 route get 1.1.1.1 2>/dev/null | awk '{for (i=1; i<NF; i++) if ($i=="src") {print $(i+1); exit}}' || true)
+    valid_ipv4 "$LOCAL_IP" || LOCAL_IP=''
+    if command -v timedatectl >/dev/null && [[ $(timedatectl show -p NTPSynchronized --value 2>/dev/null || true) == no ]]; then
+        warn 'The system clock is not synchronized. Certificates and the CRL depend on correct time.'
+    fi
+}
+choose_host() {
+    local default='' resolved
+    if [[ -n $LOCAL_IP ]] && ! is_private_ip "$LOCAL_IP"; then default=$LOCAL_IP; fi
+    if [[ -z $HOST ]] && (( ASSUME_YES )); then HOST=$default; fi
+    if [[ -n $HOST ]]; then
+        valid_endpoint "$HOST" || die "Not a valid hostname or IPv4 address: $HOST"
+    elif (( ASSUME_YES )); then
+        die 'Could not detect a public IPv4 address. Give the address clients connect to: --host NAME|IP'
+    else
+        info 'Clients connect to this address. Use a hostname or an IPv4 address; a hostname is easier to move later.'
+        info 'A DNS record must not be proxied (for example, Cloudflare must be DNS only): this is UDP traffic.'
+        while :; do
+            ask "Server hostname or IP${default:+ [$default]}: " || die 'Cancelled; nothing was changed.'
+            HOST=${REPLY:-$default}
+            if [[ -n $HOST ]] && valid_endpoint "$HOST"; then break; fi
+            warn 'Enter a hostname such as vpn.example.com, or an IPv4 address.'
+        done
+    fi
+    HOST=${HOST,,}
+    if [[ $HOST =~ ^[0-9.]+$ ]]; then
+        if is_private_ip "$HOST"; then warn "$HOST is a private address; clients outside this network cannot reach it without port forwarding."; fi
+        return 0
+    fi
+    resolved=$(timeout 5 getent ahostsv4 "$HOST" 2>/dev/null | awk 'NR==1 {print $1}' || true)
+    if [[ -z $resolved ]]; then
+        warn "$HOST does not resolve to an IPv4 address yet. Clients need that DNS record before they can connect."
+    elif [[ -n $default && $resolved != "$default" ]]; then
+        warn "$HOST resolves to $resolved, but this server is $default. Check the DNS record."
+    else
+        ok "$HOST resolves to $resolved."
+    fi
+}
+choose_port() {
+    if [[ -z $PORT ]] && (( ASSUME_YES )); then PORT=1194; fi
+    if [[ -n $PORT ]]; then
+        valid_port "$PORT" || die "Port must be a number from 1024 to 65535: $PORT"
+        PORT=$((10#$PORT))
+        if port_busy "$PORT"; then die "UDP $PORT is already in use."; fi
+        return 0
+    fi
+    while :; do
+        ask 'OpenVPN UDP port [1194]: ' || die 'Cancelled; nothing was changed.'
+        PORT=${REPLY:-1194}
+        if ! valid_port "$PORT"; then warn 'Enter a number from 1024 to 65535.'; continue; fi
+        PORT=$((10#$PORT))
+        if port_busy "$PORT"; then warn "UDP $PORT is already in use. Choose another port."; continue; fi
+        return 0
+    done
+}
+choose_subnet() {
+    # Not asked: the first free default is right almost everywhere. Settings > Advanced changes it later.
+    local octet
+    if [[ -n $VPN_NET ]]; then
+        local clash
+        valid_subnet "$VPN_NET" || die "The VPN network must be a private /24 ending in .0: $VPN_NET"
+        if clash=$(subnet_conflict "$VPN_NET"); then die "$VPN_NET/24 overlaps the existing route $clash."; fi
+        return 0
+    fi
+    for octet in {8..30}; do
+        if ! subnet_conflict "10.$octet.0.0" >/dev/null; then
+            VPN_NET=10.$octet.0.0
+            return 0
+        fi
+    done
+    die 'Could not find a free private network. Choose one: --subnet A.B.C.0'
+}
+choose_dns() {
+    # Not asked either. A split tunnel keeps the client's own DNS, so nothing is pushed.
+    if (( SPLIT_TUNNEL )); then return 0; fi
+    valid_dns "${DNS_LIST:-$DEFAULT_DNS}" || die "DNS must be one or two IPv4 addresses: $DNS_LIST"
+}
+choose_firewall() {
+    local status
+    command -v ufw >/dev/null || return 0
+    status=$(ufw status 2>/dev/null || true)
+    [[ $status == *'Status: active'* ]] || return 0
+    UFW_ACTIVE=1
+    if (( OPEN_UFW || ASSUME_YES )); then return 0; fi
+    say
+    warn "ufw is active and would block the VPN unless it allows UDP $PORT and forwarding from tun0."
+    if confirm_choice 'Add those two ufw rules?' 'No, I will handle ufw myself' 'Add the two rules' caution; then
+        OPEN_UFW=1
+    fi
+}
+plan_kernel() {
+    # The plan shown to the user is apt's own simulation, not a guess.
+    local free
+    KERNEL_INSTALL=''
+    KERNEL_PLAN=''
+    # A container runs on the host's kernel; installing one here would do nothing.
+    if in_container; then return 0; fi
+    if dpkg-query -W -f='${Status}' "$KERNEL_PKG" 2>/dev/null | grep -q 'install ok installed'; then return 0; fi
+    KERNEL_PLAN=$(apt_run -s --no-install-recommends install "$KERNEL_PKG" | awk '$1=="Inst" {print $2}') ||
+        die "apt cannot install $KERNEL_PKG."
+    [[ -n $KERNEL_PLAN ]] || die "apt planned nothing for $KERNEL_PKG."
+    if grep -Eq '^(linux-firmware|xserver|x11|libx11|libgl|libwayland|wayland|mesa|gnome|kde)' <<<"$KERNEL_PLAN"; then
+        die "The kernel would pull in firmware or graphics packages; stopping. Planned: ${KERNEL_PLAN//$'\n'/ }"
+    fi
+    free=$(df -Pk /boot 2>/dev/null | awk 'NR==2 {print $4}' || true)
+    if [[ $free =~ ^[0-9]+$ ]] && (( free < MIN_BOOT_FREE_KB )); then
+        die "/boot has only $((free / 1024)) MB free, too little for a new kernel. Remove old kernels first."
+    fi
+    KERNEL_INSTALL=$KERNEL_PKG
+}
+show_plan() {
+    say
+    section 'What this setup will do'
+    kv Address "$HOST"
+    kv Port "$PORT/UDP"
+    kv Network "$VPN_NET/24 through $IFACE"
+    if (( SPLIT_TUNNEL )); then
+        kv Routing 'split tunnel: only the VPN network'
+    else
+        kv Routing 'full tunnel: all client IPv4 traffic'
+        kv DNS "$DNS_LIST"
+    fi
+    say
+    bullet 'adds the OpenVPN project apt repository (stable channel) and installs openvpn, easy-rsa, socat, nftables'
+    if in_container; then
+        bullet 'this is a container, so it uses the host kernel; no kernel is installed and DCO depends on the host'
+    elif [[ -n $KERNEL_INSTALL ]]; then
+        bullet "installs $KERNEL_PKG without recommended packages:"
+        printf '      %s\n' "${KERNEL_PLAN//$'\n'/ }"
+        bullet 'keeps the current kernel as a fallback; no automatic reboot'
+    else
+        bullet "$KERNEL_PKG is already installed"
+    fi
+    bullet "creates a new CA without a passphrase in $PKI, and a server certificate valid for 10 years"
+    bullet "writes $SERVER_DIR/server.conf, enables IPv4 forwarding and adds NAT for the VPN only"
+    if (( UFW_ACTIVE && OPEN_UFW )); then bullet "adds ufw rules for UDP $PORT and forwarding from tun0"; fi
+    if (( UFW_ACTIVE && ! OPEN_UFW )); then bullet 'does not change ufw, which will block the VPN until you allow it'; fi
+    info "These defaults, and more, can be changed later: darban $S_ARROW Settings $S_CRUMB Advanced."
+    say
+}
+add_repository() {
+    local key
+    key=$(mktemp)
+    curl -fsSL --proto '=https' --tlsv1.2 --max-time 60 -o "$key" https://swupdate.openvpn.net/repos/repo-public.gpg ||
+        die 'Could not download the OpenVPN repository key.'
+    grep -q 'BEGIN PGP PUBLIC KEY' "$key" || die 'The downloaded file is not a PGP public key.'
+    install -d -m 755 "$(dirname -- "$APT_KEY")"
+    install -m 644 "$key" "$APT_KEY"
+    rm -f -- "$key"
+    printf 'deb [arch=%s signed-by=%s] https://build.openvpn.net/debian/openvpn/stable noble main\n' "$ARCH" "$APT_KEY" >"$APT_LIST"
+    chmod 644 "$APT_LIST"
+}
+install_packages() {
+    local version pkg planned
+    apt_run -qq update
+    planned=$(apt_run -s --no-install-recommends install openvpn easy-rsa socat nftables | awk '$1=="Inst" {print $2}') ||
+        die 'apt cannot install the OpenVPN packages.'
+    for pkg in $planned; do
+        case $pkg in
+            openvpn|easy-rsa|socat|nftables)
+                dpkg-query -W -f='${Status}' "$pkg" 2>/dev/null | grep -q 'install ok installed' || printf 'package %s\n' "$pkg" >>"$MARKER" ;;
+            *) printf 'dep %s\n' "$pkg" >>"$MARKER" ;;
+        esac
+    done
+    # shellcheck disable=SC2086  # an empty KERNEL_INSTALL must add no argument
+    apt_run -y -q --no-install-recommends install openvpn easy-rsa socat nftables $KERNEL_INSTALL
+    version=$(openvpn --version | awk 'NR==1 {print $2}')
+    case $version in
+        2.[7-9]*|[3-9].*) ok "OpenVPN $version installed." ;;
+        *) die "Expected OpenVPN 2.7 or newer from the OpenVPN repository, but got ${version:-nothing}." ;;
+    esac
+    [[ -x $EASYRSA_BIN ]] || die "Easy-RSA is not at $EASYRSA_BIN."
+}
+create_pki() {
+    # Nothing renews the server certificate automatically, so it gets a long life under a longer-lived CA.
+    [[ -s $PKI/ca.crt ]] || {
+        easyrsa init-pki
+        EASYRSA_CA_EXPIRE=7300 EASYRSA_REQ_CN="Darban OpenVPN CA" easyrsa build-ca nopass
+    }
+    [[ -s $PKI/issued/$SERVER_NAME.crt ]] || EASYRSA_CERT_EXPIRE=3650 easyrsa build-server-full "$SERVER_NAME" nopass
+    easyrsa gen-crl
+    ok "CA and server certificate are ready in $PKI."
+}
+write_server_config() {
+    local temp item
+    install -d -m 755 "$SERVER_DIR"
+    # The stock unit hides /root from OpenVPN, so the server reads its own copies from here.
+    install -m 644 "$PKI/ca.crt" "$SERVER_DIR/ca.crt"
+    install -m 644 "$PKI/issued/$SERVER_NAME.crt" "$SERVER_DIR/server.crt"
+    install -m 600 "$PKI/private/$SERVER_NAME.key" "$SERVER_DIR/server.key"
+    install -m 644 "$PKI/crl.pem" "$SERVER_DIR/crl.pem"
+    [[ -s $SERVER_DIR/tls-crypt.key ]] || openvpn --genkey secret "$SERVER_DIR/tls-crypt.key"
+    chmod 600 "$SERVER_DIR/tls-crypt.key"
+    temp=$(mktemp "$SERVER_DIR/.server-conf.XXXXXXXX")
+    # All data ciphers are AEAD and nothing compresses, which keeps the connection eligible for DCO.
+    cat >"$temp" <<EOF
+# Created by Darban OVPN server-setup.
+port $PORT
+proto udp4
+dev tun
+topology subnet
+server $VPN_NET 255.255.255.0
+ca ca.crt
+cert server.crt
+key server.key
+tls-crypt tls-crypt.key
+crl-verify $SERVER_DIR/crl.pem
+dh none
+tls-version-min 1.2
+data-ciphers AES-256-GCM:AES-128-GCM:CHACHA20-POLY1305
+keepalive 10 60
+explicit-exit-notify 1
+persist-key
+persist-tun
+user nobody
+group nogroup
+management /run/openvpn-server/darban.sock unix
+verb 3
+EOF
+    if (( ! SPLIT_TUNNEL )); then
+        printf 'push "redirect-gateway def1 bypass-dhcp"\n' >>"$temp"
+        for item in $DNS_LIST; do printf 'push "dhcp-option DNS %s"\n' "$item" >>"$temp"; done
+    fi
+    chmod 644 "$temp"
+    mv -f -- "$temp" "$SERVER_DIR/server.conf"
+    ok "$SERVER_DIR/server.conf written."
+}
+write_tool_settings() {
+    # The address clients connect to, and how to download profiles; an existing file is kept as is.
+    local ssh_port ssh_host
+    printf '%s\n' "$HOST" >"$CONFIG_DIR/domain"
+    chmod 600 "$CONFIG_DIR/domain"
+    [[ ! -e $CONFIG_DIR/config ]] || return 0
+    ssh_port=$( { sshd -T 2>/dev/null || true; } | awk '$1=="port" && p=="" {p=$2} END {print p}')
+    ssh_host=$HOST
+    if [[ -n $LOCAL_IP ]] && ! is_private_ip "$LOCAL_IP"; then ssh_host=$LOCAL_IP; fi
+    printf 'DOWNLOAD_SSH_HOST=%s\nDOWNLOAD_SSH_PORT=%s\nDOWNLOAD_SSH_USER=root\n' "$ssh_host" "${ssh_port:-22}" >"$CONFIG_DIR/config"
+    chmod 600 "$CONFIG_DIR/config"
+}
+configure_network() {
+    printf 'net.ipv4.ip_forward=1\n' >"$SYSCTL_FILE"
+    chmod 644 "$SYSCTL_FILE"
+    sysctl -q -p "$SYSCTL_FILE"
+    # One table of its own: nothing else in the host's firewall is touched.
+    cat >"$CONFIG_DIR/nat.nft" <<EOF
+table ip darban
+delete table ip darban
+table ip darban {
+    chain postrouting {
+        type nat hook postrouting priority srcnat;
+        ip saddr $VPN_NET/24 oifname "$IFACE" masquerade
+    }
+}
+EOF
+    chmod 600 "$CONFIG_DIR/nat.nft"
+    cat >"$NAT_UNIT" <<EOF
+[Unit]
+Description=Darban OpenVPN NAT
+After=network-pre.target
+Before=$UNIT
+
+[Service]
+Type=oneshot
+RemainAfterExit=true
+ExecStart=/usr/sbin/nft -f $CONFIG_DIR/nat.nft
+ExecStop=/usr/sbin/nft delete table ip darban
+
+[Install]
+WantedBy=multi-user.target
+EOF
+    chmod 644 "$NAT_UNIT"
+    systemctl daemon-reload
+    systemctl enable --now darban-nat.service >/dev/null
+    ok "IPv4 forwarding and NAT through $IFACE are on."
+    if (( UFW_ACTIVE && OPEN_UFW )); then
+        # Recorded first, so a removal knows about the rules even if adding the second one fails.
+        printf 'ufw_port %s\nufw_iface %s\n' "$PORT" "$IFACE" >>"$MARKER"
+        ufw allow "$PORT/udp" >/dev/null
+        ufw route allow in on tun0 out on "$IFACE" >/dev/null
+        ok 'ufw now allows the VPN.'
+    fi
+}
+start_server() {
+    local attempt
+    printf 'ovpn\n' >"$MODULES_FILE"
+    chmod 644 "$MODULES_FILE"
+    # On the old kernel this module may not exist yet; OpenVPN then runs in user space until the reboot.
+    modprobe ovpn 2>/dev/null || true
+    systemctl enable openvpn-server@server.service >/dev/null
+    systemctl restart "$UNIT" || die "OpenVPN did not start. Check: journalctl -u $UNIT -n 50 --no-pager"
+    for attempt in 1 2 3 4 5; do
+        if systemctl is-active --quiet "$UNIT" && port_busy "$PORT"; then
+            ok "OpenVPN is running and listening on UDP $PORT."
+            return 0
+        fi
+        sleep 1
+    done
+    die "OpenVPN is not listening on UDP $PORT. Check: journalctl -u $UNIT -n 50 --no-pager"
+}
+finish() {
+    say
+    section 'Server setup finished'
+    if modinfo -k "$(uname -r)" ovpn >/dev/null 2>&1; then
+        ok 'The running kernel has the ovpn module, so DCO is available.'
+    elif in_container; then
+        warn 'This is a container. The VPN runs in user space unless the host kernel offers the ovpn module.'
+    else
+        warn 'The running kernel has no ovpn module. The VPN works now in user space; reboot when convenient to use the new kernel and DCO.'
+    fi
+    warn "Open UDP $PORT in your provider firewall; this setup cannot check it."
+    if (( UFW_ACTIVE && ! OPEN_UFW )); then
+        warn "ufw is active and was not changed. It needs: ufw allow $PORT/udp, and: ufw route allow in on tun0 out on $IFACE"
+    fi
+    if (( ! UFW_ACTIVE )) && iptables -S FORWARD 2>/dev/null | grep -q '^-P FORWARD DROP'; then
+        warn 'The iptables FORWARD policy is DROP, for example because of Docker. Clients may connect but have no internet until it allows tun0.'
+    fi
+    if (( ! SPLIT_TUNNEL )); then
+        info 'Only IPv4 goes through the VPN. A client with its own IPv6 connection still uses it directly for IPv6.'
+    fi
+}
+
+HOST=''
+PORT=''
+VPN_NET=''
+DNS_LIST=''
+SPLIT_TUNNEL=0
+OPEN_UFW=0
+UFW_ACTIVE=0
+ASSUME_YES=0
+ARCH=''
+IFACE=''
+LOCAL_IP=''
+while (( $# )); do
+    case $1 in
+        --host) (( $# >= 2 )) || die '--host needs a value.'; HOST=$2; shift 2 ;;
+        --port) (( $# >= 2 )) || die '--port needs a value.'; PORT=$2; shift 2 ;;
+        --subnet) (( $# >= 2 )) || die '--subnet needs a value.'; VPN_NET=$2; shift 2 ;;
+        --dns) (( $# >= 2 )) || die '--dns needs a value.'; DNS_LIST=$2; shift 2 ;;
+        --split-tunnel) SPLIT_TUNNEL=1; shift ;;
+        --open-ufw) OPEN_UFW=1; shift ;;
+        --yes) ASSUME_YES=1; shift ;;
+        *) printf 'Usage: server-setup.sh [--host NAME|IP] [--port N] [--subnet A.B.C.0] [--dns "IP [IP]"] [--split-tunnel] [--open-ufw] [--yes]\n' >&2; exit 2 ;;
+    esac
+done
+trap ui_restore EXIT
+ui_init
+check_system
+choose_host
+choose_port
+choose_subnet
+choose_dns
+choose_firewall
+step 'Reading the package lists'
+apt_run -qq update
+plan_kernel
+show_plan
+if (( ! ASSUME_YES )); then
+    confirm_choice 'Install and configure this server now?' 'No, change nothing' 'Install and configure' caution install || { info 'Cancelled; nothing was changed.'; exit 0; }
+fi
+install -d -m 700 "$CONFIG_DIR"
+# The record remove-server.sh works from: only what this setup added is ever removed.
+if [[ ! -e $MARKER ]]; then
+    printf 'ip_forward_before %s\n' "$(sysctl -n net.ipv4.ip_forward 2>/dev/null || echo unknown)" >"$MARKER"
+fi
+if [[ -n $KERNEL_INSTALL ]]; then
+    # shellcheck disable=SC2086  # one line per planned package
+    printf 'kernel %s\n' $KERNEL_PLAN >>"$MARKER"
+fi
+step 'Adding the OpenVPN repository'
+add_repository
+step 'Installing packages'
+install_packages
+step 'Creating the CA and server certificate'
+create_pki
+step 'Writing the server configuration'
+write_server_config
+write_tool_settings
+step 'Configuring forwarding and NAT'
+configure_network
+step 'Starting OpenVPN'
+start_server
+finish
