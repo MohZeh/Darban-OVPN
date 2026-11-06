@@ -1,0 +1,37 @@
+name: Release
+on:
+  push:
+    tags:
+      - 'v[0-9]+.[0-9]+.[0-9]+'
+      - 'v[0-9]+.[0-9]+.[0-9]+-*'
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    uses: ./.github/workflows/ci.yml
+
+  release:
+    needs: test
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: The tag must match VERSION
+        run: test "$GITHUB_REF_NAME" = "v$(cat VERSION)"
+      - name: Build assets
+        run: bash scripts/build-release.sh "$RUNNER_TEMP/release"
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          flags=()
+          # A tag with a suffix is a pre-release: it never becomes "latest" or an offered update.
+          if [[ $GITHUB_REF_NAME == *-* ]]; then flags+=(--prerelease --latest=false); else flags+=(--latest); fi
+          gh release create "$GITHUB_REF_NAME" "$RUNNER_TEMP"/release/* \
+            --title "Darban OVPN $GITHUB_REF_NAME" --notes-file "$RUNNER_TEMP/release/RELEASE-NOTES.txt" "${flags[@]}"
