@@ -30,7 +30,7 @@ Pass part of a test name to run a subset: `bash tests/run-tests.sh temporary_lin
 ## Before opening a pull request
 
 - Add a test that fails without your change.
-- Run `bash -n` and [ShellCheck](https://www.shellcheck.net/) on the scripts you changed.
+- Run `bash scripts/lint.sh`. It needs [ShellCheck](https://www.shellcheck.net/) and checks scripts, file modes and documentation links.
 - Update the guides in both `docs/en` and `docs/fa`, and `CHANGELOG.md`, when behavior changes.
 - Keep a pull request to one purpose.
 - Never include real keys, profiles, addresses or tokens, including in test data.

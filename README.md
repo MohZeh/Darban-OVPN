@@ -4,7 +4,7 @@
 
 **Run your own OpenVPN server from one terminal menu, on a clean Ubuntu 24.04 or 26.04 VPS.**
 
-[![CI](https://github.com/MohZeh/darban-ovpn/actions/workflows/ci.yml/badge.svg)](https://github.com/MohZeh/darban-ovpn/actions/workflows/ci.yml)
+[![CI](https://github.com/MohZeh/darban-ovpn/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/MohZeh/darban-ovpn/actions/workflows/ci.yml)
 [![Release](https://img.shields.io/github/v/release/MohZeh/darban-ovpn?include_prereleases&sort=semver)](https://github.com/MohZeh/darban-ovpn/releases)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 ![Ubuntu 24.04 and 26.04](https://img.shields.io/badge/Ubuntu-24.04%20%7C%2026.04-E95420?logo=ubuntu&logoColor=white)
@@ -87,7 +87,7 @@ Report vulnerabilities as described in [SECURITY.md](SECURITY.md).
 
 ## Project status
 
-Automated tests run on every push, including a real installation, a real OpenVPN client, revocation and full removal, separately on Ubuntu 24.04 and 26.04. Reboot behavior, DCO and client apps are being checked on real servers before `v1.0.0`. Changes are listed in the [changelog](CHANGELOG.md).
+Automated tests run on every code change and once a week, including a real installation, a real OpenVPN client, revocation and full removal, separately on Ubuntu 24.04 and 26.04. Reboot behavior, DCO and client apps are being checked on real servers before `v1.0.0`. Changes are listed in the [changelog](CHANGELOG.md).
 
 ## Contributing
 

@@ -58,7 +58,7 @@ Questions follow the same rule. Installation asks only for the address and port,
 
 ## How it is tested
 
-Three layers run on every push:
+Three layers run on every code change and once a week:
 
 | Layer | What it proves | What it cannot prove |
 |---|---|---|
