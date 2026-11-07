@@ -58,13 +58,14 @@ Questions follow the same rule. Installation asks only for the address and port,
 
 ## How it is tested
 
-Three layers run on every code change and once a week:
+The first three layers run on every code change and once a week. The reboot test runs weekly and for each release.
 
 | Layer | What it proves | What it cannot prove |
 |---|---|---|
-| Behavior tests against a stand-in server, with real OpenSSL | Failure paths: rollbacks, restored databases, refused operations, real HTTPS for links | Real Easy-RSA, systemd and packages |
+| Behavior tests against a stand-in server, with real OpenSSL | Failure paths: rollbacks, restored databases, refused operations, real HTTPS for links | Real packages and systemd |
 | Key-press tests in a real pseudo-terminal | Arrow keys, cancel, and terminal state after `Ctrl+C` | How it looks in a given terminal |
-| Acceptance test on throwaway Ubuntu 24.04 and 26.04 machines, each with its own result | Real installation, a real client connecting, revocation refused, links, full removal | Reboot, DCO, the provider's firewall, client apps |
+| Acceptance test on throwaway Ubuntu 24.04 and 26.04 machines, each with its own result | A real install answered in a real terminal, real client traffic and DNS through the tunnel and NAT, ufw, revocation, rollback, update, full removal | A reboot, the provider's firewall, client apps |
+| Reboot test in a fresh Ubuntu cloud image | The kernel install, a real reboot, services coming back, DCO, and a client connecting from outside | A provider's firewall and hardware, client apps |
 
 The last column is checked by hand on a real VPS before each stable release.
 

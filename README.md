@@ -87,7 +87,7 @@ Report vulnerabilities as described in [SECURITY.md](SECURITY.md).
 
 ## Project status
 
-Automated tests run on every code change and once a week, including a real installation, a real OpenVPN client, revocation and full removal, separately on Ubuntu 24.04 and 26.04. Reboot behavior, DCO and client apps are being checked on real servers before `v1.0.0`. Changes are listed in the [changelog](CHANGELOG.md).
+Automated tests run on every code change and once a week, separately on Ubuntu 24.04 and 26.04. They include a real installation answered in a real terminal, real client traffic through the tunnel and NAT, revocation, rollback, updates and full removal. A virtual machine also proves a real reboot and DCO. A provider's firewall, real networks and client apps are being checked on real servers before `v1.0.0`. Changes are listed in the [changelog](CHANGELOG.md).
 
 ## Contributing
 
