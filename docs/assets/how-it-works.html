@@ -1,0 +1,119 @@
+<!doctype html>
+<!-- Source of how-it-works-dark.png and how-it-works-light.png. Render: bash docs/assets/render.sh -->
+<html lang="en"><head><meta charset="utf-8"><title>Darban OVPN architecture</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@500;700&display=block">
+<style>
+:root{--ink:#e9eef3;--soft:#98a5b2;--box:#161c24;--edge:#2f3945;--zone:rgba(255,255,255,.022);--zone-edge:#2d3641;
+  --manage:#3ddc97;--share:#6ea8ff;--vpn:#ffa657;--manage-bg:rgba(61,220,151,.09);--share-bg:rgba(110,168,255,.10);--vpn-bg:rgba(255,166,87,.10)}
+html.light{--ink:#16202b;--soft:#5a6875;--box:#ffffff;--edge:#d0d7de;--zone:rgba(9,30,66,.028);--zone-edge:#c9d1d9;
+  --manage:#0a8f62;--share:#2563d8;--vpn:#c8660a;--manage-bg:rgba(10,143,98,.08);--share-bg:rgba(37,99,216,.08);--vpn-bg:rgba(200,102,10,.09)}
+html,body{margin:0;width:1400px;height:750px;overflow:hidden;background:transparent}
+svg{display:block;font-family:Inter,"Segoe UI",sans-serif;-webkit-font-smoothing:antialiased}
+.node{fill:var(--box);stroke:var(--edge);stroke-width:1.5}
+.tint{stroke-width:2}
+.tm{stroke:var(--manage)}.th{stroke:var(--share)}.tv{stroke:var(--vpn)}
+.bm{fill:var(--manage-bg)}.bh{fill:var(--share-bg)}.bv{fill:var(--vpn-bg)}
+.zone{fill:var(--zone);stroke:var(--zone-edge);stroke-width:1.5;stroke-dasharray:7 7}
+.zt{fill:var(--soft);font-size:16.5px;font-weight:600;letter-spacing:.1em}
+.t{fill:var(--ink);font-size:23px;font-weight:600;text-anchor:middle;letter-spacing:-.012em}
+.mono{font-family:"JetBrains Mono",Consolas,monospace;font-weight:500;font-size:21px;letter-spacing:0}
+.big{font-weight:700;font-size:28px}
+.s{fill:var(--soft);font-size:16.5px;text-anchor:middle}
+.lab{font-size:17px;font-weight:600;text-anchor:middle}
+.start{text-anchor:start}
+.pill{font-size:16.5px;font-weight:600;text-anchor:middle}
+.line{fill:none;stroke-width:2.5;stroke-linejoin:round}
+.m{stroke:var(--manage)}.h{stroke:var(--share)}.v{stroke:var(--vpn)}
+.mf{fill:var(--manage)}.hf{fill:var(--share)}.vf{fill:var(--vpn)}
+.leg{fill:var(--soft);font-size:16.5px;font-weight:500}
+</style>
+<script>if(location.hash==='#light')document.documentElement.classList.add('light')</script>
+</head><body>
+<svg width="1400" height="750" viewBox="0 0 1400 750" role="img" aria-label="Architecture of Darban OVPN">
+<defs>
+  <marker id="am" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="9" markerHeight="9" markerUnits="userSpaceOnUse" orient="auto"><path d="M0 0 10 5 0 10z" class="mf"/></marker>
+  <marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="9" markerHeight="9" markerUnits="userSpaceOnUse" orient="auto"><path d="M0 0 10 5 0 10z" class="hf"/></marker>
+  <marker id="av" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="9" markerHeight="9" markerUnits="userSpaceOnUse" orient="auto"><path d="M0 0 10 5 0 10z" class="vf"/></marker>
+</defs>
+
+<!-- The server boundary -->
+<rect class="zone" x="256" y="24" width="874" height="696" rx="20"/>
+<text class="zt" x="286" y="68">YOUR UBUNTU SERVER</text>
+
+<!-- Arrows first, so the boxes sit on top of them -->
+<g class="line m">
+  <path marker-end="url(#am)" d="M196 265H284"/>
+  <path marker-end="url(#am)" d="M456 380H588"/>
+  <path marker-end="url(#am)" d="M456 555H588"/>
+  <path marker-end="url(#am)" d="M790 380H903"/>
+  <path marker-end="url(#am)" d="M790 555H903"/>
+  <path marker-end="url(#am)" d="M1002.5 296V333"/>
+  <path marker-end="url(#am)" d="M1002.5 426V508"/>
+</g>
+<g class="line h">
+  <path marker-end="url(#ah)" d="M456 150H588"/>
+  <path marker-end="url(#ah)" d="M790 150H1273a12 12 0 0 1 12 12V318"/>
+</g>
+<g class="line v">
+  <path marker-end="url(#av)" d="M1285 422V543a12 12 0 0 1-12 12H1102"/>
+  <path marker-end="url(#av)" d="M1002.5 601V643a12 12 0 0 0 12 12H1198"/>
+</g>
+
+<!-- Outside the server -->
+<rect class="node" x="36" y="215" width="160" height="100" rx="14"/>
+<text class="t" x="116" y="259">Admin</text><text class="s" x="116" y="286">you</text>
+<rect class="node" x="1200" y="320" width="170" height="100" rx="14"/>
+<text class="t" x="1285" y="364">VPN user</text><text class="s" x="1285" y="391">phone or laptop</text>
+<rect class="node" x="1200" y="615" width="170" height="80" rx="14"/>
+<text class="t" x="1285" y="663">Internet</text>
+
+<!-- The tool: every management action goes through it, and each arrow leaves from the job it belongs to -->
+<rect class="node" x="286" y="110" width="170" height="490" rx="16"/>
+<rect class="bm tint tm" x="286" y="110" width="170" height="490" rx="16"/>
+<text class="t mono big" x="371" y="252">darban</text>
+<text class="s" x="371" y="280">menu and</text><text class="s" x="371" y="302">commands</text>
+<rect class="bh" x="306" y="130" width="130" height="40" rx="10"/><text class="pill hf" x="371" y="156">Sharing</text>
+<rect class="bm" x="306" y="360" width="130" height="40" rx="10"/><text class="pill mf" x="371" y="386">Clients</text>
+<rect class="bm" x="306" y="535" width="130" height="40" rx="10"/><text class="pill mf" x="371" y="561">Settings</text>
+
+<!-- Services and files -->
+<rect class="node" x="590" y="110" width="200" height="80" rx="14"/>
+<rect class="bh tint th" x="590" y="110" width="200" height="80" rx="14"/>
+<text class="t" x="690" y="145">Link service</text><text class="s" x="690" y="171">only while a link exists</text>
+
+<rect class="node" x="590" y="335" width="200" height="90" rx="14"/>
+<text class="t" x="690" y="374">Easy-RSA PKI</text><text class="s" x="690" y="401">CA and certificates</text>
+
+<rect class="node" x="590" y="510" width="200" height="90" rx="14"/>
+<text class="t mono" x="690" y="549">server.conf</text><text class="s" x="690" y="576">server settings</text>
+
+<rect class="node" x="905" y="226" width="195" height="70" rx="14"/>
+<text class="t" x="1002.5" y="256" style="font-size:21px">Daily timer</text><text class="s" x="1002.5" y="280">renews before expiry</text>
+
+<rect class="node" x="905" y="335" width="195" height="90" rx="14"/>
+<text class="t mono" x="1002.5" y="374">crl.pem</text><text class="s" x="1002.5" y="401">revocation list</text>
+
+<rect class="node" x="905" y="510" width="195" height="90" rx="14"/>
+<rect class="bv tint tv" x="905" y="510" width="195" height="90" rx="14"/>
+<text class="t" x="1002.5" y="549">OpenVPN</text><text class="s" x="1002.5" y="576">+ ovpn kernel module</text>
+
+<!-- Arrow labels -->
+<text class="lab mf" x="240" y="253">SSH</text>
+<text class="lab hf" x="522" y="139">one-time link</text>
+<text class="lab mf" x="522" y="369">issue, revoke</text>
+<text class="lab mf" x="522" y="544">edit, roll back</text>
+<text class="lab mf" x="846" y="369">verified CRL</text>
+<text class="lab mf" x="846" y="544">config</text>
+<text class="lab mf" x="989" y="473" style="text-anchor:end">blocks revoked</text>
+<text class="lab hf" x="1040" y="139">HTTPS download</text>
+<text class="lab vf start" x="1142" y="544">UDP tunnel</text>
+<text class="lab vf" x="1070" y="644">NAT</text>
+
+<!-- Legend -->
+<g transform="translate(36 610)">
+  <line class="line m" x1="0" x2="34" y1="0" y2="0"/><text class="leg" x="46" y="6">Management</text>
+  <line class="line h" x1="0" x2="34" y1="34" y2="34"/><text class="leg" x="46" y="40">Profile delivery</text>
+  <line class="line v" x1="0" x2="34" y1="68" y2="68"/><text class="leg" x="46" y="74">VPN traffic</text>
+</g>
+</svg>
+</body></html>

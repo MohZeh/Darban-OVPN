@@ -1,6 +1,6 @@
-<div align="center">
+<a href="#quick-start"><img src="docs/assets/hero.png" alt="Darban OVPN: your own OpenVPN server, run from one terminal menu. One-time links for sharing profiles, verified revocation and automatic rollback on Ubuntu 24.04 and 26.04." width="100%"></a>
 
-# Darban OVPN
+<div align="center">
 
 **Run your own OpenVPN server from one terminal menu, on a clean Ubuntu 24.04 or 26.04 VPS.**
 
@@ -17,28 +17,6 @@
 > **Pre-release.** This version is being tested on real servers. Try it on a disposable VPS first. See [Project status](#project-status).
 
 Darban (دربان, "gatekeeper") installs a current OpenVPN server and then handles the daily work: creating clients, delivering their profiles safely, revoking access, and keeping the revocation list valid. Every risky change is confirmed first and, where possible, rolled back automatically if it fails.
-
-```text
- Darban OVPN v1.0.0-beta.1
-────────────────────────────────────────────────────────────────────────
-  Server    ● active · vpn.example.com:1194/UDP
-  CRL       ✓ valid · 180 days left
-  Clients   1 valid · 0 revoked
-────────────────────────────────────────────────────────────────────────
- CLIENTS
-    1  List clients
-    2  Create client
-    3  Revoke client (permanent)
- SHARE
-    4  Share a profile (link, QR, download)
-    5  Active links
-    6  Delete server copy
- SERVER
-    7  Settings
-    8  Maintenance & diagnostics
-    9  Setup (update, uninstall, remove all)
-    0  Exit
-```
 
 ## Why Darban
 
@@ -84,21 +62,12 @@ The setup asks only for the server address and UDP port. Everything else has a s
 
 ## How it works
 
-```mermaid
-flowchart LR
-    admin([Admin]) -->|SSH| tool[darban menu]
-    tool --> pki[(Easy-RSA PKI)]
-    tool --> conf[server.conf]
-    pki -->|verified CRL| crl[crl.pem]
-    conf --> ovpn[OpenVPN + ovpn kernel module]
-    crl --> ovpn
-    timer[Daily timer] -->|renew| crl
-    tool -->|one-time link| links[Link service]
-    links -->|HTTPS| user([VPN user])
-    user -->|UDP| ovpn
-```
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/assets/how-it-works-dark.png">
+  <img src="docs/assets/how-it-works-light.png" alt="Architecture diagram. An admin reaches the darban tool over SSH. The tool issues and revokes certificates in the Easy-RSA PKI, which produces a verified CRL in crl.pem; a daily timer renews that file. The tool also edits server.conf and rolls back on failure. OpenVPN reads both files. For sharing, the tool creates a one-time link in the link service, and the VPN user downloads the profile over HTTPS. The VPN user connects to OpenVPN through a UDP tunnel, and traffic reaches the internet through NAT." width="100%">
+</picture>
 
-The tool is written in Bash, with a small standard-library Python service that runs only while a link exists. See [the case study](docs/case-study.md) for the reasoning behind the main decisions.
+Green is management, blue is profile delivery and orange is VPN traffic. The tool is written in Bash, with a small standard-library Python service that runs only while a link exists. See [the case study](docs/case-study.md) for the reasoning behind the main decisions.
 
 ## Security model
 

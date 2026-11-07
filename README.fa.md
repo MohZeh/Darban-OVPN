@@ -1,6 +1,6 @@
-<div dir="rtl">
+<a href="#شروع-سریع"><img src="docs/assets/hero.png" alt="Darban OVPN: your own OpenVPN server, run from one terminal menu. One-time links for sharing profiles, verified revocation and automatic rollback on Ubuntu 24.04 and 26.04." width="100%"></a>
 
-# Darban OVPN
+<div dir="rtl">
 
 **سرور OpenVPN خودت را از یک منوی ترمینال، روی یک VPS تازهٔ Ubuntu 24.04 یا 26.04، اداره کن.**
 
@@ -55,6 +55,19 @@ sudo darban
 - تنظیمات پیشرفتهٔ مسیر، DNS، شبکه، رمزها و keepalive با برگشت خودکار
 - اعلان نسخهٔ جدید در منو، و به‌روزرسانی و برگشت از داخل خود ابزار
 - حذف تمیز: فقط چیزهایی که خود نصب اضافه کرده است
+
+## چطور کار می‌کند
+
+</div>
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/assets/how-it-works-dark.png">
+  <img src="docs/assets/how-it-works-light.png" alt="Architecture diagram. An admin reaches the darban tool over SSH. The tool issues and revokes certificates in the Easy-RSA PKI, which produces a verified CRL in crl.pem; a daily timer renews that file. The tool also edits server.conf and rolls back on failure. OpenVPN reads both files. For sharing, the tool creates a one-time link in the link service, and the VPN user downloads the profile over HTTPS. The VPN user connects to OpenVPN through a UDP tunnel, and traffic reaches the internet through NAT." width="100%">
+</picture>
+
+<div dir="rtl">
+
+سبز مسیر مدیریت، آبی تحویل پروفایل و نارنجی ترافیک VPN است. ابزار با Bash نوشته شده و یک سرویس کوچک Python فقط تا وقتی لینکی فعال باشد اجرا می‌شود.
 
 ## مدل امنیتی
 
