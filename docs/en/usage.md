@@ -1,48 +1,108 @@
-# Usage
+# Everyday tasks
 
 [Back to README](../../README.md) · [فارسی](../fa/usage.md)
 
-Start the menu with `sudo darban`. The header shows the service, address, CRL health, client counts, and any alert that needs you.
+Open the menu with:
 
-## Choosing and confirming
+```bash
+sudo darban
+```
 
-Confirmations show two options. Option 1 is the safe default.
+The top of the menu shows the state of the server, the [blocklist](glossary.md#blocklist-crl), your clients and any problem that needs attention.
 
-- `↑`/`↓` or `1`/`2` (also Persian digits) move the selection
-- `Enter` confirms; moving alone does nothing
-- `Esc` or `Ctrl+C` cancels
+## How to answer
 
-In a script or pipe, the tool reads one line instead: `2` or the exact target confirms.
+- **In a list of options:** the line `Enter: ...` says what Enter does now. To choose another option, press `↑`/`↓` or its number, then Enter. `Esc` cancels. Moving alone does nothing.
+- **In a question with a suggestion:** Enter accepts what is in the brackets.
+- **In a question without a suggestion:** Enter alone cancels.
 
-## Main menu
+Risky questions start on the safe answer. Persian digits work too.
 
-| Item | What it does |
-|---|---|
-| 1 List clients | Active clients with status, expiry and days left. Revoked clients are hidden, and offered on request |
-| 2 Create client | Issues a certificate and profile, then asks how to share it |
-| 3 Revoke client | Permanently revokes the certificate, publishes a verified CRL, deletes the server copy, removes open links, and handles the active session |
-| 4 Share a profile | Rebuilds the profile with the current address and port, then shares it. See [Sharing](sharing.md) |
-| 5 Active links | Shows open links and lets you cancel them |
-| 6 Delete server copy | Deletes a `.ovpn` file on the server. The certificate stays valid |
-| 7 Settings | VPN hostname, UDP port, and [Advanced](advanced.md) |
-| 8 Maintenance & diagnostics | Checklist, CRL repair, service restart. See [Operations](operations.md) |
-| 9 Setup | Update, restore, update notice, about, uninstall, remove everything |
+## Add a person or device
 
-## Client names
+1. Press `2` **Create client**, and type a name such as `ali-phone`.
+2. Choose how to send the profile. See [Sharing a profile](sharing.md).
 
-New names may use letters, digits, `_` and `-`, up to 64 characters. Existing certificates may also use `.`, `@` and `+`.
+Each device should have its own client, so you can remove one without affecting the others.
 
-A name with a valid certificate cannot be used again. A revoked name can, once its revocation is complete: old profiles stay blocked because OpenVPN rejects them by serial number. You are asked first only if per-client settings exist for that name in `client-config-dir`, because they would apply to the new certificate.
+## See who is connected
 
-## Commands
+Open **8 Maintenance & diagnostics**, then `4` **Connected now**. The top of the menu also counts them.
+
+## See all clients
+
+Press `1` **List clients**. It shows who is valid, and when each certificate expires. Revoked clients are hidden, and the tool offers to show them.
+
+## Send a profile again
+
+For example, after a new phone or a changed server address:
+
+1. Press `4` **Share a profile**.
+2. Choose the client and the way to send it.
+
+## Remove a person or device
+
+1. Press `3` **Revoke client (permanent)**, and choose the client.
+2. Press `2` to move to the revoke option, then Enter.
+
+The old profile stops working everywhere, and the current connection of that client ends. Other users are not affected. This cannot be undone, but you can later create a new client with the same name.
+
+## Cancel a link that was not used
+
+Press `5` **Active links** and choose the link.
+
+## Delete a profile left on the server
+
+Press `6` **Delete server copy**. The client keeps working. Only the file on the server goes away.
+
+## Change the server address or port
+
+Open **7 Settings**:
+
+- `1` **Server address**
+- `2` **OpenVPN UDP port**
+
+After changing either one, send the profiles again, because each profile holds the address it was made with. A new port must also be open in your provider's firewall.
+
+## Update the tool
+
+Run the install command again, or use **9 Setup**, then `1` **Check for updates**:
+
+```bash
+sudo darban update
+```
+
+Only the tool changes. OpenVPN does not restart, and clients stay as they are. To go back, use **9 Setup**, then `2` **Restore previous version**.
+
+## Check the server
+
+Open **8 Maintenance & diagnostics**, then `1` **Diagnostics**, or run:
+
+```bash
+sudo darban status
+```
+
+The exit status is `0` when everything is fine and `1` when there is a problem, so scripts can use it too. If something is wrong, see [Troubleshooting](troubleshooting.md).
+
+## Remove the tool
+
+Open **9 Setup**:
+
+- `5` **Uninstall this tool only:** OpenVPN keeps running.
+- `6` **Remove everything:** the tool, OpenVPN, and every client. Every profile stops working for good.
+
+See [what each one removes](advanced.md#what-removal-does).
+
+## All commands
 
 ```bash
 sudo darban                # menu
 sudo darban --no-clear     # menu that never clears the screen
 sudo darban list           # active clients
 sudo darban list --all     # including revoked clients
+sudo darban connected      # clients connected right now
 sudo darban status         # diagnostics checklist
-sudo darban repair-crl     # publish a fresh CRL and finish a revocation
+sudo darban repair-crl     # publish a fresh blocklist and finish a revocation
 sudo darban update         # check for a release and install it
 sudo darban about          # version, project address and contact
 sudo darban uninstall      # remove only this tool
@@ -51,16 +111,4 @@ sudo darban version
 sudo darban help
 ```
 
-`NO_COLOR=1` turns colors off. Symbols fall back to ASCII outside UTF-8 locales.
-
-Actions are recorded in the journal:
-
-```bash
-sudo journalctl -t darban
-```
-
-## Good to know
-
-- The tool closes itself after 15 minutes without input.
-- `Ctrl+C` cancels the current action. During critical steps, such as issuing a certificate or publishing a CRL, it is ignored until the step completes.
-- Certificates are not renewed automatically. Expiring clients are shown in the list and the header.
+The menu closes after 15 minutes without input. `NO_COLOR=1` turns colors off. Actions are recorded in the system journal: `sudo journalctl -t darban`.

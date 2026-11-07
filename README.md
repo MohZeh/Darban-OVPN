@@ -9,7 +9,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 ![Ubuntu 24.04 and 26.04](https://img.shields.io/badge/Ubuntu-24.04%20%7C%2026.04-E95420?logo=ubuntu&logoColor=white)
 
-[فارسی](README.fa.md) · [Install](docs/en/installation.md) · [Usage](docs/en/usage.md) · [Sharing](docs/en/sharing.md) · [Advanced](docs/en/advanced.md) · [Operations](docs/en/operations.md) · [Case study](docs/case-study.md)
+[فارسی](README.fa.md) · [Getting started](docs/en/getting-started.md) · [Connect a device](docs/en/connect-devices.md) · [Everyday tasks](docs/en/usage.md) · [Troubleshooting](docs/en/troubleshooting.md) · [Case study](docs/case-study.md)
 
 </div>
 
@@ -17,16 +17,6 @@
 > **Pre-release.** This version is being tested on real servers. Try it on a disposable VPS first. See [Project status](#project-status).
 
 Darban (دربان, "gatekeeper") installs a current OpenVPN server and then handles the daily work: creating clients, delivering their profiles safely, revoking access, and keeping the revocation list valid. Every risky change is confirmed first and, where possible, rolled back automatically if it fails.
-
-## Why Darban
-
-| You want to | Darban does |
-|---|---|
-| Set up a server without a long tutorial | Asks for an address and a port, then installs OpenVPN from the OpenVPN project's repository and, only if the running kernel needs it, the Virtual HWE kernel, without graphics or firmware packages |
-| Send a profile to someone safely | Creates a one-time link that expires, and that a messenger's link preview cannot use up |
-| Be sure a revoked client is really blocked | Checks the published CRL against the CA database, and warns by name until a revocation is enforced |
-| Change settings without locking users out | Keeps a backup, restarts, checks the port, and restores the old configuration if the service does not return |
-| Stay in control of your server | Installs nothing without showing it first, updates only after your confirmation, and can remove only what it added |
 
 ## Install or update
 
@@ -36,11 +26,15 @@ On a **fresh Ubuntu 24.04 or 26.04 VPS**, connected through direct SSH. The same
 curl -fsSL https://github.com/MohZeh/darban-ovpn/releases/latest/download/get.sh | sudo bash
 ```
 
-Press Enter to accept the suggested address and port, and Enter again to install. The tool then offers to create your first client and share it.
+Press Enter to accept the suggested address and port, and Enter again to install. The tool then offers to create your first client, shares it, and tells you when it connects.
 
-While only pre-releases exist, take the same command from the version you want on the [Releases](https://github.com/MohZeh/darban-ovpn/releases) page: replace `latest/download` with `download/vX.Y.Z-rc.N`.
+**[Follow the step-by-step guide](docs/en/getting-started.md)**, from a new server to your first connected user. While only pre-releases exist, use the address of a version from the [Releases](https://github.com/MohZeh/darban-ovpn/releases) page: replace `latest/download` with `download/vX.Y.Z-rc.N`.
 
-On a server that already runs OpenVPN, the setup step is skipped and your configuration is not changed. See [Installation](docs/en/installation.md) for the details, and for reading the script before you run it.
+## Why Darban
+
+- **A server in minutes.** Enter accepts a working default at every step, and you see your first client connect.
+- **Profiles that travel safely.** A link works once and expires, and a messenger's preview cannot use it up.
+- **Revocation you can trust.** The revocation list is checked against the CA, and a client that is not really blocked is named until it is.
 
 ## Features
 
@@ -48,6 +42,7 @@ On a server that already runs OpenVPN, the setup step is skipped and your config
 - Create, list and revoke clients, with clear expiry information
 - Issue a new certificate under a revoked name; old profiles stay blocked
 - See every valid certificate, and why one cannot be managed if that is the case
+- See who is connected, and end one client's session without touching the others
 
 **Sharing**
 - One-time links valid for 15 minutes, 1 hour or 24 hours, and QR codes
@@ -58,6 +53,8 @@ On a server that already runs OpenVPN, the setup step is skipped and your config
 - Daily CRL renewal, with protection against a restored old CA database silently un-revoking clients
 - Advanced settings for routing, DNS, network, ciphers and keepalive, with automatic rollback
 - Update notice in the menu, update and restore from inside the tool
+- A setup that stops half way continues on the next run, or can be undone
+- Diagnostics, updates and removal keep working on a broken server
 - Clean removal: only what the setup itself added
 
 ## How it works
@@ -80,7 +77,7 @@ Report vulnerabilities as described in [SECURITY.md](SECURITY.md).
 
 ## Known limits
 
-- Only Ubuntu 24.04 and 26.04 are supported for server setup, with one OpenVPN server, `udp4`, and the layout described in [Installation](docs/en/installation.md).
+- Only Ubuntu 24.04 and 26.04 are supported for server setup, with one OpenVPN server, `udp4`, and the layout described in [Advanced](docs/en/advanced.md#a-server-that-already-runs-openvpn).
 - Only IPv4 goes through the VPN. A client with its own IPv6 connection uses it directly for IPv6.
 - Client, server and CA certificates are not renewed automatically; only the CRL is.
 - Direct import into OpenVPN Connect from a link is still being tested. The download button always works.
@@ -88,6 +85,18 @@ Report vulnerabilities as described in [SECURITY.md](SECURITY.md).
 ## Project status
 
 Automated tests run on every code change and once a week, separately on Ubuntu 24.04 and 26.04. They include a real installation answered in a real terminal, real client traffic through the tunnel and NAT, revocation, rollback, updates and full removal. A virtual machine also proves a real reboot and DCO. A provider's firewall, real networks and client apps are being checked on real servers before `v1.0.0`. Changes are listed in the [changelog](CHANGELOG.md).
+
+## Guides
+
+| Guide | For |
+|---|---|
+| [Getting started](docs/en/getting-started.md) | From a new server to your first connected user |
+| [Connect a device](docs/en/connect-devices.md) | The person receiving a link: Android, iPhone, Windows, macOS, Linux |
+| [Everyday tasks](docs/en/usage.md) | Adding and removing people, updating, all commands |
+| [Sharing a profile](docs/en/sharing.md) | Links, QR codes, your own computer, passwords |
+| [Troubleshooting](docs/en/troubleshooting.md) | What to do when something does not work |
+| [Advanced](docs/en/advanced.md) | Reading the script first, unattended install, existing servers, settings, backup |
+| [Glossary](docs/en/glossary.md) | What the words mean |
 
 ## Contributing
 

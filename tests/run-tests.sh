@@ -1991,6 +1991,10 @@ test_repo_checks_find_problems() {
     out=$(check); rc_not0 'a broken link fails' "$?"; has 'it names the broken link' 'broken link: docs/missing.md' "$out"
     sed -i '$d' "$dir/README.md"; printf '[x](#nowhere)\n' >>"$dir/README.md"
     out=$(check); rc_not0 'a missing heading fails' "$?"; has 'it names the heading' 'no such heading: #nowhere' "$out"
+    printf '<a id="nowhere"></a>
+' >>"$dir/README.md"
+    out=$(check); rc_is 'an explicit anchor counts' 0 "$?"
+    sed -i '$d' "$dir/README.md"
     sed -i '$d' "$dir/README.md"; printf '```\n[x](docs/missing.md)\n```\n' >>"$dir/README.md"
     out=$(check); rc_is 'a link inside a code block is ignored' 0 "$?"
     printf 'sudo darban nosuch\n' >>"$dir/README.md"

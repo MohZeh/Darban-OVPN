@@ -12,6 +12,7 @@ EXECUTABLE = re.compile(r'^(setup/.*\.sh|bin/[^/]+|scripts/[^/]+|tests/.*\.(sh|p
 BINARY = ('.png', '.jpg', '.gif', '.gz', '.ico')
 LINK = re.compile(r'\]\(([^)\s]+)(?:\s+"[^"]*")?\)')
 HTML_LINK = re.compile(r'(?:src|srcset|href)="([^"]+)"')
+ANCHOR = re.compile(r'<a id="([^"]+)"></a>')
 HEADING = re.compile(r'^#{1,6}\s+(.+?)\s*$')
 COMMAND = re.compile(r'\bsudo darban ([a-z][a-z-]*)')
 USAGE_COMMAND = re.compile(r'^  ([a-z][a-z-]*)\s')
@@ -38,8 +39,9 @@ def prose_lines(text):
 
 
 def anchors(path):
-    return {slug(match.group(1)) for line in prose_lines(path.read_text(encoding='utf-8'))
-            if (match := HEADING.match(line))}
+    text = path.read_text(encoding='utf-8')
+    found = {slug(match.group(1)) for line in prose_lines(text) if (match := HEADING.match(line))}
+    return found | set(ANCHOR.findall(text))
 
 
 def documented_commands(root):

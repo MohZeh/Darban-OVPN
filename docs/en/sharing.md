@@ -1,63 +1,62 @@
-# Sharing profiles
+# Sharing a profile
 
 [Back to README](../../README.md) · [فارسی](../fa/sharing.md)
 
-A `.ovpn` profile contains a private key: whoever has it can connect as that client. After creating a client, or from menu 4, choose one method:
+A profile (`.ovpn` file) holds a private key: whoever has it can connect as that client. After creating a client, or from menu `4`, choose one way to send it:
 
-| Method | Use it when |
+| Way | Best for |
 |---|---|
-| Temporary link | Sending the profile to someone else |
-| QR code | The user's phone is in front of you |
-| My own computer | You will copy the file yourself with `scp` or `sftp` |
-| Later | The file should wait on the server |
+| **Temporary link** | Sending it to someone else. This is the usual choice |
+| **QR code** | A phone in front of you |
+| **My own computer** | Fetching the file yourself with `scp` or `sftp` |
+| **Later** | Leaving the file on the server for now |
 
-## Temporary links
+## Temporary link
 
-Choose how long the link works: 15 minutes, 1 hour or 24 hours. Permanent links do not exist on purpose, because a link stays in chat histories.
+1. Choose **Temporary link**.
+2. Choose how long it works: 1 hour, 15 minutes or 24 hours.
+3. Open the TCP port the tool shows in your provider's firewall.
+4. Send the link, and the note if the tool shows one.
 
-**What the recipient sees**
+The person follows [Connect a device](connect-devices.md). There are no permanent links, because a link stays in chat histories.
 
-1. Opening the link shows a short page, in Persian and English. This does not use up the link, so a messenger's link preview cannot burn it.
-2. Pressing the button uses the link. The address from then on stays valid for 10 minutes and allows up to 3 downloads.
-3. The page offers **OpenVPN Connect** and **Download .ovpn**.
+**If the person finds the link already used, and did not use it:** revoke the client and create a new one, because someone else may have the profile.
 
-If someone finds the link already used and did not use it themselves, **revoke the client and issue a new one**: someone else may hold the profile.
-
-**How it is protected**
-
-- Only a hash of the token stays on the server. A token that was lost cannot be shown again.
-- The profile copy lives in `/run/darban-links` and disappears on reboot. The copy in the download folder is removed.
-- Revoking a client removes its open links. Menu 5 cancels any link.
-- The service runs only while a link exists, and stops by itself afterwards.
-- Tokens are not logged. Creating and using a link is logged with the client name and IP address.
-
-> The **OpenVPN Connect** button uses the `openvpn://import-profile/` format documented for OpenVPN Access Server. Its behavior with this server is still being tested on real apps. Use the download button if it does not open.
-
-### Port
-
-The first free port of 443, 8443 and 9443 is chosen and remembered. Change it under **Settings › Advanced › Share link port**. It must be open in your provider's firewall.
-
-### Certificate
-
-| Server address | Certificate |
-|---|---|
-| Hostname | A free Let's Encrypt certificate is offered. It needs TCP port 80 for a moment and installs `certbot` |
-| IP address, or offer declined | Self-signed: the browser shows a warning, and direct import into the app may not work |
-
-With a self-signed certificate, the tool shows its fingerprint.
+To cancel a link, use menu `5`.
 
 ## QR code
 
-The QR code holds the same temporary link, because a profile is usually too large for a readable code. The small `qrencode` package is installed only after you agree.
-
-## Password on the private key
-
-For any method you can lock the key inside the profile. The tool generates a random password and shows it **only once**. Send it another way than the file or link, so that one leaked channel is not enough. The app asks for it when connecting. The key in the PKI is not changed.
+Choose **QR code**, and scan it with the phone. It holds the same temporary link, because a whole profile is usually too large for a readable QR code. The tool offers to install the small `qrencode` package the first time.
 
 ## My own computer
 
-The tool asks for your system and shows only that command: Windows PowerShell, macOS or Linux, or an address for WinSCP and FileZilla. These settings live under **Settings › Advanced › Download access**. Afterwards, delete the server copy when offered, or from menu 6.
+1. Choose **My own computer**, then your operating system.
+2. Copy the command the tool shows, and run it on your computer.
+3. Choose to delete the server copy when you are done.
+
+If you log in with a user other than `root`, that user gets a private copy of the file in its home folder. The address, port and user come from **Settings › Advanced › Download access**.
+
+## A password on the key
+
+Any way can lock the key with a password. Answer **Yes, make a password**. The tool makes a random password and shows it **only once**. Send it by another route than the link, so one leak is not enough. The app asks for it when connecting.
 
 ## After changing the address or port
 
-Profiles keep the address they were built with. Share them again from menu 4 after changing the hostname, port or ciphers.
+Profiles keep the address they were made with. Send them again from menu `4`.
+
+## The browser warning
+
+With a domain name, the tool offers a free certificate from Let's Encrypt. It needs TCP port 80 for a moment, and it installs `certbot`.
+
+With only an IP address, or if you decline, the tool makes its own certificate. The link still works and is encrypted, but the browser shows a warning, and direct import into the app may not work. The tool shows a note to send with the link, and the certificate fingerprint.
+
+## How links are protected
+
+- Opening a link only shows a page, so a messenger's preview cannot use it up.
+- Pressing the button uses the link. The next address works for 10 minutes and allows up to 3 downloads.
+- Only a hash of the link's token stays on the server, so a lost link cannot be shown again.
+- The copy of the profile is kept in `/run/darban-links`, which a reboot clears.
+- Revoking a client deletes its open links.
+- The link service runs only while a link exists, and tokens never reach the logs. Creating and using a link is recorded with the client's name and IP address.
+
+The **OpenVPN Connect** button uses the `openvpn://import-profile/` address documented for OpenVPN Access Server. Its behavior with this server is still being tested on real apps.
