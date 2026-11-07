@@ -14,12 +14,25 @@ concurrency:
 
 jobs:
   test:
-    runs-on: ubuntu-24.04
+    # Each Ubuntu version is its own job, with its own status; one failing does not stop the other.
+    name: Test (Ubuntu ${{ matrix.ubuntu }})
+    strategy:
+      fail-fast: false
+      matrix:
+        ubuntu: ['24.04', '26.04']
+    runs-on: ubuntu-${{ matrix.ubuntu }}
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - name: Confirm the Ubuntu version
+        env:
+          EXPECTED: ${{ matrix.ubuntu }}
+        run: |
+          . /etc/os-release
+          test "$VERSION_ID" = "$EXPECTED"
+          echo "Ubuntu $VERSION_ID, kernel $(uname -r)" >> "$GITHUB_STEP_SUMMARY"
       - name: Install test tools
         run: sudo apt-get update && sudo apt-get install -y shellcheck easy-rsa
       - name: Syntax
@@ -37,13 +50,25 @@ jobs:
 
   # Runs the real setup, OpenVPN, Easy-RSA, systemd and a real client on a throwaway runner.
   acceptance:
-    runs-on: ubuntu-24.04
+    name: Acceptance (Ubuntu ${{ matrix.ubuntu }})
+    strategy:
+      fail-fast: false
+      matrix:
+        ubuntu: ['24.04', '26.04']
+    runs-on: ubuntu-${{ matrix.ubuntu }}
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - name: Confirm the Ubuntu version
+        env:
+          EXPECTED: ${{ matrix.ubuntu }}
+        run: |
+          . /etc/os-release
+          test "$VERSION_ID" = "$EXPECTED"
+          echo "Ubuntu $VERSION_ID, kernel $(uname -r)" >> "$GITHUB_STEP_SUMMARY"
       - name: The runner must not already have a PKI or server
         run: sudo test ! -e /root/pki && test ! -e /etc/openvpn/server/server.conf
-      - name: Real setup and client on Ubuntu 24.04
+      - name: Real setup and client on Ubuntu ${{ matrix.ubuntu }}
         run: sudo bash tests/acceptance-ci.sh --i-know
