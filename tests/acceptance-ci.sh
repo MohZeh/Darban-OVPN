@@ -50,9 +50,13 @@ for attempt in $(seq 1 10); do
 done
 darban connected | grep -q accept1
 echo 'PASS: the connected client is listed.'
+
+# Revoked while connected: only this session ends, without restarting OpenVPN for everyone.
+printf '3\naccept1\naccept1\n0\n' | darban | tee "$LOG/revoke.log"
+grep -q 'Active session of accept1 disconnected' "$LOG/revoke.log"
+echo 'PASS: revoking ends the active session of that client alone.'
 disconnect
 
-printf '3\naccept1\naccept1\n1\n0\n' | darban
 if connect "$LOG/old.ovpn" "$LOG/b.log"; then echo 'FAIL: the revoked profile still connects.'; exit 1; fi
 disconnect
 echo 'PASS: the revoked profile was refused.'
