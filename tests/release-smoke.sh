@@ -9,7 +9,7 @@ tag=$2
 earlier=${3:-}
 cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.."
 LOG=$(mktemp -d)
-url() { printf 'https://github.com/MohZeh/darban-ovpn/releases/download/%s/get.sh' "$1"; }
+url() { printf 'https://github.com/MohZeh/Darban-OVPN/releases/download/%s/get.sh' "$1"; }
 one_line() { printf 'curl -fsSL %s | sudo bash' "$(url "$1")"; }
 in_terminal() {
     # in_terminal <name> <shell command>: answers it from $LOG/<name>.keys in a real terminal.

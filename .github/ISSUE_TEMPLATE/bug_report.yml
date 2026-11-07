@@ -5,7 +5,7 @@ body:
   - type: markdown
     attributes:
       value: |
-        **Never post private keys, `.ovpn` files, link tokens or real passwords.** For a security problem, use the [private report](https://github.com/MohZeh/darban-ovpn/security/advisories/new) instead.
+        **Never post private keys, `.ovpn` files, link tokens or real passwords.** For a security problem, use the [private report](https://github.com/MohZeh/Darban-OVPN/security/advisories/new) instead.
   - type: input
     id: version
     attributes:

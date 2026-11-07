@@ -97,7 +97,7 @@ sudo darban repair-crl
 
 ## به‌روزرسانی می‌گوید نسخه‌ای برای نصب نیست
 
-هنوز نسخهٔ پایداری منتشر نشده است. صفحهٔ [Releases](https://github.com/MohZeh/darban-ovpn/releases) را ببین.
+هنوز نسخهٔ پایداری منتشر نشده است. صفحهٔ [Releases](https://github.com/MohZeh/Darban-OVPN/releases) را ببین.
 
 ## گزارش مشکل
 

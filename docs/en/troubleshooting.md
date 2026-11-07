@@ -75,7 +75,7 @@ The daily blocklist check or another session holds the lock. Try again in a minu
 
 ## Update says there is nothing to update to
 
-No stable release has been published yet. See the [Releases](https://github.com/MohZeh/darban-ovpn/releases) page.
+No stable release has been published yet. See the [Releases](https://github.com/MohZeh/Darban-OVPN/releases) page.
 
 ## Reporting a problem
 

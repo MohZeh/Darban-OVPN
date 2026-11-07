@@ -4,8 +4,8 @@
 
 **Run your own OpenVPN server from one terminal menu, on a clean Ubuntu 24.04 or 26.04 VPS.**
 
-[![CI](https://github.com/MohZeh/darban-ovpn/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/MohZeh/darban-ovpn/actions/workflows/ci.yml)
-[![Release](https://img.shields.io/github/v/release/MohZeh/darban-ovpn?include_prereleases&sort=semver)](https://github.com/MohZeh/darban-ovpn/releases)
+[![CI](https://github.com/MohZeh/Darban-OVPN/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/MohZeh/Darban-OVPN/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/MohZeh/Darban-OVPN?include_prereleases&sort=semver)](https://github.com/MohZeh/Darban-OVPN/releases)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 ![Ubuntu 24.04 and 26.04](https://img.shields.io/badge/Ubuntu-24.04%20%7C%2026.04-E95420?logo=ubuntu&logoColor=white)
 
@@ -23,12 +23,12 @@ Darban (دربان, "gatekeeper") installs a current OpenVPN server and then han
 On a **fresh Ubuntu 24.04 or 26.04 VPS**, connected through direct SSH. The same command also updates an existing installation:
 
 ```bash
-curl -fsSL https://github.com/MohZeh/darban-ovpn/releases/latest/download/get.sh | sudo bash
+curl -fsSL https://github.com/MohZeh/Darban-OVPN/releases/latest/download/get.sh | sudo bash
 ```
 
 Press Enter to accept the suggested address and port, and Enter again to install. The tool then offers to create your first client, shares it, and tells you when it connects.
 
-**[Follow the step-by-step guide](docs/en/getting-started.md)**, from a new server to your first connected user. While only pre-releases exist, use the address of a version from the [Releases](https://github.com/MohZeh/darban-ovpn/releases) page: replace `latest/download` with `download/vX.Y.Z-rc.N`.
+**[Follow the step-by-step guide](docs/en/getting-started.md)**, from a new server to your first connected user. While only pre-releases exist, use the address of a version from the [Releases](https://github.com/MohZeh/Darban-OVPN/releases) page: replace `latest/download` with `download/vX.Y.Z-rc.N`.
 
 ## Why Darban
 

@@ -4,7 +4,7 @@
 
 Please do not open a public issue for a security problem.
 
-Report it through [GitHub private vulnerability reporting](https://github.com/MohZeh/darban-ovpn/security/advisories/new). Include the affected version, the steps to reproduce it, and its impact. Do not include real private keys, profiles or tokens.
+Report it through [GitHub private vulnerability reporting](https://github.com/MohZeh/Darban-OVPN/security/advisories/new). Include the affected version, the steps to reproduce it, and its impact. Do not include real private keys, profiles or tokens.
 
 This is a project maintained in spare time, so responses are best effort. I will acknowledge a report as soon as I can, and publish the fix and advisory together.
 

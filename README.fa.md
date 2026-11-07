@@ -17,14 +17,14 @@
 </div>
 
 ```bash
-curl -fsSL https://github.com/MohZeh/darban-ovpn/releases/latest/download/get.sh | sudo bash
+curl -fsSL https://github.com/MohZeh/Darban-OVPN/releases/latest/download/get.sh | sudo bash
 ```
 
 <div dir="rtl">
 
 با Enter آدرس و پورت پیشنهادی را قبول کن و با یک Enter دیگر نصب را شروع کن. بعد از آن، ابزار پیشنهاد می‌دهد اولین کلاینت را بسازی، آن را به اشتراک می‌گذارد و وقتی وصل شد خبر می‌دهد.
 
-**[راهنمای قدم‌به‌قدم را دنبال کن](docs/fa/getting-started.md)**، از سرور تازه تا اولین کاربر متصل. تا زمانی که فقط نسخهٔ پیش از انتشار وجود دارد، آدرس یک نسخه را از صفحهٔ [Releases](https://github.com/MohZeh/darban-ovpn/releases) بردار: به‌جای `latest/download` بنویس `download/vX.Y.Z-rc.N`.
+**[راهنمای قدم‌به‌قدم را دنبال کن](docs/fa/getting-started.md)**، از سرور تازه تا اولین کاربر متصل. تا زمانی که فقط نسخهٔ پیش از انتشار وجود دارد، آدرس یک نسخه را از صفحهٔ [Releases](https://github.com/MohZeh/Darban-OVPN/releases) بردار: به‌جای `latest/download` بنویس `download/vX.Y.Z-rc.N`.
 
 ## چرا دربان
 

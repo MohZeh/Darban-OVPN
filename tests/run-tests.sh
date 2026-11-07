@@ -1348,10 +1348,10 @@ test_link_certificate_for_a_hostname() {
 
 test_about_and_contact_are_shown() {
     local out
-    has 'the main menu shows the project' 'github.com/MohZeh/darban-ovpn' "$(menu '0\n')"
+    has 'the main menu shows the project' 'github.com/MohZeh/Darban-OVPN' "$(menu '0\n')"
     has 'the main menu shows the email' 'zehtabex@gmail.com' "$(menu '0\n')"
     out=$(bash "$E/manager.sh" about 2>&1 </dev/null)
-    has 'about shows the address' 'https://github.com/MohZeh/darban-ovpn' "$out"
+    has 'about shows the address' 'https://github.com/MohZeh/Darban-OVPN' "$out"
     has 'about shows the email' 'zehtabex@gmail.com' "$out"
     has 'about shows the license' 'MIT' "$out"
     has 'about states independence' 'Not affiliated with OpenVPN Inc.' "$out"

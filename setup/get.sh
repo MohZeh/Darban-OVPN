@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Installs or updates Darban OVPN from a published release, after verifying it.
 #
-#   curl -fsSL https://github.com/MohZeh/darban-ovpn/releases/latest/download/get.sh | sudo bash
+#   curl -fsSL https://github.com/MohZeh/Darban-OVPN/releases/latest/download/get.sh | sudo bash
 #   ... | sudo bash -s -- --version vX.Y.Z
 #   ... | sudo bash -s -- --yes --host vpn.example.com --port 1194
 #
@@ -9,7 +9,7 @@
 # The checksum comes from the same release, so it catches a damaged download, not a compromised account.
 set -Eeuo pipefail
 umask 077
-REPO=MohZeh/darban-ovpn
+REPO=MohZeh/Darban-OVPN
 ARCHIVE=darban-ovpn.tar.gz
 SERVER_CONF=/etc/openvpn/server/server.conf
 TOOL=/usr/local/sbin/darban

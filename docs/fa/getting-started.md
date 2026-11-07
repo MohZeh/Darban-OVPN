@@ -35,7 +35,7 @@ ssh root@203.0.113.10
 </div>
 
 ```bash
-curl -fsSL https://github.com/MohZeh/darban-ovpn/releases/latest/download/get.sh | sudo bash
+curl -fsSL https://github.com/MohZeh/Darban-OVPN/releases/latest/download/get.sh | sudo bash
 ```
 
 <div dir="rtl">
@@ -44,7 +44,7 @@ curl -fsSL https://github.com/MohZeh/darban-ovpn/releases/latest/download/get.sh
 
 **اگر ندیدی:**
 - `curl: command not found`: دستور `sudo apt update && sudo apt install -y curl` را اجرا کن و بعد دوباره دستور نصب را بزن.
-- `No stable release is published yet`: آدرس یک نسخه را از صفحهٔ [Releases](https://github.com/MohZeh/darban-ovpn/releases) بردار. در دستور، به‌جای `latest/download` بنویس `download/vX.Y.Z-rc.N`.
+- `No stable release is published yet`: آدرس یک نسخه را از صفحهٔ [Releases](https://github.com/MohZeh/Darban-OVPN/releases) بردار. در دستور، به‌جای `latest/download` بنویس `download/vX.Y.Z-rc.N`.
 
 ## قدم ۴: به پرسش‌ها جواب بده
 
