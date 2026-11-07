@@ -35,6 +35,7 @@ step() { say; printf '%s%s %s%s\n' "$C_BOLD" "$S_ARROW" "$*" "$C_RESET"; }
 easyrsa() { env EASYRSA_PKI="$PKI" EASYRSA_BATCH=1 "$EASYRSA_BIN" "$@" </dev/null >/dev/null; }
 # A fresh VPS often runs unattended-upgrades right after boot, so wait for the dpkg lock instead of failing.
 apt_run() { apt-get -o DPkg::Lock::Timeout=300 -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold "$@"; }
+new_packages() { awk '$1=="Inst" && $3 !~ /^\[/ {print $2}'; }
 in_container() { command -v systemd-detect-virt >/dev/null && systemd-detect-virt --container --quiet; }
 valid_endpoint() { if [[ $1 =~ ^[0-9.]+$ ]]; then valid_ipv4 "$1"; else valid_domain "$1"; fi; }
 check_system() {
@@ -157,7 +158,9 @@ plan_kernel() {
     # A container runs on the host's kernel; installing one here would do nothing.
     if in_container; then return 0; fi
     if dpkg-query -W -f='${Status}' "$KERNEL_PKG" 2>/dev/null | grep -q 'install ok installed'; then return 0; fi
-    KERNEL_PLAN=$(apt_run -s --no-install-recommends install "$KERNEL_PKG" | awk '$1=="Inst" {print $2}') ||
+    # apt marks an upgrade with the old version in brackets. Those packages were already here, so they are
+    # neither shown as new nor recorded for removal.
+    KERNEL_PLAN=$(apt_run -s --no-install-recommends install "$KERNEL_PKG" | new_packages) ||
         die "apt cannot install $KERNEL_PKG."
     [[ -n $KERNEL_PLAN ]] || die "apt planned nothing for $KERNEL_PKG."
     if grep -Eq '^(linux-firmware|xserver|x11|libx11|libgl|libwayland|wayland|mesa|gnome|kde)' <<<"$KERNEL_PLAN"; then
@@ -214,7 +217,7 @@ add_repository() {
 install_packages() {
     local version pkg planned
     apt_run -qq update
-    planned=$(apt_run -s --no-install-recommends install openvpn easy-rsa socat nftables | awk '$1=="Inst" {print $2}') ||
+    planned=$(apt_run -s --no-install-recommends install openvpn easy-rsa socat nftables | new_packages) ||
         die 'apt cannot install the OpenVPN packages.'
     for pkg in $planned; do
         case $pkg in

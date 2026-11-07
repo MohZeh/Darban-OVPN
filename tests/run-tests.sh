@@ -620,8 +620,8 @@ if [[ " $* " == *" -s "* ]]; then
     case " $* " in
       *" purge "*) on=0; for a; do if (( on )); then echo "Remv $a"; fi; [[ $a == purge ]] && on=1; done; if [[ -n ${REMV_EXTRA:-} ]]; then echo "Remv $REMV_EXTRA"; fi ;;
       *" autoremove "*) for a in ${AUTOREMOVE:-}; do echo "Remv $a"; done ;;
-      *" install openvpn "*) for a in openvpn easy-rsa socat nftables liblzo2-2; do echo "Inst $a"; done ;;
-      *) printf '%s\n' ${APT_PLAN:-Inst linux-image-virtual-hwe-24.04 Inst linux-modules-7.0.0-42-generic} | awk 'NR%2==1 {a=$0; next} {print a, $0}' ;;
+      *" install openvpn "*) for a in openvpn easy-rsa socat nftables liblzo2-2; do echo "Inst $a"; done; if [[ -n ${APT_UPGRADE:-} ]]; then echo "Inst dep-$APT_UPGRADE [1.0] (2.0 Ubuntu [amd64])"; fi ;;
+      *) printf '%s\n' ${APT_PLAN:-Inst linux-image-virtual-hwe-24.04 Inst linux-modules-7.0.0-42-generic} | awk 'NR%2==1 {a=$0; next} {print a, $0}'; if [[ -n ${APT_UPGRADE:-} ]]; then echo "Inst $APT_UPGRADE [1.0] (2.0 Ubuntu [amd64])"; fi ;;
     esac
 fi
 exit 0
@@ -702,6 +702,18 @@ test_server_setup_builds_a_server_the_manager_accepts() {
     out=$(setup_run --port 21194 --yes); rc=$?
     rc_not0 'a second run is refused' "$rc"
     has 'it says nothing changed' 'Nothing was changed' "$out"
+}
+
+test_server_setup_does_not_claim_upgraded_packages() {
+    # A package apt only upgrades was already installed: a later removal must not purge it.
+    local out rc
+    prepare_blank_server
+    out=$(APT_UPGRADE=bpftool setup_run --port 21194 --yes); rc=$?
+    rc_is 'setup finishes' 0 "$rc"
+    lacks 'an upgraded package is not shown as new' 'bpftool' "$out"
+    if grep -q 'bpftool' "$E/cfg/.server-setup-started"; then result 0 'upgraded packages are not recorded for removal'; else result 1 'upgraded packages are not recorded for removal'; fi
+    grep -q '^kernel linux-image-virtual-hwe-24.04$' "$E/cfg/.server-setup-started"; rc_is 'new kernel packages are still recorded' 0 "$?"
+    grep -q '^dep liblzo2-2$' "$E/cfg/.server-setup-started"; rc_is 'new dependencies are still recorded' 0 "$?"
 }
 
 test_server_setup_follows_the_ubuntu_version() {
