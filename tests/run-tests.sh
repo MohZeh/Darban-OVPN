@@ -2083,7 +2083,7 @@ test_version_order_is_the_same_everywhere() {
 
 test_ci_scope_skips_only_documentation() {
     local dir=$WORK/scope base docs code
-    scope() { (cd "$dir" && env "$@" bash "$REPO/scripts/ci-scope.sh"); }
+    scope() { (cd "$dir" && env -u GITHUB_REF GITHUB_REF=refs/heads/main "$@" bash "$REPO/scripts/ci-scope.sh"); }
     mkdir -p "$dir/docs" && git -C "$dir" init -q
     git -C "$dir" config user.email t@example.com; git -C "$dir" config user.name t
     printf 'a\n' >"$dir/README.md"; printf 'a\n' >"$dir/run.sh"
