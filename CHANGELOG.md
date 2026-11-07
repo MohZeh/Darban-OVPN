@@ -2,7 +2,7 @@
 
 All notable changes are recorded here. The format follows [Keep a Changelog](https://keepachangelog.com/) and versions follow [Semantic Versioning](https://semver.org/).
 
-## [1.0.0-beta.1] - 2026-11-06
+## [1.0.0-beta.1] - 2026-11-07
 
 First pre-release, for testing only.
 
