@@ -84,8 +84,15 @@ last=${*: -1}; want=${last##*:}; cur=$(awk '$1=="port"{print $2}' "$SERVER_CONF"
 [[ $want == "$cur" ]] && echo "UNCONN 0 0 0.0.0.0:$want 0.0.0.0:*"
 exit 0
 STUB
-printf '#!/usr/bin/env bash\nexit 0\n' > "$E/bin/flock"
+# FLOCK_HOOK runs what another session would do while this one waits for the lock.
+cat > "$E/bin/flock" <<'STUB'
+#!/usr/bin/env bash
+echo "flock $*" >> "${STUB_LOG:-/dev/null}"
+if [[ -n ${FLOCK_HOOK:-} && $1 != -u ]]; then bash -c "$FLOCK_HOOK" >/dev/null 2>&1; fi
+exit 0
+STUB
 printf '#!/usr/bin/env bash\nexit 0\n' > "$E/bin/chown"
+printf '#!/usr/bin/env bash\nif [[ ${1:-} == -n ]]; then echo 1; fi\n' > "$E/bin/sysctl"
 printf '#!/usr/bin/env bash\necho "logger $*" >> "$STUB_LOG"\n' > "$E/bin/logger"
 printf '#!/usr/bin/env bash\nargs=(); while (($#)); do case $1 in -o|-g|-m) shift 2;; *) args+=("$1"); shift;; esac; done; exec /usr/bin/install "${args[@]}"\n' > "$E/bin/install"
 chmod +x "$E/bin/"*

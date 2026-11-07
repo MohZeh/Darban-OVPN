@@ -25,6 +25,7 @@ export DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=l
 
 FAILED=()
 KEPT=()
+KEPT_FILES=''
 try() { "$@" || FAILED+=("$*"); }
 recorded() { awk -v kind="$1" '$1==kind && $2 ~ /^[a-z0-9][a-z0-9+.:-]+$/ {print $2}' "$MARKER" | sort -u; }
 base_names() { sed 's/:.*//' | sort -u; }
@@ -128,7 +129,12 @@ fi
 
 echo 'Removing the repository, server files and CA...'
 try rm -f -- "$APT_LIST" "$APT_KEY"
-try rm -rf -- "$SERVER_DIR"
+# Only what the setup and the tool created: another file there belongs to someone else.
+try rm -f -- "$SERVER_DIR"/server.conf "$SERVER_DIR"/server.conf.darban-*backup.* "$SERVER_DIR"/ca.crt "$SERVER_DIR"/server.crt \
+    "$SERVER_DIR"/server.key "$SERVER_DIR"/crl.pem "$SERVER_DIR"/tls-crypt.key "$SERVER_DIR"/.darban-*
+if [[ -d $SERVER_DIR ]] && ! rmdir -- "$SERVER_DIR" 2>/dev/null; then
+    KEPT_FILES=$SERVER_DIR
+fi
 try rm -rf -- "$OUT_DIR"
 try rm -rf -- "$PKI"
 
@@ -155,5 +161,8 @@ fi
 if (( ${#KEPT[@]} > 0 )); then
     echo 'Kept because other software depends on them:'
     printf '  %s\n' "${KEPT[@]}"
+fi
+if [[ -n $KEPT_FILES ]]; then
+    printf 'Kept, because this setup did not create them: the other files in %s\n' "$KEPT_FILES"
 fi
 echo 'Close the VPN port in your provider firewall; this tool cannot reach it.'

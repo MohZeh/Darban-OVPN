@@ -12,10 +12,11 @@ tarfile=$(mktemp -d)/release.tar
 common=(--force-local --format=gnu --owner=0 --group=0 --numeric-owner)
 tar "${common[@]}" --mode=700 -cf "$tarfile" setup/install.sh setup/server-setup.sh setup/get.sh setup/uninstall.sh setup/remove-server.sh bin/darban bin/darban-crl-maintain
 tar "${common[@]}" --mode=644 -rf "$tarfile" lib/common.sh lib/ui.sh lib/linkd.py systemd/darban-crl.service systemd/darban-crl.timer systemd/darban-links.service README.md README.fa.md CHANGELOG.md LICENSE VERSION
-tar "${common[@]}" --mode=755 -rf "$tarfile" tests/fake-server.sh tests/run-tests.sh tests/run-tty-tests.py tests/acceptance-ci.sh
 gzip -9n -c "$tarfile" > "$out/darban-ovpn.tar.gz"
 rm -rf -- "$(dirname -- "$tarfile")"
-cp setup/get.sh "$out/get.sh"
+# The published script installs its own release, so a link to any version does what it says.
+sed "s/^RELEASE_TAG=.*/RELEASE_TAG=v$version/" setup/get.sh > "$out/get.sh"
+grep -qx "RELEASE_TAG=v$version" "$out/get.sh" || { echo 'Could not write the version into get.sh.' >&2; exit 1; }
 cp VERSION "$out/VERSION"
 # This version's section of the changelog, shown by the tool before it updates itself.
 awk -v v="## [$version]" 'index($0, v) == 1 {on=1; next} /^## / {on=0} on' CHANGELOG.md | sed '/./,$!d' > "$out/RELEASE-NOTES.txt"

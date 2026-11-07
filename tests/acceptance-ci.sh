@@ -27,7 +27,11 @@ connect() {
 disconnect() { if [[ -s $PIDFILE ]]; then kill "$(cat "$PIDFILE")" 2>/dev/null || true; sleep 1; fi; }
 
 # 127.0.0.1 keeps the test off the internet; the manager accepts it as the profile address.
-bash setup/server-setup.sh --host 127.0.0.1 --port 1194 --yes
+# A runner's kernel may already have the ovpn module, so one version also proves the real kernel install.
+setup_args=(--host 127.0.0.1 --port 1194 --yes)
+. /etc/os-release
+if [[ $VERSION_ID == 24.04 ]]; then setup_args+=(--install-kernel); fi
+bash setup/server-setup.sh "${setup_args[@]}"
 bash setup/install.sh
 darban-crl-maintain --check
 systemctl start darban-crl.service
@@ -79,8 +83,19 @@ grep -q '<key>' "$LOG/link.ovpn"
 if journalctl -u darban-links.service --no-pager | grep -q '[0-9a-f]\{64\}'; then echo 'FAIL: a token reached the log.'; exit 1; fi
 echo 'PASS: the temporary link works once and keeps tokens out of the log.'
 
-# Full removal: keep a backup, keep the kernel, then confirm.
-printf '1\n1\nremove-everything\n' | darban remove-all
+# A broken server: diagnostics say so by exit status, and the tool can still be updated.
+mv /root/pki/ca.crt /root/pki/ca.crt.keep
+if darban status >"$LOG/broken.log" 2>&1; then echo 'FAIL: status reported a broken CA as healthy.'; exit 1; fi
+grep -q 'CA or OpenVPN server configuration is missing' "$LOG/broken.log"
+bash setup/install.sh
+mv /root/pki/ca.crt.keep /root/pki/ca.crt
+darban status >/dev/null
+echo 'PASS: a broken server is reported, can be updated, and recovers.'
+
+# Full removal: keep a backup, keep any kernel the setup added, then confirm.
+kernel_answer=''
+if [[ $(bash /usr/local/lib/darban/remove-server.sh --kernel-status) == removable ]]; then kernel_answer='1\n'; fi
+printf "1\\n${kernel_answer}remove-everything\\n" | darban remove-all
 if systemctl is-active --quiet openvpn-server@server.service; then echo 'FAIL: OpenVPN still runs after removal.'; exit 1; fi
 for path in /root/pki /etc/openvpn/server /root/openvpn-clients /etc/darban /usr/local/sbin/darban /etc/apt/sources.list.d/openvpn-aptrepo.list; do
     if [[ -e $path ]]; then echo "FAIL: still present after removal: $path"; exit 1; fi

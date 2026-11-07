@@ -1,7 +1,4 @@
-# Local review material and build output: never published.
-/review/
-/reports/
+# Build output.
 /dist/
-/AUDIT-REPORT-fa.md
 *.zip
 *.tar.gz

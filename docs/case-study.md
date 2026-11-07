@@ -52,7 +52,7 @@ Removal is also designed in. The setup records what it adds, so **Remove everyth
 
 ## Installing less
 
-The server needs one thing from the kernel: the `ovpn` module. The package file lists show that the plain `linux-image-virtual-hwe-24.04` and `linux-image-virtual-hwe-26.04` kernels already include it, so no DKMS, headers, firmware or graphics packages are needed. The setup shows apt's own simulated package list, and stops if firmware or graphics packages appear in it.
+The server needs one thing from the kernel: the `ovpn` module. The package file lists show that the plain `linux-image-virtual-hwe-24.04` and `linux-image-virtual-hwe-26.04` kernels include it, so no DKMS, headers, firmware or graphics packages are needed. If the running kernel already has the module, no kernel is installed at all. The setup shows apt's own simulated package list, and stops if firmware or graphics packages appear in it.
 
 Questions follow the same rule. Installation asks only for the address and port, and everything else has a default that can be changed later.
 

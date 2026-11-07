@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # Prepares a fresh Ubuntu 24.04 or 26.04 VPS: current OpenVPN from the OpenVPN project's stable repository, the
-# Virtual HWE kernel (it ships the in-kernel ovpn module, so no DKMS or headers), a new CA and server.
+# Virtual HWE kernel only if the running kernel lacks the ovpn module (no DKMS or headers), a new CA and server.
 # Refuses to run on a server that already has an OpenVPN configuration or a PKI it did not create.
-#   server-setup.sh [--host NAME|IP] [--port N] [--subnet A.B.C.0] [--dns "IP [IP]"] [--split-tunnel] [--open-ufw] [--yes]
+# A setup that stopped half way continues when it runs again.
+#   server-setup.sh [--host NAME|IP] [--port N] [--subnet A.B.C.0] [--dns "IP [IP]"] [--split-tunnel] [--open-ufw] [--install-kernel] [--yes]
 # Only the address and port are asked. --yes takes the defaults for those too, and leaves ufw alone without --open-ufw.
 set -Eeuo pipefail
 umask 077
@@ -26,6 +27,8 @@ SERVER_NAME=darban-server
 DEFAULT_DNS='1.1.1.1 8.8.8.8'
 MIN_BOOT_FREE_KB=150000
 MARKER=$CONFIG_DIR/.server-setup-started
+TOOL=/usr/local/sbin/darban
+TOOL_LIB=/usr/local/lib/darban
 # Never stop for a question, and never restart services such as sshd behind the user's back.
 export DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=l
 
@@ -34,10 +37,22 @@ port_busy() { [[ -n $(ss -H -lun "sport = :$1" 2>/dev/null) ]]; }
 step() { say; printf '%s%s %s%s\n' "$C_BOLD" "$S_ARROW" "$*" "$C_RESET"; }
 easyrsa() { env EASYRSA_PKI="$PKI" EASYRSA_BATCH=1 "$EASYRSA_BIN" "$@" </dev/null >/dev/null; }
 # A fresh VPS often runs unattended-upgrades right after boot, so wait for the dpkg lock instead of failing.
-apt_run() { apt-get -o DPkg::Lock::Timeout=300 -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold "$@"; }
+apt_run() { apt-get -o DPkg::Lock::Timeout=300 -o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold "$@"; }
+# apt marks an upgrade with the old version in brackets. Those packages were already here, so they are
+# neither shown as new nor recorded for removal.
 new_packages() { awk '$1=="Inst" && $3 !~ /^\[/ {print $2}'; }
 in_container() { command -v systemd-detect-virt >/dev/null && systemd-detect-virt --container --quiet; }
-valid_endpoint() { if [[ $1 =~ ^[0-9.]+$ ]]; then valid_ipv4 "$1"; else valid_domain "$1"; fi; }
+on_exit() {
+    local rc=$?
+    ui_restore
+    if (( rc != 0 && CHANGES_STARTED )); then
+        say
+        warn 'The setup did not finish.'
+        say 'To try again, run the same command. It continues from where it stopped.'
+        say 'To undo everything it did so far:'
+        say "  sudo bash $TOOL_LIB/remove-server.sh --yes"
+    fi
+}
 check_system() {
     local id='' version=''
     [[ $EUID == 0 ]] || die 'Run with sudo/root.'
@@ -53,7 +68,9 @@ check_system() {
     ARCH=$(dpkg --print-architecture)
     [[ $ARCH == amd64 || $ARCH == arm64 ]] || die "Unsupported architecture: $ARCH."
     command -v systemctl >/dev/null || die 'systemd is required.'
-    if [[ -e $SERVER_DIR/server.conf ]]; then die "$SERVER_DIR/server.conf already exists. Nothing was changed."; fi
+    # A record without the last step, and no installed tool, means an earlier run of this setup stopped half way.
+    if [[ -e $MARKER && ! -e $TOOL ]] && ! grep -qx setup_complete "$MARKER"; then RESUMING=1; fi
+    if [[ -e $SERVER_DIR/server.conf ]] && (( ! RESUMING )); then die "$SERVER_DIR/server.conf already exists. Nothing was changed."; fi
     if [[ -e $PKI && ! -e $MARKER ]]; then die "$PKI already exists and this setup did not create it. Nothing was changed."; fi
     # Some VPS containers do not offer a TUN device at all, and OpenVPN cannot run without one.
     modprobe tun 2>/dev/null || true
@@ -65,10 +82,19 @@ check_system() {
     if command -v timedatectl >/dev/null && [[ $(timedatectl show -p NTPSynchronized --value 2>/dev/null || true) == no ]]; then
         warn 'The system clock is not synchronized. Certificates and the CRL depend on correct time.'
     fi
+    if (( RESUMING )); then
+        info 'An earlier setup did not finish. It continues from where it stopped.'
+        # Its own OpenVPN may hold the port, and the address and network it chose stay the defaults.
+        systemctl stop "$UNIT" >/dev/null 2>&1 || true
+        RESUME_HOST=$(head -n 1 "$CONFIG_DIR/domain" 2>/dev/null || true)
+        RESUME_PORT=$(awk '$1=="port" {print $2; exit}' "$SERVER_DIR/server.conf" 2>/dev/null || true)
+        if [[ -z $VPN_NET ]]; then VPN_NET=$(awk '$1=="server" {print $2; exit}' "$SERVER_DIR/server.conf" 2>/dev/null || true); fi
+    fi
 }
 choose_host() {
     local default='' resolved
     if [[ -n $LOCAL_IP ]] && ! is_private_ip "$LOCAL_IP"; then default=$LOCAL_IP; fi
+    if [[ -n $RESUME_HOST ]]; then default=$RESUME_HOST; fi
     if [[ -z $HOST ]] && (( ASSUME_YES )); then HOST=$default; fi
     if [[ -n $HOST ]]; then
         valid_endpoint "$HOST" || die "Not a valid hostname or IPv4 address: $HOST"
@@ -99,19 +125,20 @@ choose_host() {
     fi
 }
 choose_port() {
-    if [[ -z $PORT ]] && (( ASSUME_YES )); then PORT=1194; fi
+    local default=${RESUME_PORT:-1194}
+    if [[ -z $PORT ]] && (( ASSUME_YES )); then PORT=$default; fi
     if [[ -n $PORT ]]; then
         valid_port "$PORT" || die "Port must be a number from 1024 to 65535: $PORT"
         PORT=$((10#$PORT))
-        if port_busy "$PORT"; then die "UDP $PORT is already in use."; fi
+        if [[ $PORT != "$RESUME_PORT" ]] && port_busy "$PORT"; then die "UDP $PORT is already in use."; fi
         return 0
     fi
     while :; do
-        ask 'OpenVPN UDP port [1194]: ' || die 'Cancelled; nothing was changed.'
-        PORT=${REPLY:-1194}
+        ask "OpenVPN UDP port [$default]: " || die 'Cancelled; nothing was changed.'
+        PORT=${REPLY:-$default}
         if ! valid_port "$PORT"; then warn 'Enter a number from 1024 to 65535.'; continue; fi
         PORT=$((10#$PORT))
-        if port_busy "$PORT"; then warn "UDP $PORT is already in use. Choose another port."; continue; fi
+        if [[ $PORT != "$RESUME_PORT" ]] && port_busy "$PORT"; then warn "UDP $PORT is already in use. Choose another port."; continue; fi
         return 0
     done
 }
@@ -157,9 +184,9 @@ plan_kernel() {
     KERNEL_PLAN=''
     # A container runs on the host's kernel; installing one here would do nothing.
     if in_container; then return 0; fi
+    # A kernel that already has the module needs nothing: no large download and no reboot.
+    if (( ! FORCE_KERNEL )) && modinfo -k "$(uname -r)" ovpn >/dev/null 2>&1; then KERNEL_READY=1; return 0; fi
     if dpkg-query -W -f='${Status}' "$KERNEL_PKG" 2>/dev/null | grep -q 'install ok installed'; then return 0; fi
-    # apt marks an upgrade with the old version in brackets. Those packages were already here, so they are
-    # neither shown as new nor recorded for removal.
     KERNEL_PLAN=$(apt_run -s --no-install-recommends install "$KERNEL_PKG" | new_packages) ||
         die "apt cannot install $KERNEL_PKG."
     [[ -n $KERNEL_PLAN ]] || die "apt planned nothing for $KERNEL_PKG."
@@ -188,6 +215,8 @@ show_plan() {
     bullet 'adds the OpenVPN project apt repository (stable channel) and installs openvpn, easy-rsa, socat, nftables'
     if in_container; then
         bullet 'this is a container, so it uses the host kernel; no kernel is installed and DCO depends on the host'
+    elif (( KERNEL_READY )); then
+        bullet 'the running kernel already has the ovpn module, so no kernel is installed'
     elif [[ -n $KERNEL_INSTALL ]]; then
         bullet "installs $KERNEL_PKG without recommended packages:"
         printf '      %s\n' "${KERNEL_PLAN//$'\n'/ }"
@@ -205,7 +234,7 @@ show_plan() {
 add_repository() {
     local key
     key=$(mktemp)
-    curl -fsSL --proto '=https' --tlsv1.2 --max-time 60 -o "$key" https://swupdate.openvpn.net/repos/repo-public.gpg ||
+    curl -fsSL --proto '=https' --proto-redir '=https' --tlsv1.2 --max-time 60 -o "$key" https://swupdate.openvpn.net/repos/repo-public.gpg ||
         die 'Could not download the OpenVPN repository key.'
     grep -q 'BEGIN PGP PUBLIC KEY' "$key" || die 'The downloaded file is not a PGP public key.'
     install -d -m 755 "$(dirname -- "$APT_KEY")"
@@ -241,7 +270,11 @@ create_pki() {
         easyrsa init-pki
         EASYRSA_CA_EXPIRE=7300 EASYRSA_REQ_CN="Darban OpenVPN CA" easyrsa build-ca nopass
     }
-    [[ -s $PKI/issued/$SERVER_NAME.crt ]] || EASYRSA_CERT_EXPIRE=3650 easyrsa build-server-full "$SERVER_NAME" nopass
+    if [[ ! -s $PKI/issued/$SERVER_NAME.crt ]]; then
+        # Easy-RSA refuses to start over from what an interrupted run left behind.
+        rm -f -- "$PKI/reqs/$SERVER_NAME.req" "$PKI/private/$SERVER_NAME.key"
+        EASYRSA_CERT_EXPIRE=3650 easyrsa build-server-full "$SERVER_NAME" nopass
+    fi
     easyrsa gen-crl
     ok "CA and server certificate are ready in $PKI."
 }
@@ -391,6 +424,12 @@ SPLIT_TUNNEL=0
 OPEN_UFW=0
 UFW_ACTIVE=0
 ASSUME_YES=0
+FORCE_KERNEL=0
+KERNEL_READY=0
+RESUMING=0
+RESUME_HOST=''
+RESUME_PORT=''
+CHANGES_STARTED=0
 ARCH=''
 REPO_SUITE=''
 KERNEL_PKG=''
@@ -404,11 +443,12 @@ while (( $# )); do
         --dns) (( $# >= 2 )) || die '--dns needs a value.'; DNS_LIST=$2; shift 2 ;;
         --split-tunnel) SPLIT_TUNNEL=1; shift ;;
         --open-ufw) OPEN_UFW=1; shift ;;
+        --install-kernel) FORCE_KERNEL=1; shift ;;
         --yes) ASSUME_YES=1; shift ;;
-        *) printf 'Usage: server-setup.sh [--host NAME|IP] [--port N] [--subnet A.B.C.0] [--dns "IP [IP]"] [--split-tunnel] [--open-ufw] [--yes]\n' >&2; exit 2 ;;
+        *) printf 'Usage: server-setup.sh [--host NAME|IP] [--port N] [--subnet A.B.C.0] [--dns "IP [IP]"] [--split-tunnel] [--open-ufw] [--install-kernel] [--yes]\n' >&2; exit 2 ;;
     esac
 done
-trap ui_restore EXIT
+trap on_exit EXIT
 ui_init
 check_system
 choose_host
@@ -428,6 +468,12 @@ install -d -m 700 "$CONFIG_DIR"
 if [[ ! -e $MARKER ]]; then
     printf 'ip_forward_before %s\n' "$(sysctl -n net.ipv4.ip_forward 2>/dev/null || echo unknown)" >"$MARKER"
 fi
+# The way back is in place before the first change, because the tool itself is installed only at the end.
+install -d -m 700 "$TOOL_LIB"
+install -m 700 setup/remove-server.sh setup/uninstall.sh "$TOOL_LIB/"
+CHANGES_STARTED=1
+# A lost SSH connection must not stop apt half way; running the same command again shows where it stands.
+trap '' HUP
 if [[ -n $KERNEL_INSTALL ]]; then
     # shellcheck disable=SC2086  # one line per planned package
     printf 'kernel %s\n' $KERNEL_PLAN >>"$MARKER"
@@ -445,4 +491,5 @@ step 'Configuring forwarding and NAT'
 configure_network
 step 'Starting OpenVPN'
 start_server
+printf 'setup_complete\n' >>"$MARKER"
 finish

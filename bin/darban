@@ -1,6 +1,5 @@
 #!/usr/bin/env bash
-# Darban OVPN — existing OpenVPN 2.7 / Easy-RSA 3 server.
-# Scope: manage client credentials and the explicit server listening port only.
+# Darban OVPN: the manager of an OpenVPN 2.7 and Easy-RSA 3 server.
 set -Eeuo pipefail
 umask 077
 source /usr/local/lib/darban/common.sh
@@ -48,6 +47,10 @@ ACTION_RC=0
 DARBAN_INT=0
 SESSIONS_RESTARTED=0
 ACTION_RUNNING=0
+# Why this server cannot be managed right now; empty when it is healthy. Diagnostics and removal still work.
+SERVER_PROBLEM=''
+CA_LOCKED=0
+HEALTH_BAD=0
 # Revoked clients are history: list_clients hides them unless LIST_ALL is set, and counts them in LIST_HIDDEN.
 LIST_ALL=0
 LIST_HIDDEN=0
@@ -55,7 +58,8 @@ PROFILE_PASSWORD=''
 CHOSEN=1
 
 # ---------- validation ----------
-valid_name() { [[ $1 =~ ^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$ && $1 != server ]]; }
+# A name of digits only could be confused with a number in a list.
+valid_name() { [[ $1 =~ ^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$ && $1 != server && ! $1 =~ ^[0-9]+$ ]]; }
 # Names of certificates that already exist: wider than valid_name (new clients stay strict), yet still
 # safe as a file name and as one word of an Easy-RSA argument or a management-interface command.
 valid_link_port() { [[ $1 =~ ^[0-9]{1,5}$ ]] && (( 10#$1 >= 1 && 10#$1 <= 65535 )); }
@@ -66,19 +70,24 @@ valid_existing_name() { [[ $1 =~ ^[A-Za-z0-9][A-Za-z0-9._@+-]{0,127}$ && $1 != s
 # Interrupts are ignored while CA/CRL or server.conf changes are half-applied; children inherit this.
 critical_begin() { trap '' INT TERM HUP; }
 critical_end() { trap 'exit 130' INT TERM HUP; }
+ca_lock() {
+    # Held only while something changes, never while waiting for an answer, so a person thinking does not
+    # hold up the daily CRL renewal. Whatever was checked before asking must be checked again after this.
+    if (( ! CA_LOCKED )); then darban_lock || return 1; CA_LOCKED=1; fi
+}
+ca_unlock() {
+    if (( CA_LOCKED )); then flock -u 9 2>/dev/null || true; exec 9>&-; CA_LOCKED=0; fi
+}
 run_action() {
     # errexit is ignored inside any function called from if/||/&&, so each action runs in its
-    # own subshell with errexit really on, temp-file cleanup, Ctrl+C = cancel, and (optionally)
-    # the CA lock held only for the duration of that action. The status lands in ACTION_RC.
-    local lock=$1 rc=0
-    shift
+    # own subshell with errexit really on, temp-file cleanup and Ctrl+C = cancel. The status lands in ACTION_RC.
+    local rc=0
     set +e
     ACTION_RUNNING=1
     (
         set -e
         trap 'ui_restore; darban_tmp_cleanup' EXIT
         critical_end
-        if [[ $lock == locked ]]; then darban_lock; fi
         "$@"
     )
     rc=$?
@@ -94,12 +103,12 @@ run_action() {
     esac
 }
 menu_action() {
-    # menu_action <locked|unlocked> <title> <function>: clean screen, run, then let the user read the result.
-    local lock=$1 title=$2
-    shift 2
+    # menu_action <title> <function>: clean screen, run, then let the user read the result.
+    local title=$1
+    shift
     clear_screen
     section "$title"
-    run_action "$lock" "$@"
+    run_action "$@"
     if (( ACTION_RC != RC_NO_PAUSE )); then say; pause; fi
 }
 
@@ -146,14 +155,20 @@ load_config() {
 setup() {
     local cmd
     darban_require_root
-    darban_preflight
-    [[ -s $TLS_KEY ]] || { darban_error 'OpenVPN tls-crypt.key is missing.'; return 1; }
     for cmd in systemctl ss find cp chmod chown timeout; do command -v "$cmd" >/dev/null || { darban_error "Missing dependency: $cmd"; return 1; }; done
     install -d -o root -g root -m 700 "$CONFIG_DIR" "$OUT_DIR"
-    SERVER_SERIAL=$(darban_server_serial) || {
-        darban_error "Cannot read the server certificate from server.conf (one 'cert' directive or an inline <cert> block)."; return 1;
-    }
     load_config
+    SERVER_PROBLEM=$(server_problem)
+    if [[ -z $SERVER_PROBLEM ]]; then SERVER_SERIAL=$(darban_server_serial); fi
+}
+server_problem() {
+    # Prints why this server cannot be managed; nothing when it can.
+    local out
+    out=$(C_RED='' C_RESET='' darban_preflight 2>&1) || { printf '%s\n' "${out##*ERROR: }"; return 0; }
+    if [[ ! -s $TLS_KEY ]]; then printf 'OpenVPN tls-crypt.key is missing.\n'; return 0; fi
+    if ! darban_server_serial >/dev/null 2>&1; then
+        printf "Cannot read the server certificate from server.conf (one 'cert' directive or an inline <cert> block).\n"
+    fi
 }
 server_port() {
     awk '$1=="port" {n++; if ($2 !~ /^[0-9]+$/) bad=1; else port=$2} END {if(n!=1 || bad) exit 1; print port}' "$DARBAN_SERVER_CONF"
@@ -403,12 +418,13 @@ pick_client() {
     say
     while :; do
         if ! ask 'Number or name (Enter = cancel): ' || [[ -z $REPLY ]]; then cancelled; return 1; fi
-        if [[ $REPLY =~ ^[0-9]+$ ]] && (( 10#$REPLY >= 1 && 10#$REPLY <= ${#names[@]} )); then
-            PICKED=${names[10#$REPLY - 1]}; return 0
-        fi
+        # The exact name first: an older client may be called just "2".
         for cn in "${names[@]}"; do
             if [[ $cn == "$REPLY" ]]; then PICKED=$cn; return 0; fi
         done
+        if [[ $REPLY =~ ^[0-9]+$ ]] && (( 10#$REPLY >= 1 && 10#$REPLY <= ${#names[@]} )); then
+            PICKED=${names[10#$REPLY - 1]}; return 0
+        fi
         warn "\"$REPLY\" is not in the list above. Enter its number or exact name."
     done
 }
@@ -520,7 +536,9 @@ offer_delete_copy() {
     local file=$1
     (( UI_TTY )) || return 0
     if confirm_choice 'Finished downloading? The server copy can be deleted now.' 'Keep it and return to the menu' 'Delete the server copy' danger; then
+        ca_lock || return 1
         rm -f -- "$file"
+        ca_unlock
         ok "Server copy deleted: $file"
         audit "profile deleted from server: $file"
         pause
@@ -536,8 +554,8 @@ set_domain() {
     info 'Only NEW or re-exported .ovpn files use the hostname.'
     info 'Use a DNS-only record (no Cloudflare orange-cloud proxy) for this UDP service.'
     say
-    prompt_valid 'New hostname, e.g. vpn.example.com (Enter = cancel): ' valid_domain \
-        'Not a valid DNS name. Example: vpn.example.com' || return 0
+    prompt_valid 'New hostname or IP, e.g. vpn.example.com (Enter = cancel): ' valid_endpoint \
+        'Enter a hostname such as vpn.example.com, or an IPv4 address such as 203.0.113.10.' || return 0
     value=${REPLY,,}
     [[ $value != "$old" ]] || { info 'Same as the current hostname; nothing changed.'; return 0; }
     if command -v getent >/dev/null; then
@@ -551,6 +569,7 @@ set_domain() {
         fi
     fi
     confirm_choice "Save $value as the VPN hostname?" 'No, keep the current one' "Save $value" normal || { cancelled; return 0; }
+    ca_lock || return 1
     tmp=$(mktemp "$CONFIG_DIR/.domain.XXXXXXXX") || return 1
     darban_tmp_register "$tmp"
     if ! printf '%s\n' "$value" >"$tmp" || ! chmod 600 "$tmp" || ! mv -f -- "$tmp" "$DOMAIN_FILE"; then
@@ -688,7 +707,7 @@ create_client() {
     say
     while :; do
         prompt_valid 'New client name (Enter = cancel): ' valid_name \
-            'Use 1-64 letters, digits, _ or -, starting with a letter or digit (not "server").' || return 0
+            'Use 1-64 letters, digits, _ or -, starting with a letter or digit. It cannot be "server" or only digits.' || return 0
         name=$REPLY
         reused=0
         if name_taken "$name"; then
@@ -707,6 +726,9 @@ create_client() {
         warn "Existing name(s) differing only in letter case: $similar"
         confirm_choice "Create \"$name\" anyway?" 'No, do not create it' "Create $name" caution || { cancelled; return 0; }
     fi
+    ca_lock || return 1
+    # Another administrator may have taken the name while this one was being typed.
+    if (( ! reused )) && name_taken "$name"; then warn "\"$name\" was created by another session just now. Choose another name."; return 1; fi
     info "Issuing a certificate and unencrypted private key for $name${S_ELL}"
     critical_begin
     if [[ -n $CLIENT_CERT_DAYS ]]; then
@@ -721,6 +743,7 @@ create_client() {
     if ! write_profile "$name" no; then
         fail 'The certificate was issued but the .ovpn export failed. Use Share (menu 4) instead of creating it again.'; return 1
     fi
+    ca_unlock
     say
     if (( ! UI_TTY )); then
         # A script has nobody to answer the sharing questions.
@@ -737,7 +760,9 @@ create_client() {
 share_profile() {
     profile_preconditions || return 1
     pick_client 'Share which client?' can_reexport export_block_reason || return 0
+    ca_lock || return 1
     write_profile "$PICKED" yes || return 1
+    ca_unlock
     audit "profile rebuilt: $PICKED"
     clear_screen
     share_client "$PICKED"
@@ -757,7 +782,11 @@ share_client() {
     fi
     say
     choose_profile_password
-    if [[ -n $PROFILE_PASSWORD ]]; then write_profile "$name" yes || return 1; fi
+    if [[ -n $PROFILE_PASSWORD ]]; then
+        ca_lock || return 1
+        write_profile "$name" yes || return 1
+        ca_unlock
+    fi
     say
     case $method in
         1) share_by_link "$name" no ;;
@@ -820,9 +849,12 @@ get_trusted_cert() {
     if tcp_port_open 80; then warn 'TCP port 80 is in use, so certbot cannot answer on it.'; return 1; fi
     if ! command -v certbot >/dev/null; then
         info "Installing certbot${S_ELL}"
+        apt-get -o DPkg::Lock::Timeout=120 -qq update >/dev/null || true
         apt-get -o DPkg::Lock::Timeout=120 -y -q --no-install-recommends install certbot >/dev/null || { warn 'Could not install certbot.'; return 1; }
-        if [[ -e $marker ]]; then printf 'package certbot\ncertbot_cert darban\n' >>"$marker" || true; fi
+        if [[ -e $marker ]]; then printf 'package certbot\n' >>"$marker" || true; fi
     fi
+    # Recorded even if certbot was already here, because this certificate is ours either way.
+    if [[ -e $marker ]]; then printf 'certbot_cert darban\n' >>"$marker" || true; fi
     info "Requesting a certificate for $host${S_ELL}"
     certbot certonly --standalone --non-interactive --agree-tos --register-unsafely-without-email --cert-name darban -d "$host" \
         --deploy-hook 'systemctl try-restart darban-links.service' >/dev/null 2>&1 || {
@@ -872,7 +904,7 @@ share_by_link() {
     local name=$1 want_qr=$2 host minutes label token key now expires url temp
     command -v python3 >/dev/null || { fail 'python3 is needed for temporary links. Install it: apt install python3'; return 1; }
     host=$(domain)
-    valid_endpoint_for_link "$host" || { warn "Set the VPN hostname first: Settings $S_CRUMB 1."; return 1; }
+    [[ -n $host ]] && valid_endpoint "$host" || { warn "Set the VPN hostname first: Settings $S_CRUMB 1."; return 1; }
     choose_one 'How long should the link work?' '1 hour' '15 minutes' '24 hours' || CHOSEN=1
     case $CHOSEN in
         2) minutes=15 label='15 minutes' ;;
@@ -881,6 +913,9 @@ share_by_link() {
     esac
     choose_link_port || return 1
     ensure_link_cert "$host" || return 1
+    ca_lock || return 1
+    # The answers above took time: this client may have been revoked since.
+    client_valid "$name" || { warn "\"$name\" no longer has a valid certificate, so no link was made."; return 1; }
     install -d -m 700 "$LINK_DIR" || return 1
     token=$(openssl rand -hex 32) || return 1
     key=$(printf '%s' "$token" | sha256sum | awk '{print $1}')
@@ -898,6 +933,7 @@ share_by_link() {
     fi
     # The link holds its own copy, so nothing stays behind in the download folder.
     rm -f -- "$OUT_DIR/$name.ovpn"
+    ca_unlock
     audit "temporary link created: $name, valid for $label"
     url=https://$host
     if [[ $LINK_PORT != 443 ]]; then url+=:$LINK_PORT; fi
@@ -918,11 +954,11 @@ share_by_link() {
     info 'Anyone with this link can get this profile. If the user finds it already used, revoke the client and issue a new one.'
     hr
 }
-valid_endpoint_for_link() { [[ -n $1 ]] && { valid_ipv4 "$1" || valid_domain "$1"; }; }
 show_qr() {
     local marker=$CONFIG_DIR/.server-setup-started
     if ! command -v qrencode >/dev/null; then
         if confirm_choice 'The small qrencode package is needed to draw the QR code. Install it?' 'No, just show the link' 'Install qrencode' normal; then
+            apt-get -o DPkg::Lock::Timeout=120 -qq update >/dev/null || true
             apt-get -o DPkg::Lock::Timeout=120 -y -q --no-install-recommends install qrencode >/dev/null || warn 'Could not install qrencode.'
             if command -v qrencode >/dev/null && [[ -e $marker ]]; then printf 'package qrencode\n' >>"$marker" || true; fi
         fi
@@ -978,6 +1014,7 @@ delete_export() {
     info 'The certificate stays valid and the profile can be re-exported later.'
     info 'Copies already downloaded to devices are not affected.'
     confirm_choice "Delete $path?" 'No, keep it' 'Delete the server copy' danger || { cancelled; return 0; }
+    ca_lock || return 1
     rm -f -- "$path"
     audit "profile deleted from server: $path"
     ok "Deleted: $path"
@@ -1017,7 +1054,16 @@ mgmt_kill_client() {
     printf '%s\n' "$reply" >&2 || true
     return 1
 }
-mgmt_available() { [[ -n $(awk '$1=="management" && NF==3 {print}' "$DARBAN_SERVER_CONF") ]]; }
+mgmt_available() {
+    # True only when mgmt_kill_client could really use it.
+    local spec addr port extra
+    spec=$(awk '$1=="management" {n++; s=$2 "\t" $3 "\t" $4} END {if(n==1) print s}' "$DARBAN_SERVER_CONF" 2>/dev/null)
+    [[ -n $spec ]] || return 1
+    IFS=$'\t' read -r addr port extra <<<"$spec"
+    [[ -z $extra ]] || return 1
+    if [[ $port == unix ]]; then command -v socat >/dev/null; return; fi
+    [[ $addr == 127.0.0.1 || $addr == localhost || $addr == ::1 ]] && [[ $port =~ ^[0-9]+$ ]]
+}
 disconnect_revoked() {
     local name=$1 rc=0
     # One restart already ended every session, including those of the other names being repaired.
@@ -1030,7 +1076,7 @@ disconnect_revoked() {
         0) ok "Active session of $name disconnected (other users were not affected)."; audit "session disconnected: $name"; return 0 ;;
         3) ok "$name has no active VPN session."; return 0 ;;
         1) warn 'The management interface did not confirm the disconnect.' ;;
-        *) info "Single-client disconnect is unavailable (add 'management 127.0.0.1 7505' to server.conf to enable it)." ;;
+        *) info "Single-client disconnect is unavailable. To enable it, add this to server.conf and install socat: management /run/openvpn-server/darban.sock unix" ;;
     esac
     say
     info "$name cannot start new connections. A session already open may last until it renegotiates (up to 1 hour)."
@@ -1081,6 +1127,7 @@ repair_crl() {
     local pending leftovers name path publish=0 rc=0
     local -a targets=() leftover_names=()
     darban_crl_configured || { warn "server.conf lacks a single 'crl-verify $DARBAN_CRL'; OpenVPN would ignore a CRL. Fix the server first."; return 1; }
+    ca_lock || return 1
     pending=$(revocation_pending_names) || { fail 'Could not read the CA index.'; return 1; }
     leftovers=$(revoked_with_profile) || { fail 'Could not read the CA index.'; return 1; }
     if ! darban_verify_crl "$DARBAN_CRL"; then publish=1; fi
@@ -1110,6 +1157,7 @@ repair_crl() {
             warn "Could not delete the server copy: $path"
         fi
     done
+    ca_unlock
     # Read into an array first: the prompts in disconnect_revoked must read the terminal, not this list.
     mapfile -t targets < <(printf '%s\n' "$pending" "$leftovers" | awk 'NF' | sort -u)
     for name in "${targets[@]}"; do disconnect_revoked "$name"; done
@@ -1152,6 +1200,12 @@ revoke_client() {
     bullet 'the server-side copy is deleted; copies on devices cannot be deleted remotely'
     say
     confirm_choice "Revoke $name permanently?" 'No, keep this client' "Revoke $name" danger "$name" || { cancelled; return 0; }
+    ca_lock || return 1
+    # Checked again under the lock: another session may have changed this client during the question.
+    if [[ $(client_index_status "$name") != V || $(client_index_serial "$name") != "$db_serial" ]]; then
+        warn "$name changed while this question was open. Nothing was revoked."
+        return 1
+    fi
     say
     critical_begin
     revoke_and_publish "$name" "$client_serial" || rc=$?
@@ -1161,6 +1215,7 @@ revoke_client() {
     if path=$(profile_path "$name"); then
         if rm -f -- "$path"; then ok "Server copy deleted: $path"; else warn 'Could not delete the server copy; the revocation still succeeded.'; fi
     fi
+    ca_unlock
     disconnect_revoked "$name"
     say
     ok "$name is revoked."
@@ -1259,6 +1314,9 @@ change_port() {
     warn "Open UDP $new in your provider firewall BEFORE continuing; this tool cannot check it."
     say
     confirm_choice "Apply UDP port $new now?" 'No, keep the current port' "Apply port $new" caution "$new" || { cancelled; return 0; }
+    ca_lock || return 1
+    # The file may have changed during the question.
+    old=$(server_port) || { warn 'Expected exactly one port directive in server.conf.'; return 1; }
     backup="$DARBAN_SERVER_CONF.darban-backup.$(date -u +%Y%m%dT%H%M%S.%N)"
     cp -a -- "$DARBAN_SERVER_CONF" "$backup" || return 1
     critical_begin
@@ -1308,6 +1366,8 @@ conf_set_directive() {
     awk -v k="$1" -v v="$2" '$1==k {if (!done) print k " " v; done=1; next} {print} END {if (!done) print k " " v}' "$DARBAN_SERVER_CONF" >"$3"
 }
 new_conf_file() {
+    # Taken before the file is read, so the change starts from the current configuration.
+    ca_lock || return 1
     CONF_TEMP=$(mktemp "$DARBAN_SERVER_DIR/.darban-serverconf.XXXXXXXX") || return 1
     darban_tmp_register "$CONF_TEMP"
 }
@@ -1389,6 +1449,7 @@ set_vpn_network() {
     fi
     say
     confirm_choice "Move the VPN to $candidate/24?" 'No, keep the current network' 'Apply and restart OpenVPN' caution "$candidate" || { cancelled; return 0; }
+    ca_lock || return 1
     nat_saved=$(mktemp) || return 1
     darban_tmp_register "$nat_saved"
     cp -- "$nat" "$nat_saved" || return 1
@@ -1477,7 +1538,8 @@ set_verb() {
 }
 save_config() {
     # Unknown lines are kept; only the settings this tool owns are rewritten.
-    local temp
+    local temp held=$CA_LOCKED
+    ca_lock || return 1
     temp=$(mktemp "$CONFIG_DIR/.config.XXXXXXXX") || return 1
     darban_tmp_register "$temp"
     if [[ -f $CONFIG_FILE ]]; then
@@ -1487,7 +1549,8 @@ save_config() {
     if [[ -n $CLIENT_CERT_DAYS ]]; then printf 'CLIENT_CERT_DAYS=%s\n' "$CLIENT_CERT_DAYS" >>"$temp" || return 1; fi
     if [[ -n $LINK_PORT ]]; then printf 'LINK_PORT=%s\n' "$LINK_PORT" >>"$temp" || return 1; fi
     if [[ $UPDATE_CHECK == no ]]; then printf 'UPDATE_CHECK=no\n' >>"$temp" || return 1; fi
-    chmod 600 "$temp" && mv -f -- "$temp" "$CONFIG_FILE"
+    chmod 600 "$temp" && mv -f -- "$temp" "$CONFIG_FILE" || return 1
+    if (( ! held )); then ca_unlock; fi
 }
 valid_ssh_host() { valid_ipv4 "$1" || valid_domain "$1"; }
 valid_ssh_port() { [[ $1 =~ ^[0-9]{1,5}$ ]] && (( 10#$1 >= 1 && 10#$1 <= 65535 )); }
@@ -1560,6 +1623,7 @@ restart_openvpn() {
     info 'Use this after editing server.conf by hand, or when the service has stopped.'
     say
     confirm_choice 'Restart OpenVPN now? This drops ALL connected VPN users for a few seconds.' 'No, do not restart' 'Restart OpenVPN' caution restart || { cancelled; return 0; }
+    ca_lock || return 1
     info "Restarting OpenVPN${S_ELL}"
     port=$(server_port 2>/dev/null) || port=''
     critical_begin
@@ -1599,7 +1663,7 @@ version_is_newer() {
     if [[ $b == "$base_b" ]]; then return 1; fi
     [[ $(printf '%s\n%s\n' "$a" "$b" | sort -V | tail -n 1) == "$a" ]]
 }
-latest_release_version() { curl -fsSL --proto '=https' --tlsv1.2 --max-time 20 "$DARBAN_URL/releases/latest/download/VERSION"; }
+latest_release_version() { curl -fsSL --proto '=https' --proto-redir '=https' --tlsv1.2 --max-time 20 "$DARBAN_URL/releases/latest/download/VERSION"; }
 start_update_check() {
     # In the background and at most once a day, so the menu never waits for the network.
     [[ $UPDATE_CHECK == yes ]] || return 0
@@ -1626,7 +1690,7 @@ available_update() {
 show_release_notes() {
     # Escape sequences are removed: this text comes from the network and goes straight to a root terminal.
     local notes
-    notes=$(curl -fsSL --proto '=https' --tlsv1.2 --max-time 20 "$DARBAN_URL/releases/download/v$1/RELEASE-NOTES.txt" 2>/dev/null | LC_ALL=C tr -d '\000-\010\013-\037\177') || notes=''
+    notes=$(curl -fsSL --proto '=https' --proto-redir '=https' --tlsv1.2 --max-time 20 "$DARBAN_URL/releases/download/v$1/RELEASE-NOTES.txt" 2>/dev/null | LC_ALL=C tr -d '\000-\010\013-\037\177') || notes=''
     say
     if [[ -n $notes ]]; then
         printf '%sWhat is new in v%s:%s\n' "$C_BOLD" "$1" "$C_RESET" || true
@@ -1636,13 +1700,17 @@ show_release_notes() {
     fi
 }
 update_tool() {
-    local latest
+    local latest rc=0
     command -v curl >/dev/null || { fail 'curl is required to check for updates.'; return 1; }
     kv Installed "v$DARBAN_VERSION"
     info "Checking the latest release of $DARBAN_REPO${S_ELL}"
-    latest=$(latest_release_version) || {
-        fail 'Could not reach GitHub or read the latest release.'; return 1;
-    }
+    latest=$(latest_release_version) || rc=$?
+    # curl reports an HTTP error as 22: GitHub answered, and no stable release is there.
+    if (( rc == 22 )); then
+        info "No stable release is published yet, so there is nothing to update to: $DARBAN_URL/releases"
+        return 0
+    fi
+    if (( rc != 0 )); then fail 'Could not reach GitHub. Check the internet connection of this server.'; return 1; fi
     valid_version "$latest" || { fail 'The release does not state a valid version.'; return 1; }
     kv Latest "v$latest"
     if ! version_is_newer "$latest" "$DARBAN_VERSION"; then
@@ -1676,6 +1744,7 @@ restore_previous() {
     info 'Only this tool is replaced. OpenVPN is not restarted, and clients, the PKI and the CRL stay as they are.'
     say
     confirm_choice "Go back to v${version:-unknown}?" 'No, keep this version' 'Restore the previous version' caution restore || { cancelled; return 0; }
+    ca_lock || return 1
     critical_begin
     cp -a -- "$newest/sbin/." "$SBIN_DIR/" && cp -a -- "$newest/lib/." "$DARBAN_LIB/" && cp -a -- "$newest/units/." "$UNIT_DIR/" || {
         critical_end
@@ -1718,6 +1787,7 @@ uninstall_tool() {
     warn "Nothing will renew the CRL after this. It expires on $expiry; renew it yourself before then, or OpenVPN may refuse clients."
     say
     confirm_choice 'Uninstall Darban OVPN?' 'No, keep it' 'Uninstall' danger uninstall || { cancelled; return 0; }
+    ca_lock || return 1
     audit 'tool uninstalled'
     bash "$DARBAN_LIB/uninstall.sh" --yes || { fail 'The uninstall did not finish. See the messages above.'; return 1; }
     exit "$RC_QUIT"
@@ -1752,6 +1822,7 @@ remove_everything() {
     esac
     say
     confirm_choice 'Remove everything now? This cannot be undone.' 'No, keep everything' 'Remove everything' danger remove-everything || { cancelled; return 0; }
+    ca_lock || return 1
     audit 'removing the tool, OpenVPN, the CA and all profiles'
     bash "$DARBAN_LIB/remove-server.sh" --yes "${options[@]}" || { fail 'The removal did not finish. See the messages above.'; return 1; }
     exit "$RC_QUIT"
@@ -1761,7 +1832,7 @@ check() {
     local symbol=$S_INFO color=''
     case $1 in
         ok) symbol=$S_OK color=$C_GREEN ;;
-        bad) symbol=$S_BAD color=$C_RED ;;
+        bad) symbol=$S_BAD color=$C_RED HEALTH_BAD=$((HEALTH_BAD + 1)) ;;
         warn) symbol=$S_WARN color=$C_YELLOW ;;
     esac
     printf '  %s%s%s %s\n' "$color" "$symbol" "$C_RESET" "$2" || true
@@ -1775,6 +1846,12 @@ check_expiry() {
 }
 health() {
     local version state enabled dco port e crl_err host resolved next last value issue exports pending
+    if [[ -n $SERVER_PROBLEM ]]; then
+        group 'Server'
+        check bad "$SERVER_PROBLEM"
+        # The checks below report what they cannot read, so raw errors from missing files add nothing.
+        exec 2>/dev/null
+    fi
     group 'OpenVPN'
     version=$(openvpn --version 2>/dev/null | awk 'NR==1 {print $1, $2}' || true)
     if [[ -n $version ]]; then check info "$version"; else check warn 'openvpn binary not found in PATH'; fi
@@ -1850,6 +1927,8 @@ health() {
     else
         check ok 'No profiles left on the server'
     fi
+    # The exit status tells a script or a monitor the same thing the checklist tells a person.
+    (( HEALTH_BAD == 0 ))
 }
 
 # ---------- screens ----------
@@ -1964,15 +2043,15 @@ advanced_menu() {
         redraw=1
         ask 'Choose [0-9, Enter = back]: ' || return 0
         case $REPLY in
-            1) menu_action locked 'Traffic routing' set_routing ;;
-            2) menu_action locked 'DNS for clients' set_dns ;;
-            3) menu_action locked 'VPN network' set_vpn_network ;;
-            4) menu_action locked 'Data ciphers' set_ciphers ;;
-            5) menu_action locked 'Keepalive' set_keepalive ;;
-            6) menu_action locked 'Log detail' set_verb ;;
-            7) menu_action locked 'Download access' set_download_access ;;
-            8) menu_action locked 'New client lifetime' set_client_days ;;
-            9) menu_action locked 'Share link port' set_link_port ;;
+            1) menu_action 'Traffic routing' set_routing ;;
+            2) menu_action 'DNS for clients' set_dns ;;
+            3) menu_action 'VPN network' set_vpn_network ;;
+            4) menu_action 'Data ciphers' set_ciphers ;;
+            5) menu_action 'Keepalive' set_keepalive ;;
+            6) menu_action 'Log detail' set_verb ;;
+            7) menu_action 'Download access' set_download_access ;;
+            8) menu_action 'New client lifetime' set_client_days ;;
+            9) menu_action 'Share link port' set_link_port ;;
             0|'') return 0 ;;
             *) warn "Unknown option \"$REPLY\". Enter a number from 0 to 9."; redraw=0 ;;
         esac
@@ -1985,8 +2064,8 @@ settings_menu() {
         redraw=1
         ask 'Choose [0-3, Enter = back]: ' || return 0
         case $REPLY in
-            1) menu_action locked 'Change VPN hostname' set_domain ;;
-            2) menu_action locked 'Change OpenVPN UDP port' change_port ;;
+            1) menu_action 'Change VPN hostname' set_domain ;;
+            2) menu_action 'Change OpenVPN UDP port' change_port ;;
             3) advanced_menu ;;
             0|'') return 0 ;;
             *) warn "Unknown option \"$REPLY\". Enter a number from 0 to 3."; redraw=0 ;;
@@ -2009,9 +2088,9 @@ maintenance_menu() {
         redraw=1
         ask 'Choose [0-3, Enter = back]: ' || return 0
         case $REPLY in
-            1) menu_action unlocked 'Diagnostics' health ;;
-            2) menu_action locked 'Repair CRL' repair_crl ;;
-            3) menu_action locked 'Restart OpenVPN' restart_openvpn ;;
+            1) menu_action 'Diagnostics' health ;;
+            2) menu_action 'Repair CRL' repair_crl ;;
+            3) menu_action 'Restart OpenVPN' restart_openvpn ;;
             0|'') return 0 ;;
             *) warn "Unknown option \"$REPLY\". Enter a number from 0 to 3."; redraw=0 ;;
         esac
@@ -2037,12 +2116,12 @@ setup_menu() {
         ask 'Choose [0-6, Enter = back]: ' || return 0
         case $REPLY in
             # Unlocked: the installer's own CRL check takes the same lock and would wait for this one.
-            1) menu_action unlocked 'Check for updates' update_tool ;;
-            2) menu_action locked 'Restore previous version' restore_previous ;;
-            3) run_action unlocked toggle_update_notice; load_config ;;
-            4) menu_action unlocked 'About' about_text ;;
-            5) menu_action locked 'Uninstall this tool' uninstall_tool ;;
-            6) menu_action locked 'Remove everything' remove_everything ;;
+            1) menu_action 'Check for updates' update_tool ;;
+            2) menu_action 'Restore previous version' restore_previous ;;
+            3) run_action toggle_update_notice; load_config ;;
+            4) menu_action 'About' about_text ;;
+            5) menu_action 'Uninstall this tool' uninstall_tool ;;
+            6) menu_action 'Remove everything' remove_everything ;;
             0|'') return 0 ;;
             *) warn "Unknown option \"$REPLY\". Enter a number from 0 to 6."; redraw=0 ;;
         esac
@@ -2052,6 +2131,43 @@ program_exit() {
     printf '\nBye.\n' || true
     exit 0
 }
+draw_recovery() {
+    clear_screen
+    title_bar
+    fail "This server cannot be managed right now: $SERVER_PROBLEM"
+    hr
+    menu_item 1 'Diagnostics (read-only)'
+    menu_item 2 'Check for updates'
+    menu_item 3 'Uninstall this tool only'
+    menu_item 4 'Remove everything (tool, OpenVPN, CA)'
+    menu_item 0 'Exit'
+    hr
+    printf ' %sThe other options return when this is fixed.%s\n' "$C_DIM" "$C_RESET" || true
+}
+menu_traps() {
+    # A trapped (not default) SIGINT lets Ctrl+C cancel only the running action. Outside an action it exits
+    # from inside the trap: bash resumes an interrupted read afterwards, so a flag would wait for Enter.
+    trap 'if (( ACTION_RUNNING )); then DARBAN_INT=1; else program_exit; fi' INT
+    trap ui_restore EXIT
+}
+recovery_menu() {
+    local redraw=1
+    menu_traps
+    while :; do
+        if (( redraw )); then draw_recovery || true; fi
+        redraw=1
+        ask 'Choose [0-4]: ' || program_exit
+        case $REPLY in
+            1) menu_action 'Diagnostics' health ;;
+            2) menu_action 'Check for updates' update_tool ;;
+            3) menu_action 'Uninstall this tool' uninstall_tool ;;
+            4) menu_action 'Remove everything' remove_everything ;;
+            0) program_exit ;;
+            '') redraw=0 ;;
+            *) warn "Unknown option \"$REPLY\". Enter a number from 0 to 4."; redraw=0 ;;
+        esac
+    done
+}
 first_run() {
     # Profiles cannot be built without a hostname, so guide a fresh install there first.
     valid_domain "$(domain)" && return 0
@@ -2060,15 +2176,12 @@ first_run() {
     title_bar
     info 'Welcome! The VPN hostname is not set yet; client profiles need it.'
     if confirm_choice 'Set the VPN hostname now?' 'Not now' 'Set it now' normal '' 2; then
-        menu_action locked 'Change VPN hostname' set_domain
+        menu_action 'Change VPN hostname' set_domain
     fi
 }
 main_menu() {
     local redraw=1
-    # A trapped (not default) SIGINT lets Ctrl+C cancel only the running action. Outside an action it exits
-    # from inside the trap: bash resumes an interrupted read afterwards, so a flag would wait for Enter.
-    trap 'if (( ACTION_RUNNING )); then DARBAN_INT=1; else program_exit; fi' INT
-    trap ui_restore EXIT
+    menu_traps
     start_update_check
     first_run
     while :; do
@@ -2076,12 +2189,12 @@ main_menu() {
         redraw=1
         ask 'Choose [0-9]: ' || program_exit
         case $REPLY in
-            1) menu_action unlocked 'Clients' list_menu ;;
-            2) menu_action locked 'Create client' create_client ;;
-            3) menu_action locked 'Revoke client (permanent)' revoke_client ;;
-            4) menu_action locked 'Share a profile' share_profile ;;
-            5) menu_action locked 'Active links' active_links ;;
-            6) menu_action locked 'Delete server copy' delete_export ;;
+            1) menu_action 'Clients' list_menu ;;
+            2) menu_action 'Create client' create_client ;;
+            3) menu_action 'Revoke client (permanent)' revoke_client ;;
+            4) menu_action 'Share a profile' share_profile ;;
+            5) menu_action 'Active links' active_links ;;
+            6) menu_action 'Delete server copy' delete_export ;;
             7) settings_menu ;;
             8) maintenance_menu ;;
             9) setup_menu ;;
@@ -2135,14 +2248,21 @@ main() {
     if (( LIST_ALL )) && [[ $cmd != list ]]; then printf -- '--all only works with list.\n\n' >&2; usage >&2; exit 2; fi
     ui_init
     setup
+    # Diagnostics, updates and removal must work on a broken server; these two cannot.
+    if [[ -n $SERVER_PROBLEM ]] && [[ $cmd == list || $cmd == repair-crl ]]; then
+        fail "$SERVER_PROBLEM"
+        info 'Details: sudo darban status'
+        exit 1
+    fi
     case $cmd in
-        list) run_action unlocked list_clients; exit "$ACTION_RC" ;;
-        status) run_action unlocked health; exit "$ACTION_RC" ;;
-        repair-crl) run_action locked repair_crl; exit "$ACTION_RC" ;;
-        update) run_action unlocked update_tool; exit "$ACTION_RC" ;;
-        uninstall) run_action locked uninstall_tool; exit "$ACTION_RC" ;;
-        remove-all) run_action locked remove_everything; exit "$ACTION_RC" ;;
+        list) run_action list_clients; exit "$ACTION_RC" ;;
+        status) run_action health; exit "$ACTION_RC" ;;
+        repair-crl) run_action repair_crl; exit "$ACTION_RC" ;;
+        update) run_action update_tool; exit "$ACTION_RC" ;;
+        uninstall) run_action uninstall_tool; exit "$ACTION_RC" ;;
+        remove-all) run_action remove_everything; exit "$ACTION_RC" ;;
     esac
+    if [[ -n $SERVER_PROBLEM ]]; then recovery_menu; fi
     main_menu
 }
 main "$@"

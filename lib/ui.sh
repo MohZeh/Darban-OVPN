@@ -222,9 +222,9 @@ choose_one() {
             if (( i + 1 == selected )); then choice_row $((i + 1)) "${options[i]}" "$C_CYAN" 1; else choice_row $((i + 1)) "${options[i]}" '' 0; fi
         done
         printf '\r\e[K %s%s or 1-%d to choose %s Enter to confirm %s Esc to cancel%s\n' "$C_DIM" "$S_UPDOWN" "$n" "$S_SEP" "$S_SEP" "$C_RESET" || true
-        rc=0; key=''; digit=''; MZX_INT=0
+        rc=0; key=''; digit=''; DARBAN_INT=0
         IFS= read -rsn1 -t "$IDLE_TIMEOUT" key || rc=$?
-        if (( MZX_INT )); then answer=cancel
+        if (( DARBAN_INT )); then answer=cancel
         elif (( rc > 128 )); then ui_restore; idle_exit
         elif (( rc != 0 )); then answer=cancel
         else

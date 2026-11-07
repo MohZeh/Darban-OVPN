@@ -22,7 +22,7 @@ Darban (دربان, "gatekeeper") installs a current OpenVPN server and then han
 
 | You want to | Darban does |
 |---|---|
-| Set up a server without a long tutorial | Asks for an address and a port, then installs OpenVPN from the OpenVPN project's repository and the Virtual HWE kernel, without graphics or firmware packages |
+| Set up a server without a long tutorial | Asks for an address and a port, then installs OpenVPN from the OpenVPN project's repository and, only if the running kernel needs it, the Virtual HWE kernel, without graphics or firmware packages |
 | Send a profile to someone safely | Creates a one-time link that expires, and that a messenger's link preview cannot use up |
 | Be sure a revoked client is really blocked | Checks the published CRL against the CA database, and warns by name until a revocation is enforced |
 | Change settings without locking users out | Keeps a backup, restarts, checks the port, and restores the old configuration if the service does not return |

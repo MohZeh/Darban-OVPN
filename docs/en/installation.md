@@ -40,12 +40,12 @@ Before changing anything, the setup shows its full plan, including apt's own lis
 ### What the setup does
 
 - Adds the OpenVPN project's apt repository (stable channel) and installs `openvpn`, `easy-rsa`, `socat` and `nftables`
-- Installs `linux-image-virtual-hwe-24.04` or `linux-image-virtual-hwe-26.04`, matching the system, without recommended packages, unless the system is a container. The kernel ships the `ovpn` module, so no DKMS or headers are needed. If apt plans firmware or graphics packages, the setup stops.
+- If the running kernel has no `ovpn` module, installs `linux-image-virtual-hwe-24.04` or `linux-image-virtual-hwe-26.04`, matching the system, without recommended packages. That kernel ships the module, so no DKMS or headers are needed. If apt plans firmware or graphics packages, the setup stops. A container, or a kernel that already has the module, needs nothing; `--install-kernel` installs the kernel anyway.
 - Creates a CA in `/root/pki` and a server certificate valid for 10 years
 - Writes `/etc/openvpn/server/server.conf`, enables IPv4 forwarding, and adds NAT for the VPN only, in its own nftables table
 - Starts OpenVPN
 
-The current kernel stays as a fallback and nothing reboots automatically. The VPN works immediately without DCO. **Reboot when convenient** to use the new kernel and DCO.
+If a kernel is installed, the current one stays as a fallback and nothing reboots automatically. The VPN works immediately without DCO. **Reboot when convenient** to use the new kernel and DCO.
 
 ### Defaults you can change later
 
@@ -64,7 +64,7 @@ sudo bash setup/server-setup.sh --host vpn.example.com --port 1194 --subnet 10.8
 sudo bash setup/install.sh
 ```
 
-Other options are `--split-tunnel` and `--open-ufw`. With `--yes`, `ufw` stays unchanged unless `--open-ufw` is given. Run these from an unpacked release archive.
+If a setup stops half way, run it again: it continues from where it stopped, and it shows the command that undoes everything. Other options are `--split-tunnel`, `--open-ufw` and `--install-kernel`. With `--yes`, `ufw` stays unchanged unless `--open-ufw` is given. Run these from an unpacked release archive.
 
 ## Server that already runs OpenVPN
 

@@ -1,5 +1,5 @@
 [Unit]
-Description=Darban OVPN v1.0 daily CRL check
+Description=Darban OVPN daily CRL check
 
 [Timer]
 OnCalendar=*-*-* 04:20:00 UTC

@@ -468,20 +468,22 @@ fake_release() {
     RELEASE=$E/release; MARKER=$E/installed
     mkdir -p "$fixture/setup" "$RELEASE"
     printf '#!/usr/bin/env bash\necho "installer ran" > "$MARKER"\n' > "$fixture/setup/install.sh"
-    tar -C "$fixture" -czf "$RELEASE/darban-ovpn.tar.gz" setup
+    echo 9.9.9 > "$fixture/VERSION"
+    tar -C "$fixture" -czf "$RELEASE/darban-ovpn.tar.gz" setup VERSION
     (cd "$RELEASE" && sha256sum darban-ovpn.tar.gz > SHA256SUMS)
     echo 9.9.9 > "$RELEASE/VERSION"
     cat > "$E/bin/curl" <<'STUB'
 #!/usr/bin/env bash
 out=''; url=''
-while (( $# )); do case $1 in -o) out=$2; shift 2 ;; --proto|--tlsv1.2|--retry|--max-time) if [[ $1 == --tlsv1.2 ]]; then shift; else shift 2; fi ;; -*) shift ;; *) url=$1; shift ;; esac; done
+while (( $# )); do case $1 in -o) out=$2; shift 2 ;; --proto|--proto-redir|--tlsv1.2|--retry|--max-time) if [[ $1 == --tlsv1.2 ]]; then shift; else shift 2; fi ;; -*) shift ;; *) url=$1; shift ;; esac; done
 echo "curl $url" >> "$STUB_LOG"
-if [[ -n ${CURL_FAIL:-} ]]; then exit 22; fi
+if [[ -n ${CURL_FAIL:-} ]]; then exit "${CURL_RC:-22}"; fi
 if [[ -n $out ]]; then cp "$RELEASE/${url##*/}" "$out"; else cat "$RELEASE/${url##*/}"; fi
 STUB
     chmod +x "$E/bin/curl"
     # The test user is not root; everything else in get.sh runs unchanged.
-    sed -e 's/^\[\[ \$EUID == 0 \]\] .*/:/' -e "s#^SERVER_CONF=.*#SERVER_CONF=$SERVER_CONF#" "$REPO/setup/get.sh" > "$E/get.sh"
+    sed -e 's/^\( *\)\[\[ \$EUID == 0 \]\] .*/\1:/' -e "s#^SERVER_CONF=.*#SERVER_CONF=$SERVER_CONF#" \
+        -e "s#^TOOL=.*#TOOL=$E/fake-tool#" -e "s#^SETUP_RECORD=.*#SETUP_RECORD=$E/cfg/.server-setup-started#" "$REPO/setup/get.sh" > "$E/get.sh"
     export RELEASE MARKER
 }
 
@@ -524,7 +526,7 @@ test_get_sh_sets_up_a_server_only_when_there_is_none() {
     local out rc
     fake_release
     printf '#!/usr/bin/env bash\necho "server setup ran" >> "$MARKER.setup"\n' > "$E/fixture/setup/server-setup.sh"
-    tar -C "$E/fixture" -czf "$RELEASE/darban-ovpn.tar.gz" setup
+    tar -C "$E/fixture" -czf "$RELEASE/darban-ovpn.tar.gz" setup VERSION
     (cd "$RELEASE" && sha256sum darban-ovpn.tar.gz > SHA256SUMS)
     # The test has no terminal, so the fallback to the real terminal is replaced by the test's stdin.
     sed -i 's#</dev/tty#</dev/null#' "$E/get.sh"
@@ -561,8 +563,10 @@ test_update_from_the_menu() {
     echo 'not a version' > "$RELEASE/VERSION"
     out=$(menu '9\n1\n0\n0\n')
     has 'a bad version file is refused' 'does not state a valid version' "$out"
-    out=$(CURL_FAIL=1 bash "$E/manager.sh" update </dev/null 2>&1)
+    out=$(CURL_FAIL=1 CURL_RC=6 bash "$E/manager.sh" update </dev/null 2>&1)
     has 'no network is reported' 'Could not reach GitHub' "$out"
+    out=$(CURL_FAIL=1 bash "$E/manager.sh" update </dev/null 2>&1)
+    has 'no stable release is reported as that' 'No stable release is published yet' "$out"
 
     echo 9.9.9 > "$RELEASE/VERSION"
     out=$(bash "$E/manager.sh" update 2>&1 <<<'9.9.9')
@@ -654,7 +658,7 @@ esac
 STUB
     for stub in nft modprobe; do printf '#!/usr/bin/env bash\necho "%s $*" >> "$STUB_LOG"\n' "$stub" > "$E/bin/$stub"; done
     printf '#!/usr/bin/env bash\necho "sysctl $*" >> "$STUB_LOG"\nif [[ ${1:-} == -n ]]; then echo "${FORWARD_BEFORE:-0}"; fi\n' > "$E/bin/sysctl"
-    printf '#!/usr/bin/env bash\nexit 1\n' > "$E/bin/modinfo"
+    printf '#!/usr/bin/env bash\nif [[ -n ${FAKE_OVPN:-} ]]; then exit 0; fi\nexit 1\n' > "$E/bin/modinfo"
     printf '#!/usr/bin/env bash\nif [[ -n ${FAKE_CONTAINER:-} ]]; then exit 0; fi\nexit 1\n' > "$E/bin/systemd-detect-virt"
     printf '#!/usr/bin/env bash\nif [[ ${1:-} == -r ]]; then echo "${KERNEL_RUN:-6.8.0-50-generic}"; else exec /usr/bin/uname "$@"; fi\n' > "$E/bin/uname"
     chmod +x "$E/bin/"*
@@ -664,7 +668,9 @@ STUB
         -e "s#^CONFIG_DIR=.*#CONFIG_DIR=$E/cfg#" -e "s#^APT_KEY=.*#APT_KEY=$conf_dir/keyrings/key.asc#" \
         -e "s#^APT_LIST=.*#APT_LIST=$conf_dir/sources/openvpn.list#" -e "s#^SYSCTL_FILE=.*#SYSCTL_FILE=$conf_dir/sysctl/darban.conf#" \
         -e "s#^MODULES_FILE=.*#MODULES_FILE=$conf_dir/modules/darban.conf#" -e "s#^NAT_UNIT=.*#NAT_UNIT=$conf_dir/units/nat.service#" \
+        -e "s#^TOOL=.*#TOOL=$E/fake-sbin/darban#" -e "s#^TOOL_LIB=.*#TOOL_LIB=$conf_dir/lib#" \
         -e "s#^TUN_DEV=.*#TUN_DEV=\${FAKE_TUN:-/dev/null}#" "$REPO/setup/server-setup.sh" > "$E/setup/server-setup.sh"
+    cp "$REPO/setup/remove-server.sh" "$REPO/setup/uninstall.sh" "$E/setup/"
     SETUP_ROOT=$conf_dir
 }
 setup_run() { bash "$E/setup/server-setup.sh" "$@" 2>&1 </dev/null; }
@@ -1433,6 +1439,301 @@ test_restore_previous_version() {
     ok_if 'that backup is used up' test ! -e "$backup"
     ok_if 'the CA was not touched' test -s "$PKI/ca.crt"
     grep -q 'restored previous version' "$STUB_LOG"; rc_is 'the restore is audited' 0 "$?"
+}
+
+tool_version() { printf '#!/usr/bin/env bash\necho %s\n' "$1" > "$E/fake-tool"; chmod +x "$E/fake-tool"; }
+
+test_get_sh_knows_install_from_update() {
+    local out rc
+    fake_release
+    out=$(bash "$E/get.sh" 2>&1 </dev/null)
+    has 'nothing installed: it installs' 'Installing Darban OVPN v9.9.9' "$out"
+    ok_if 'the installer ran' test -s "$MARKER"
+
+    tool_version 1.0.0; rm -f "$MARKER"
+    out=$(bash "$E/get.sh" 2>&1 </dev/null)
+    has 'an older version: it updates' 'Updating Darban OVPN from v1.0.0 to v9.9.9' "$out"
+    ok_if 'the update ran' test -s "$MARKER"
+
+    tool_version 9.9.9-rc.1; rm -f "$MARKER"
+    out=$(bash "$E/get.sh" 2>&1 </dev/null)
+    has 'a pre-release of it: it updates' 'from v9.9.9-rc.1 to v9.9.9' "$out"
+
+    tool_version 9.9.9; rm -f "$MARKER"
+    out=$(bash "$E/get.sh" 2>&1 </dev/null); rc=$?
+    rc_is 'the same version is not an error' 0 "$rc"
+    has 'the same version: nothing to do' 'already up to date' "$out"
+    ok_if 'nothing was installed' test ! -e "$MARKER"
+    out=$(bash "$E/get.sh" --version v9.9.9 2>&1 </dev/null)
+    has 'asked by name, it installs again' 'again' "$out"
+    ok_if 'it did install' test -s "$MARKER"
+
+    tool_version 10.0.0; rm -f "$MARKER"
+    out=$(bash "$E/get.sh" 2>&1 </dev/null); rc=$?
+    rc_is 'a newer installed version is not an error' 0 "$rc"
+    has 'it never goes back by itself' 'is newer than v9.9.9' "$out"
+    ok_if 'nothing was installed' test ! -e "$MARKER"
+    out=$(bash "$E/get.sh" --version v9.9.9 2>&1 </dev/null)
+    has 'going back needs the version named' 'Going back from Darban OVPN v10.0.0 to v9.9.9' "$out"
+    ok_if 'it did go back' test -s "$MARKER"
+}
+
+test_get_sh_survives_a_partial_download() {
+    local out rc
+    fake_release
+    : > "$STUB_LOG"
+    head -n -1 "$E/get.sh" > "$E/cut.sh"
+    out=$(bash "$E/cut.sh" 2>&1 </dev/null)
+    ok_if 'without the last line nothing runs' test ! -e "$MARKER"
+    if grep -q '^curl' "$STUB_LOG"; then result 0 'without the last line nothing is downloaded'; else result 1 'without the last line nothing is downloaded'; fi
+    head -n 60 "$E/get.sh" > "$E/cut.sh"
+    out=$(bash "$E/cut.sh" 2>&1 </dev/null); rc=$?
+    rc_not0 'cut inside a function is an error' "$rc"
+    ok_if 'cut inside a function nothing runs' test ! -e "$MARKER"
+    if grep -q '^curl' "$STUB_LOG"; then result 0 'cut inside a function nothing is downloaded'; else result 1 'cut inside a function nothing is downloaded'; fi
+}
+
+test_get_sh_from_a_pipe() {
+    local out rc
+    fake_release
+    printf '#!/usr/bin/env bash\necho "$*" >> "$MARKER.setup"\n' > "$E/fixture/setup/server-setup.sh"
+    tar -C "$E/fixture" -czf "$RELEASE/darban-ovpn.tar.gz" setup VERSION
+    (cd "$RELEASE" && sha256sum darban-ovpn.tar.gz > SHA256SUMS)
+    rm "$SERVER_CONF"
+    out=$(cat "$E/get.sh" | setsid -w bash 2>&1); rc=$?
+    rc_not0 'no terminal and no answers is an error' "$rc"
+    has 'it says what to do' 'There is no terminal' "$out"
+    ok_if 'no setup ran' test ! -e "$MARKER.setup"
+    out=$(cat "$E/get.sh" | setsid -w bash -s -- --yes --host vpn.example.com --port 1194 2>&1); rc=$?
+    rc_is 'answers need no terminal' 0 "$rc"
+    grep -qx -- '--yes --host vpn.example.com --port 1194' "$MARKER.setup"; rc_is 'the answers reach the setup' 0 "$?"
+    out=$(bash "$E/get.sh" --nonsense 2>&1 </dev/null); rc=$?
+    rc_not0 'an unknown option is refused' "$rc"
+    has 'it shows the usage' 'Usage: get.sh' "$out"
+}
+
+test_get_sh_explains_a_failed_download() {
+    local out
+    fake_release
+    out=$(CURL_FAIL=1 bash "$E/get.sh" 2>&1 </dev/null)
+    has 'no stable release' 'No stable release is published yet' "$out"
+    out=$(CURL_FAIL=1 bash "$E/get.sh" --version v1.2.3 2>&1 </dev/null)
+    has 'an unknown version' 'Release v1.2.3 was not found' "$out"
+    out=$(CURL_FAIL=1 CURL_RC=6 bash "$E/get.sh" 2>&1 </dev/null)
+    has 'no network' 'internet connection' "$out"
+}
+
+test_release_assets_know_their_version() {
+    local out=$WORK/release-assets version
+    version=$(cat "$REPO/VERSION")
+    bash "$REPO/scripts/build-release.sh" "$out" >/dev/null 2>&1; rc_is 'the assets build' 0 "$?"
+    grep -qx "RELEASE_TAG=v$version" "$out/get.sh"; rc_is 'the published script names its release' 0 "$?"
+    ok_if 'the source script stays unnamed' grep -qx "RELEASE_TAG=''" "$REPO/setup/get.sh"
+    bash -n "$out/get.sh"; rc_is 'the published script is valid' 0 "$?"
+    if tar -tzf "$out/darban-ovpn.tar.gz" | grep -q '^tests/'; then result 0 'tests are not published'; else result 1 'tests are not published'; fi
+    tar -tzf "$out/darban-ovpn.tar.gz" | grep -qx 'VERSION'; rc_is 'the archive states its version' 0 "$?"
+    (cd "$out" && sha256sum --quiet -c SHA256SUMS >/dev/null); rc_is 'the checksums match' 0 "$?"
+}
+
+test_server_setup_continues_after_a_failure() {
+    local out rc record
+    prepare_blank_server
+    record=$E/cfg/.server-setup-started
+    out=$(printf '\n\n1\n' | bash "$E/setup/server-setup.sh" 2>&1)
+    lacks 'a cancelled setup offers nothing to undo' 'To undo everything' "$out"
+
+    out=$(FAIL_RESTART=1 setup_run --port 21194 --yes); rc=$?
+    rc_not0 'a failed start is reported' "$rc"
+    has 'it says how to try again' 'run the same command' "$out"
+    has 'it says how to undo it' "$SETUP_ROOT/lib/remove-server.sh --yes" "$out"
+    ok_if 'the way back is already installed' test -s "$SETUP_ROOT/lib/remove-server.sh"
+    if grep -qx setup_complete "$record"; then result 0 'it is not recorded as finished'; else result 1 'it is not recorded as finished'; fi
+
+    out=$(setup_run --yes); rc=$?
+    rc_is 'running it again finishes' 0 "$rc"
+    has 'it says it continues' 'continues from where it stopped' "$out"
+    grep -q '^port 21194$' "$E/server/server.conf"; rc_is 'the earlier port stays' 0 "$?"
+    grep -qx setup_complete "$record"; rc_is 'now it is recorded as finished' 0 "$?"
+
+    out=$(setup_run --port 21194 --yes); rc=$?
+    rc_not0 'a finished server is refused' "$rc"
+    has 'it says why' 'already exists' "$out"
+}
+
+test_server_setup_failure_can_be_undone() {
+    local out rc
+    prepare_blank_server
+    FAIL_RESTART=1 setup_run --port 21194 --yes >/dev/null
+    install_removal_scripts
+    out=$(bash "$E/lib/remove-server.sh" --yes 2>&1 </dev/null); rc=$?
+    rc_is 'the undo finishes' 0 "$rc"
+    ok_if 'the configuration is gone' test ! -e "$E/server/server.conf"
+    ok_if 'the record is gone' test ! -e "$E/cfg"
+    ok_if 'the CA is gone' test ! -e "$PKI"
+}
+
+test_server_setup_survives_a_lost_connection() {
+    local pid rc attempt
+    prepare_blank_server
+    sed -i '1a if [[ " $* " == *" -y -q "* ]]; then sleep 2; fi' "$E/bin/apt-get"
+    bash "$E/setup/server-setup.sh" --port 21194 --yes >/dev/null 2>&1 </dev/null &
+    pid=$!
+    for attempt in $(seq 1 100); do
+        if grep -q -- ' -y -q ' "$STUB_LOG" 2>/dev/null; then break; fi
+        sleep 0.1
+    done
+    kill -HUP "$pid" 2>/dev/null
+    wait "$pid"; rc=$?
+    rc_is 'a hangup does not stop the setup' 0 "$rc"
+    grep -qx setup_complete "$E/cfg/.server-setup-started"; rc_is 'the setup finished' 0 "$?"
+}
+
+test_server_setup_installs_a_kernel_only_when_needed() {
+    local out rc
+    prepare_blank_server
+    : > "$STUB_LOG"
+    out=$(FAKE_OVPN=1 setup_run --port 21194 --yes); rc=$?
+    rc_is 'setup finishes' 0 "$rc"
+    has 'it says why no kernel is installed' 'already has the ovpn module' "$out"
+    if grep -q 'linux-image' "$STUB_LOG"; then result 0 'no kernel is planned or installed'; else result 1 'no kernel is planned or installed'; fi
+    if grep -q '^kernel ' "$E/cfg/.server-setup-started"; then result 0 'no kernel is recorded'; else result 1 'no kernel is recorded'; fi
+    has 'DCO is available at once' 'so DCO is available' "$out"
+
+    prepare_blank_server_again
+    out=$(FAKE_OVPN=1 setup_run --port 21194 --install-kernel --yes); rc=$?
+    rc_is 'asking for the kernel works' 0 "$rc"
+    grep -q 'nftables linux-image-virtual-hwe-24.04' "$STUB_LOG"; rc_is 'the kernel is installed when asked' 0 "$?"
+}
+prepare_blank_server_again() {
+    rm -rf "$PKI" "$E/cfg" "$E/server/server.conf"
+    mkdir -p "$E/cfg"
+    : > "$STUB_LOG"
+}
+
+test_broken_server_can_still_be_diagnosed_and_removed() {
+    local out rc
+    fake_release
+    cp "$E/get.sh" "$E/lib/get.sh"
+    mv "$PKI/ca.crt" "$E/ca.keep"
+
+    out=$(mgr status); rc=$?
+    rc_is 'diagnostics report the problem by status' 1 "$rc"
+    has 'diagnostics name the problem' 'CA or OpenVPN server configuration is missing' "$out"
+    has 'diagnostics go on to the rest' 'Listening on UDP' "$out"
+    out=$(mgr list); rc=$?
+    rc_is 'a command that needs the CA refuses' 1 "$rc"
+    has 'it says where to look' 'sudo darban status' "$out"
+    out=$(menu '0\n')
+    has 'the menu says what is wrong' 'cannot be managed right now' "$out"
+    has 'the menu offers removal' 'Remove everything' "$out"
+    lacks 'the menu hides what cannot work' 'Create client' "$out"
+    out=$(menu '1\n\n0\n')
+    has 'the menu offers diagnostics' 'Listening on UDP' "$out"
+    out=$(bash "$E/manager.sh" update 2>&1 <<<'9.9.9')
+    has 'an update still works' 'Updated to v9.9.9' "$out"
+    has 'removing the tool is still offered' 'This removes the tool' "$(mgr uninstall)"
+    has 'removing everything still answers' 'was not set up by this tool' "$(mgr remove-all)"
+    mv "$E/ca.keep" "$PKI/ca.crt"
+
+    openssl pkey -in "$PKI/private/ca.key" -aes256 -passout pass:x -out "$E/ca.enc" 2>/dev/null
+    cp "$PKI/private/ca.key" "$E/ca.plain"; cp "$E/ca.enc" "$PKI/private/ca.key"
+    out=$(mgr status); rc=$?
+    rc_is 'a password-protected CA is reported by status' 1 "$rc"
+    has 'it is named' 'CA key is encrypted' "$out"
+    cp "$E/ca.plain" "$PKI/private/ca.key"
+
+    mv "$SERVER_CONF" "$E/conf.keep"
+    out=$(mgr status); rc=$?
+    rc_is 'a missing server.conf is reported by status' 1 "$rc"
+    lacks 'without raw errors' 'No such file' "$out"
+    mv "$E/conf.keep" "$SERVER_CONF"
+    mgr status >/dev/null; rc_is 'a repaired server is healthy again' 0 "$?"
+}
+
+test_status_exit_code_follows_the_checklist() {
+    local out rc
+    out=$(mgr status); rc=$?
+    rc_is 'healthy means 0' 0 "$rc"
+    if (( rc != 0 )); then printf '%s\n' "$out" | grep -F '✗' | cut -c1-150 | sed 's/^/    | /'; fi
+    rm "$CRL"
+    out=$(mgr status); rc=$?
+    rc_is 'a problem means 1' 1 "$rc"
+    has 'and the checklist shows it' 'Published CRL problem' "$out"
+}
+
+test_management_is_only_reported_when_it_works() {
+    local out
+    sed -i '/^management /d' "$SERVER_CONF"
+    printf 'management /run/test.sock unix\n' >> "$SERVER_CONF"
+    printf '#!/usr/bin/env bash\n' > "$E/bin/socat"; chmod +x "$E/bin/socat"
+    has 'with socat it is available' 'single-client disconnect available' "$(mgr status)"
+    rm "$E/bin/socat"
+    if ! command -v socat >/dev/null; then
+        has 'without socat it is not' 'Management interface: not configured' "$(mgr status)"
+    fi
+}
+
+test_disconnect_advice_is_not_an_open_port() {
+    local out
+    sed -i '/^management /d' "$SERVER_CONF"
+    out=$(printf '3\nalice\nalice\n1\n\n0\n' | bash "$E/manager.sh" 2>&1)
+    has 'it advises a local socket' 'darban.sock unix' "$out"
+    lacks 'it does not advise a TCP port' '7505' "$out"
+}
+
+test_lock_is_held_only_for_changes() {
+    local out
+    : > "$STUB_LOG"
+    out=$(printf '3\nalice\n1\n\n0\n' | bash "$E/manager.sh" 2>&1)
+    has 'the revoke was cancelled' 'Cancelled' "$out"
+    if grep -q '^flock' "$STUB_LOG"; then result 0 'no lock while waiting for an answer'; else result 1 'no lock while waiting for an answer'; fi
+    : > "$STUB_LOG"
+    out=$(printf '2\n\n\n0\n' | bash "$E/manager.sh" 2>&1)
+    if grep -q '^flock' "$STUB_LOG"; then result 0 'a cancelled create takes no lock'; else result 1 'a cancelled create takes no lock'; fi
+    : > "$STUB_LOG"
+    out=$(printf '3\nalice\nalice\n1\n\n0\n' | bash "$E/manager.sh" 2>&1)
+    has 'a confirmed revoke finishes' 'alice is revoked' "$out"
+    grep -q '^flock -n' "$STUB_LOG"; rc_is 'the change takes the lock' 0 "$?"
+    grep -q '^flock -u' "$STUB_LOG"; rc_is 'and gives it back before asking about the session' 0 "$?"
+}
+
+test_changes_made_during_a_question_are_noticed() {
+    local out
+    out=$(printf '3\nalice\nalice\n\n0\n' | FLOCK_HOOK='easyrsa revoke alice' bash "$E/manager.sh" 2>&1)
+    has 'a client revoked meanwhile is not revoked again' 'changed while this question was open' "$out"
+    out=$(printf '2\nbob\n\n0\n' | FLOCK_HOOK='easyrsa build-client-full bob nopass' bash "$E/manager.sh" 2>&1)
+    has 'a name taken meanwhile is refused' 'created by another session' "$out"
+}
+
+test_a_number_is_never_mistaken_for_a_name() {
+    local out
+    out=$(printf '2\n123\n\n\n0\n' | bash "$E/manager.sh" 2>&1)
+    has 'a name of digits only is refused' 'only digits' "$out"
+    ok_if 'no such client was made' test ! -e "$PKI/issued/123.crt"
+    easyrsa build-client-full 2 nopass >/dev/null 2>&1
+    out=$(printf '3\n2\n1\n\n0\n' | bash "$E/manager.sh" 2>&1)
+    has 'the exact name wins over the list number' 'Revoke 2 permanently' "$out"
+    out=$(printf '3\n1\n1\n\n0\n' | bash "$E/manager.sh" 2>&1)
+    has 'other numbers still pick from the list' 'Revoke 2 permanently' "$out"
+}
+
+test_address_setting_accepts_a_real_address_only() {
+    local out
+    out=$(printf '7\n1\n300.1.1.1\n\n\n0\n0\n' | bash "$E/manager.sh" 2>&1)
+    has 'an impossible IP is refused' 'Enter a hostname' "$out"
+    out=$(printf '7\n1\n203.0.113.9\n2\n\n0\n0\n' | bash "$E/manager.sh" 2>&1)
+    grep -qx '203.0.113.9' "$E/cfg/domain"; rc_is 'a real IP is saved' 0 "$?"
+}
+
+test_remove_everything_keeps_files_it_did_not_create() {
+    local out rc
+    built_server
+    printf 'someone else\n' > "$E/server/other.conf"
+    out=$(bash "$E/lib/remove-server.sh" --yes 2>&1 </dev/null); rc=$?
+    rc_is 'the removal finishes' 0 "$rc"
+    ok_if 'the other file stays' test -s "$E/server/other.conf"
+    ok_if 'its own configuration is gone' test ! -e "$E/server/server.conf"
+    has 'it says what stayed' 'this setup did not create them' "$out"
 }
 
 test_ci_scope_skips_only_documentation() {

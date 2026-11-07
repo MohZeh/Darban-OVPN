@@ -48,6 +48,7 @@ valid_ipv4() {
     IFS=. read -r -a octets <<<"$1"
     for octet in "${octets[@]}"; do (( 10#$octet <= 255 )) || return 1; done
 }
+valid_endpoint() { if [[ $1 =~ ^[0-9.]+$ ]]; then valid_ipv4 "$1"; else valid_domain "$1"; fi; }
 ip_to_int() {
     local a b c d
     IFS=. read -r a b c d <<<"$1"
