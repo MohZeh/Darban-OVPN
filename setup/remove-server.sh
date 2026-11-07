@@ -77,6 +77,10 @@ if (( KERNEL )) && [[ $(kernel_status) != removable ]]; then
     exit 1
 fi
 
+# The CA lock: inherited from the menu, or taken here, so the daily CRL job cannot run in the middle.
+if ! { true >&9; } 2>/dev/null; then exec 9>>"$LOCK_FILE"; fi
+flock -w 60 9 || { echo 'Another Darban operation is running. Try again in a minute.' >&2; exit 1; }
+
 backup_file=''
 if (( BACKUP )); then
     backup_file=$BACKUP_DIR/darban-backup-$(date -u +%Y%m%dT%H%M%S).tar.gz
@@ -96,6 +100,14 @@ mapfile -t added_kernel < <(recorded kernel)
 forward_before=$(awk '$1=="ip_forward_before" {print $2}' "$MARKER")
 ufw_port=$(awk '$1=="ufw_port" {print $2}' "$MARKER")
 ufw_iface=$(awk '$1=="ufw_iface" {print $2}' "$MARKER")
+mapfile -t certificates < <(awk '$1=="certbot_cert" && $2 ~ /^[A-Za-z0-9._-]+$/ {print $2}' "$MARKER" | sort -u)
+mapfile -t apt_added < <(awk '$1=="apt_added" {print $2}' "$MARKER")
+mapfile -t apt_saved < <(awk '$1=="apt_saved" {print $2}' "$MARKER")
+certbot_venv=$(awk '$1=="certbot_venv" {print $2}' "$MARKER")
+out_dir_existed=0
+if grep -qx out_dir_existed "$MARKER"; then out_dir_existed=1; fi
+# The client names, read before the CA goes, for a profile folder that held other files too.
+mapfile -t client_names < <(awk -F '\t' 'NF>=6 && $6 ~ /\/CN=/ {cn=$6; sub(/^.*\/CN=/,"",cn); sub(/\/.*/,"",cn); print cn}' "$PKI/index.txt" 2>/dev/null | sort -u)
 
 echo 'Stopping OpenVPN and NAT...'
 systemctl disable --now "$UNIT" >/dev/null 2>&1 || true
@@ -107,15 +119,19 @@ systemctl daemon-reload >/dev/null 2>&1 || true
 if [[ $forward_before == 0 ]]; then sysctl -q -w net.ipv4.ip_forward=0 >/dev/null 2>&1 || true; fi
 
 # Only the rules the setup added; anything else in ufw stays.
-if [[ $ufw_port =~ ^[0-9]+$ && $ufw_iface =~ ^[A-Za-z0-9_.@-]+$ ]] && command -v ufw >/dev/null; then
-    ufw delete allow "$ufw_port/udp" >/dev/null 2>&1 || true
-    ufw route delete allow in on tun0 out on "$ufw_iface" >/dev/null 2>&1 || true
+if command -v ufw >/dev/null; then
+    if [[ $ufw_port =~ ^[0-9]+$ ]]; then ufw delete allow "$ufw_port/udp" >/dev/null 2>&1 || true; fi
+    if [[ $ufw_iface =~ ^[A-Za-z0-9_.@-]+$ ]]; then ufw route delete allow in on tun0 out on "$ufw_iface" >/dev/null 2>&1 || true; fi
 fi
 
-# The certificate for temporary links, if this tool requested one.
-if grep -q '^certbot_cert darban$' "$MARKER" && command -v certbot >/dev/null; then
-    certbot delete --non-interactive --cert-name darban >/dev/null 2>&1 || true
-fi
+# The certificates for temporary links that this tool got, then the certbot it installed, if any.
+for name in "${certificates[@]}"; do
+    for bin in /snap/bin/certbot "${certbot_venv:+$certbot_venv/bin/certbot}" "$(command -v certbot 2>/dev/null || true)"; do
+        if [[ -n $bin && -x $bin ]]; then "$bin" delete --non-interactive --cert-name "$name" >/dev/null 2>&1 || true; break; fi
+    done
+done
+if grep -qx 'snap certbot' "$MARKER" && command -v snap >/dev/null; then try snap remove certbot; fi
+if [[ $certbot_venv == /opt/* ]]; then try rm -rf -- "$certbot_venv"; fi
 
 echo 'Removing packages this setup added...'
 purge_exact "${added_packages[@]}"
@@ -129,14 +145,28 @@ if (( KERNEL )); then
 fi
 
 echo 'Removing the repository, server files and CA...'
-try rm -f -- "$APT_LIST" "$APT_KEY"
+# Files that were here before the setup go back; files it created go away. An older record names neither.
+if (( ${#apt_added[@]} + ${#apt_saved[@]} == 0 )); then apt_added=("$APT_LIST" "$APT_KEY"); fi
+for file in "${apt_added[@]}"; do
+    if [[ $file == "$APT_LIST" || $file == "$APT_KEY" ]]; then try rm -f -- "$file"; fi
+done
+for file in "${apt_saved[@]}"; do
+    if [[ ($file == "$APT_LIST" || $file == "$APT_KEY") && -e $CONFIG_DIR/saved/${file##*/} ]]; then try cp -a -- "$CONFIG_DIR/saved/${file##*/}" "$file"; fi
+done
 # Only what the setup and the tool created: another file there belongs to someone else.
 try rm -f -- "$SERVER_DIR"/server.conf "$SERVER_DIR"/server.conf.darban-*backup.* "$SERVER_DIR"/ca.crt "$SERVER_DIR"/server.crt \
     "$SERVER_DIR"/server.key "$SERVER_DIR"/crl.pem "$SERVER_DIR"/tls-crypt.key "$SERVER_DIR"/.darban-*
 if [[ -d $SERVER_DIR ]] && ! rmdir -- "$SERVER_DIR" 2>/dev/null; then
     KEPT_FILES=$SERVER_DIR
 fi
-try rm -rf -- "$OUT_DIR"
+if (( out_dir_existed )); then
+    # The folder held other files before the setup, so only this tool's profiles leave it.
+    for name in "${client_names[@]}"; do
+        if [[ $name =~ ^[A-Za-z0-9][A-Za-z0-9._@+-]*$ ]]; then try rm -f -- "$OUT_DIR/$name.ovpn"; fi
+    done
+else
+    try rm -rf -- "$OUT_DIR"
+fi
 try rm -rf -- "$PKI"
 
 if (( ${#FAILED[@]} > 0 )); then
@@ -150,7 +180,6 @@ here=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 bash "$here/uninstall.sh" --yes >/dev/null || { echo 'Could not remove the tool itself; run uninstall.sh --yes.' >&2; exit 1; }
 rm -rf -- "$CONFIG_DIR" "$TOOL_BACKUPS"
 rm -f -- "$SETUP_LOG"
-rm -f -- "$LOCK_FILE"
 
 echo
 echo 'OpenVPN, the CA, client profiles, NAT and this tool were removed.'

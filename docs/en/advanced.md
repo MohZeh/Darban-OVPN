@@ -55,6 +55,7 @@ curl -fsSL https://github.com/MohZeh/darban-ovpn/releases/latest/download/get.sh
 - If the running kernel has no `ovpn` module, installs `linux-image-virtual-hwe-24.04` or `linux-image-virtual-hwe-26.04`, matching the system, without recommended packages. If apt plans firmware or graphics packages, the setup stops. A container needs no kernel.
 - Creates a CA in `/root/pki` and a server certificate valid for 10 years.
 - Writes `/etc/openvpn/server/server.conf`, enables IPv4 forwarding, and adds NAT for the VPN only, in its own nftables table.
+- Keeps clients apart: they cannot reach each other, or the cloud provider's metadata service at `169.254.169.254`, through the server. They can still reach other private networks the server reaches.
 - Starts OpenVPN, and writes details to `/var/log/darban-setup.log`.
 
 If a kernel is added, the current one stays as a fallback and nothing reboots automatically. The VPN works at once without [DCO](glossary.md#dco).
@@ -122,7 +123,7 @@ UPDATE_CHECK=no
 |---|---|
 | Your chosen UDP port | VPN clients |
 | 443, 8443 or 9443 TCP | Temporary links; the first free one is kept |
-| 80 TCP, for a moment | Only when requesting a Let's Encrypt certificate |
+| 80 TCP, for a moment | Only when requesting a Let's Encrypt certificate: once for a domain name, and for each new six-day certificate of an IP address |
 
 ## The blocklist (CRL)
 
@@ -169,7 +170,7 @@ Keep an **encrypted** copy of these paths away from the server. They hold the CA
 | Option | Removes | Keeps |
 |---|---|---|
 | **Setup › Uninstall this tool only** | The tool, its timer and open links | OpenVPN, PKI, CRL, `server.conf`, profiles, settings |
-| **Setup › Remove everything** | The tool, OpenVPN, CA, profiles, NAT, the repository and the packages the setup added | The Virtual HWE kernel unless you choose otherwise, the optional backup, and files the setup did not create |
+| **Setup › Remove everything** | The tool, OpenVPN, CA, profiles, NAT, the repository, the packages and the certbot the setup added, and the certificate it got | The Virtual HWE kernel unless you choose otherwise, the optional backup, and what was there before: other files in the profile folder, `ufw` rules, and repository files, which are put back |
 
 **After Uninstall, nothing renews the CRL.** Renew it yourself before it expires, or OpenVPN may refuse clients.
 

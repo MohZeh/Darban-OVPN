@@ -88,11 +88,12 @@ jobs:
           earlier=$(gh release list --repo "$GITHUB_REPOSITORY" --limit 20 --json tagName --jq '.[].tagName' | grep -vxF "$GITHUB_REF_NAME" | sort -V | tail -n 1 || true)
           bash tests/release-smoke.sh --i-know "$GITHUB_REF_NAME" $earlier
 
-  # A tag with a suffix, such as -rc.1, stays a pre-release and is never offered as an update.
+  # A tag with a suffix, such as -rc.1, stays a pre-release and is never offered as an update. A stable one
+  # becomes latest only after the one-line command installed it, so a private repository never promotes.
   promote:
     name: Mark as the latest release
     needs: [verify, smoke]
-    if: ${{ !cancelled() && needs.verify.result == 'success' && (needs.smoke.result == 'success' || needs.smoke.result == 'skipped') && !contains(github.ref_name, '-') }}
+    if: ${{ !cancelled() && needs.verify.result == 'success' && needs.smoke.result == 'success' && !contains(github.ref_name, '-') }}
     runs-on: ubuntu-24.04
     timeout-minutes: 3
     permissions:

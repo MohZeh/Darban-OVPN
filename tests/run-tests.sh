@@ -483,7 +483,8 @@ STUB
     chmod +x "$E/bin/curl"
     # The test user is not root; everything else in get.sh runs unchanged.
     sed -e 's/^\( *\)\[\[ \$EUID == 0 \]\] .*/\1:/' -e "s#^SERVER_CONF=.*#SERVER_CONF=$SERVER_CONF#" \
-        -e "s#^TOOL=.*#TOOL=$E/fake-tool#" -e "s#^SETUP_RECORD=.*#SETUP_RECORD=$E/cfg/.server-setup-started#" "$REPO/setup/get.sh" > "$E/get.sh"
+        -e "s#^TOOL=.*#TOOL=$E/fake-tool#" -e "s#^SETUP_RECORD=.*#SETUP_RECORD=$E/cfg/.server-setup-started#" \
+        -e "s#^INSTALL_RECORD=.*#INSTALL_RECORD=$E/install-record#" "$REPO/setup/get.sh" > "$E/get.sh"
     export RELEASE MARKER
 }
 
@@ -1294,7 +1295,7 @@ test_share_password() {
     out=$(menu '4\nalice\n3\n2\n1\n0\n')
     has 'the password is shown once' 'shown only now' "$out"
     password=$(grep -A1 'shown only now' <<<"$out" | tail -n 1)
-    [[ $password =~ ^[A-Za-z0-9]{16,}$ ]]; rc_is 'the password is long and random' 0 "$?"
+    [[ $password =~ ^[a-km-np-z2-9]{3}-[a-km-np-z2-9]{3}-[a-km-np-z2-9]{3}$ ]]; rc_is 'the password is three short groups without look-alike characters' 0 "$?"
     grep -q 'ENCRYPTED PRIVATE KEY' "$E/clients/alice.ovpn"; rc_is 'the key in the profile is locked' 0 "$?"
     if grep -q 'BEGIN PRIVATE KEY' "$E/clients/alice.ovpn"; then result 0 'no open key in the profile'; else result 1 'no open key in the profile'; fi
     sed -n '/<key>/,/<\/key>/p' "$E/clients/alice.ovpn" | sed '1d;$d' > "$E/locked.key"
@@ -1336,9 +1337,9 @@ test_link_certificate_for_a_hostname() {
     menu '5\n1\n0\n' >/dev/null
 
     rm -f "$E/cfg/link-cert.pem" "$E/cfg/link-key.pem"
-    printf '#!/usr/bin/env bash\necho "certbot $*" >> "$STUB_LOG"; exit 1\n' > "$E/bin/certbot"
+    printf '#!/usr/bin/env bash\nif [[ $1 == --version ]]; then echo "certbot 2.9.0"; exit 0; fi\necho "certbot $*" >> "$STUB_LOG"; exit 1\n' > "$E/bin/certbot"
     chmod +x "$E/bin/certbot"
-    out=$(menu '4\nalice\n1\n1\n1\n2\n0\n')
+    out=$(menu '4\nalice\n1\n2\n1\n1\n0\n')
     has 'a failed request explains itself' 'certbot could not get a certificate' "$out"
     has 'and still gives a working link' "https://vpn.example.com:$LINK_TEST_PORT/l/" "$out"
     grep -q 'certbot certonly --standalone' "$STUB_LOG"; rc_is 'certbot was asked' 0 "$?"
@@ -1460,6 +1461,10 @@ test_get_sh_knows_install_from_update() {
     has 'a pre-release of it: it updates' 'from v9.9.9-rc.1 to v9.9.9' "$out"
 
     tool_version 9.9.9; rm -f "$MARKER"
+    out=$(bash "$E/get.sh" 2>&1 </dev/null); rc=$?
+    has 'an install that never finished is repaired' 'Repairing the installation of Darban OVPN v9.9.9' "$out"
+    ok_if 'the repair ran the installer' test -s "$MARKER"
+    rm -f "$MARKER"; echo 9.9.9 > "$E/install-record"
     out=$(bash "$E/get.sh" 2>&1 </dev/null); rc=$?
     rc_is 'the same version is not an error' 0 "$rc"
     has 'the same version: nothing to do' 'already up to date' "$out"
@@ -1887,7 +1892,8 @@ test_first_client_in_a_real_terminal() {
 Enter: Create a client => \r
 Client name [client1] => \r
 Enter: Temporary link => \r
-Enter: No password => \r
+Enter: Yes, make a password => \r
+Password [ => \r
 Enter: 1 hour => \r
 client1 is connected from 198.51.100.7 => \r
 Choose [0-9] => 0\r
@@ -1896,6 +1902,8 @@ EOF
     rc_is 'the whole path takes only Enter' 0 "$rc"
     has 'it ends with a link' "/l/" "$out"
     has 'and a note for the person receiving it' 'Send this note with the link' "$out"
+    has 'which says the file is locked' 'The file is locked' "$out"
+    has 'and the short password is shown' 'shown only now' "$out"
     if (( rc != 0 )); then printf '%s\n' "$out" | tail -n 25 | cut -c1-150 | sed 's/^/    | /'; fi
     ok_if 'the client exists' test -s "$PKI/issued/client1.crt"
 }
@@ -1948,6 +1956,129 @@ test_first_client_suggests_a_name() {
     out=$(printf 'bad name!\n\n' | bash "$E/manager.sh" welcome 2>&1)
     has 'without a terminal it only shows the next steps' 'sudo darban' "$out"
     ok_if 'and creates nothing' test ! -e "$PKI/issued/client1.crt"
+}
+
+test_link_certificate_for_a_public_ip() {
+    local out
+    start_links_stub
+    echo 203.0.113.9 > "$E/cfg/domain"
+    : > "$E/cfg/.server-setup-started"
+    printf '#!/usr/bin/env bash\nif [[ $1 == --version ]]; then echo "certbot 5.9.0"; exit 0; fi\necho "certbot $*" >> "$STUB_LOG"; exit 1\n' > "$E/bin/certbot"
+    chmod +x "$E/bin/certbot"
+    out=$(menu '4\nalice\n1\n2\n1\n1\n0\n')
+    has 'a public IP is offered a trusted certificate' 'For an IP address it lasts six days' "$out"
+    grep -q -- '--preferred-profile shortlived --ip-address 203.0.113.9' "$STUB_LOG"; rc_is 'certbot asks for a six-day IP certificate' 0 "$?"
+    grep -q -- '--cert-name darban-ovpn-links' "$STUB_LOG"; rc_is 'under a name of its own' 0 "$?"
+    if grep -q '^certbot_cert' "$E/cfg/.server-setup-started"; then result 0 'a failed request is not recorded'; else result 1 'a failed request is not recorded'; fi
+    has 'it still gives a working link' "https://203.0.113.9:$LINK_TEST_PORT/l/" "$out"
+    has 'and suggests a password for it' 'locking the key is suggested' "$out"
+    menu '5\n1\n0\n' >/dev/null
+    rm -f "$E/cfg/link-cert.pem" "$E/cfg/link-key.pem"
+    printf '#!/usr/bin/env bash\nif [[ $1 == --version ]]; then echo "certbot 5.9.0"; exit 0; fi\necho "certbot $*" >> "$STUB_LOG"; exit 0\n' > "$E/bin/certbot"
+    menu '4\nalice\n1\n2\n1\n1\n0\n' >/dev/null
+    grep -qx 'certbot_cert darban-ovpn-links' "$E/cfg/.server-setup-started"; rc_is 'a certificate it got is recorded' 0 "$?"
+    echo 10.0.0.9 > "$E/cfg/domain"
+    rm -f "$E/cfg/link-cert.pem" "$E/cfg/link-key.pem"
+    lacks 'a private IP is not offered one' "Let's Encrypt" "$(menu '4\nalice\n1\n1\n1\n0\n')"
+    stop_links_stub
+}
+
+test_old_certbot_is_not_used_for_an_ip() {
+    local out
+    start_links_stub
+    echo 203.0.113.9 > "$E/cfg/domain"
+    printf '#!/usr/bin/env bash\nif [[ $1 == --version ]]; then echo "certbot 4.0.0"; exit 0; fi\necho "certbot $*" >> "$STUB_LOG"; exit 0\n' > "$E/bin/certbot"
+    printf '#!/usr/bin/env bash\necho "snap $*" >> "$STUB_LOG"; exit 1\n' > "$E/bin/snap"
+    chmod +x "$E/bin/certbot" "$E/bin/snap"
+    out=$(menu '4\nalice\n1\n2\n1\n1\n0\n')
+    if grep -q '^certbot certonly' "$STUB_LOG"; then result 0 'certbot 4.0 is never asked for an IP'; else result 1 'certbot 4.0 is never asked for an IP'; fi
+    grep -q 'snap install --classic certbot' "$STUB_LOG"; rc_is 'the Certbot snap is tried instead' 0 "$?"
+    has 'a failed install falls back to a working link' "https://203.0.113.9:$LINK_TEST_PORT/l/" "$out"
+    stop_links_stub
+}
+
+test_vpn_network_change_is_all_or_nothing() {
+    local out before
+    echo 'server 10.8.0.0 255.255.255.0' >> "$SERVER_CONF"
+    printf 'table ip darban {\n    chain postrouting {\n        ip saddr 10.8.0.0/24 oifname "eth0" masquerade\n    }\n    chain forward {\n        ip saddr 10.8.0.0/24 ip daddr 10.8.0.0/24 drop\n    }\n}\n' > "$E/cfg/nat.nft"
+    printf '#!/usr/bin/env bash\necho "nft $*" >> "$STUB_LOG"\nif [[ -n ${FAIL_NFT:-} ]]; then exit 1; fi\n' > "$E/bin/nft"; chmod +x "$E/bin/nft"
+    before=$(cat "$E/cfg/nat.nft" "$SERVER_CONF" | sha256sum)
+
+    : > "$STUB_LOG"
+    chmod 555 "$E/server"
+    out=$(menu '7\n3\n3\n10.77.0.0\n2\n0\n0\n0\n')
+    chmod 755 "$E/server"
+    if grep -q '^nft -f' "$STUB_LOG"; then result 0 'a server.conf that cannot be prepared leaves NAT alone'; else result 1 'a server.conf that cannot be prepared leaves NAT alone'; fi
+    [[ $before == "$(cat "$E/cfg/nat.nft" "$SERVER_CONF" | sha256sum)" ]]; rc_is 'and both files unchanged' 0 "$?"
+
+    out=$(FAIL_NFT=1 menu '7\n3\n3\n10.77.0.0\n2\n0\n0\n0\n')
+    has 'a refused NAT rule changes nothing' 'Nothing was changed' "$out"
+    [[ $before == "$(cat "$E/cfg/nat.nft" "$SERVER_CONF" | sha256sum)" ]]; rc_is 'both files unchanged after a refused rule' 0 "$?"
+
+    out=$(FAIL_RESTART=1 menu '7\n3\n3\n10.77.0.0\n2\n0\n0\n0\n')
+    grep -q '10.8.0.0/24' "$E/cfg/nat.nft"; rc_is 'a failed restart puts NAT back' 0 "$?"
+
+    out=$(menu '7\n3\n3\n10.77.0.0\n2\n0\n0\n0\n')
+    grep -q '^server 10.77.0.0 255.255.255.0' "$SERVER_CONF"; rc_is 'a good change is applied' 0 "$?"
+    [[ $(grep -o '10.77.0.0/24' "$E/cfg/nat.nft" | wc -l) == 3 ]]; rc_is 'every rule follows the new network' 0 "$?"
+}
+
+test_setup_keeps_clients_apart() {
+    prepare_blank_server
+    setup_run --port 21194 --yes >/dev/null
+    grep -q 'ip saddr 10.8.0.0/24 ip daddr 10.8.0.0/24 drop' "$E/cfg/nat.nft"; rc_is 'clients cannot reach each other' 0 "$?"
+    grep -q 'ip saddr 10.8.0.0/24 ip daddr 169.254.0.0/16 drop' "$E/cfg/nat.nft"; rc_is 'or the cloud metadata service' 0 "$?"
+}
+
+test_setup_removal_leaves_what_was_there() {
+    local out rc
+    prepare_blank_server
+    mkdir -p "$E/clients"; echo mine > "$E/clients/notes.txt"
+    echo 'deb http://example.invalid/old stable main' > "$SETUP_ROOT/sources/openvpn.list"
+    cat > "$E/bin/ufw" <<'STUB'
+#!/usr/bin/env bash
+echo "ufw $*" >> "$STUB_LOG"
+if [[ ${1:-} == status ]]; then echo 'Status: active'; echo '21194/udp                  ALLOW       Anywhere'; fi
+STUB
+    chmod +x "$E/bin/ufw"
+    sed -i "s#^OUT_DIR=.*#OUT_DIR=$E/clients#" "$E/setup/server-setup.sh"
+    : > "$STUB_LOG"
+    setup_run --port 21194 --open-ufw --yes >/dev/null
+    if grep -q 'ufw allow 21194/udp' "$STUB_LOG"; then result 0 'an existing ufw rule is not added again'; else result 1 'an existing ufw rule is not added again'; fi
+    grep -q 'ufw route allow in on tun0' "$STUB_LOG"; rc_is 'the missing rule is added' 0 "$?"
+    grep -qx out_dir_existed "$E/cfg/.server-setup-started"; rc_is 'a folder that held files is recorded' 0 "$?"
+    install_removal_scripts
+    menu '2\nfirst\n0\n' >/dev/null
+    : > "$STUB_LOG"
+    out=$(bash "$E/lib/remove-server.sh" --yes 2>&1 </dev/null); rc=$?
+    rc_is 'the removal finishes' 0 "$rc"
+    if grep -q 'ufw delete allow 21194/udp' "$STUB_LOG"; then result 0 'the ufw rule that was there stays'; else result 1 'the ufw rule that was there stays'; fi
+    grep -q 'ufw route delete allow in on tun0' "$STUB_LOG"; rc_is 'the rule it added goes' 0 "$?"
+    ok_if 'other files in the profile folder stay' test -s "$E/clients/notes.txt"
+    ok_if 'its own profiles go' test ! -e "$E/clients/first.ovpn"
+    grep -q 'example.invalid/old' "$SETUP_ROOT/sources/openvpn.list"; rc_is 'the repository file that was there comes back' 0 "$?"
+    grep -q '^flock -w 60 9' "$STUB_LOG"; rc_is 'the removal takes the CA lock' 0 "$?"
+}
+
+test_link_store_removes_files_left_by_a_crash() {
+    local dir=$WORK/linkstore
+    mkdir -p "$dir"
+    echo key > "$dir/aaaa.ovpn"; touch -d '2 minutes ago' "$dir/aaaa.ovpn"
+    echo key > "$dir/bbbb.ovpn"
+    python3 -c 'import sys; sys.path.insert(0, sys.argv[1]); import linkd; linkd.Store(sys.argv[2]).purge()' "$REPO/lib" "$dir"
+    ok_if 'an old profile with no record is removed' test ! -e "$dir/aaaa.ovpn"
+    ok_if 'one being written right now stays' test -e "$dir/bbbb.ovpn"
+}
+
+test_version_order_is_the_same_everywhere() {
+    local pair a b x y
+    eval "$(sed -n '/^version_is_newer() {/,/^}/p' "$REPO/setup/get.sh" | sed 's/^version_is_newer()/newer_get()/')"
+    eval "$(sed -n '/^version_is_newer() {/,/^}/p' "$REPO/bin/darban" | sed 's/^version_is_newer()/newer_tool()/')"
+    for pair in '1.0.0 0.9.9' '1.0.0 1.0.0-rc.1' '1.0.0-rc.2 1.0.0-rc.1' '1.0.0-rc.1 1.0.0-beta.9' '1.0.10 1.0.9' '2.0.0 10.0.0' '1.0.0 1.0.0'; do
+        read -r a b <<<"$pair"
+        newer_get "$a" "$b"; x=$?; newer_tool "$a" "$b"; y=$?
+        rc_is "get.sh and darban agree on $a > $b" "$x" "$y"
+    done
 }
 
 test_ci_scope_skips_only_documentation() {

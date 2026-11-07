@@ -9,6 +9,8 @@ First pre-release, for testing only.
 ### Server
 - Set up a new Ubuntu 24.04 or 26.04 server with OpenVPN from the stable project channel, and the Virtual HWE kernel only if the running kernel needs it.
 - Continue a setup that stopped half way, or undo it.
+- Keep clients apart from each other and from the cloud metadata service.
+- Remove only what the setup added: files, `ufw` rules, repository files and certificates that were there before stay.
 - Remove everything the setup added, or only the tool.
 
 ### Clients

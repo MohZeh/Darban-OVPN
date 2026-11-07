@@ -14,6 +14,7 @@ ARCHIVE=darban-ovpn.tar.gz
 SERVER_CONF=/etc/openvpn/server/server.conf
 TOOL=/usr/local/sbin/darban
 SETUP_RECORD=/etc/darban/.server-setup-started
+INSTALL_RECORD=/usr/local/lib/darban/.installed
 # The release this copy belongs to. scripts/build-release.sh fills it in; empty means the latest release.
 RELEASE_TAG=''
 USAGE='Usage: get.sh [--version vX.Y.Z] [--host NAME|IP] [--port N] [--subnet A.B.C.0] [--dns "IP [IP]"] [--split-tunnel] [--open-ufw] [--install-kernel] [--yes]'
@@ -124,8 +125,15 @@ main() {
     if ! valid_version "$installed"; then
         if [[ -e $TOOL ]]; then printf 'Updating Darban OVPN to v%s\n' "$version"; else printf 'Installing Darban OVPN v%s\n' "$version"; fi
     elif [[ $installed == "$version" ]]; then
-        if [[ -z $requested ]]; then printf 'Darban OVPN v%s is already up to date. Nothing was changed.\n' "$installed"; return 0; fi
-        printf 'Installing Darban OVPN v%s again\n' "$version"
+        if [[ -n $requested ]]; then
+            printf 'Installing Darban OVPN v%s again\n' "$version"
+        elif [[ $(cat "$INSTALL_RECORD" 2>/dev/null) == "$version" ]]; then
+            printf 'Darban OVPN v%s is already up to date. Nothing was changed.\n' "$installed"
+            return 0
+        else
+            # The last install stopped before its end, so it is done again.
+            printf 'Repairing the installation of Darban OVPN v%s\n' "$version"
+        fi
     elif version_is_newer "$version" "$installed"; then
         printf 'Updating Darban OVPN from v%s to v%s\n' "$installed" "$version"
     else

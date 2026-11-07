@@ -57,6 +57,8 @@ fi
 # Each update keeps the version it replaces, for Setup > Restore previous version.
 LIB=$DARBAN_LIB
 install -d -o root -g root -m 700 "$LIB"
+# Written last, so a run that stops half way is repaired by the next one, even with the same version.
+rm -f -- "$LIB/.installed"
 if [[ -e /usr/local/sbin/darban && -e $LIB/common.sh ]]; then
     backup_dir="/var/backups/darban/$(date -u +%Y%m%dT%H%M%S)"
     install -d -o root -g root -m 700 /var/backups/darban "$backup_dir" "$backup_dir/sbin" "$backup_dir/lib" "$backup_dir/units"
@@ -107,4 +109,21 @@ if ! /usr/local/sbin/darban-crl-maintain --check >/dev/null || ! systemctl start
     fi
     echo 'WARNING: the CRL check did not pass; see: sudo darban status.' >&2
 fi
+# Installs made before clients were kept apart get that rule now.
+NAT_FILE=/etc/darban/nat.nft
+if [[ -f $NAT_FILE ]] && ! grep -q 'chain forward' "$NAT_FILE"; then
+    vpn_net=$(awk '{for (i=1; i<NF; i++) if ($i=="saddr") {print $(i+1); exit}}' "$NAT_FILE")
+    if [[ $vpn_net =~ ^[0-9.]+/24$ ]]; then
+        cp -a -- "$NAT_FILE" "$NAT_FILE.before-isolation"
+        { head -n -1 "$NAT_FILE"; printf '    # Clients cannot reach each other, or the cloud provider'"'"'s metadata service, through this server.\n    chain forward {\n        type filter hook forward priority filter; policy accept;\n        ip saddr %s ip daddr %s drop\n        ip saddr %s ip daddr 169.254.0.0/16 drop\n    }\n}\n' "$vpn_net" "$vpn_net" "$vpn_net"; } > "$NAT_FILE.new"
+        if nft -c -f "$NAT_FILE.new" && mv -f -- "$NAT_FILE.new" "$NAT_FILE" && nft -f "$NAT_FILE"; then
+            rm -f -- "$NAT_FILE.before-isolation"
+            echo 'VPN clients are now kept apart from each other.'
+        else
+            mv -f -- "$NAT_FILE.before-isolation" "$NAT_FILE"; rm -f -- "$NAT_FILE.new"
+            echo 'WARNING: could not add the rule that keeps VPN clients apart; see: sudo darban status.' >&2
+        fi
+    fi
+fi
+printf '%s\n' "$VERSION" > "$LIB/.installed"
 printf 'Darban OVPN v%s is installed. To open it: sudo darban\n' "$VERSION"

@@ -108,7 +108,18 @@ class Store:
         """Removes what has expired and returns how many links remain."""
         with self.lock:
             remaining = 0
+            now = time.time()
             for entry in os.listdir(self.directory):
+                if entry.endswith(('.ovpn', '.tmp')):
+                    # A crash between the two steps of a claim leaves a profile with no record. A new link is
+                    # written in the same order, so only an old one is removed.
+                    path = os.path.join(self.directory, entry)
+                    try:
+                        if not os.path.exists(self._path(entry.rsplit('.', 1)[0], '.meta')) and now - os.path.getmtime(path) > 60:
+                            os.unlink(path)
+                    except FileNotFoundError:
+                        pass
+                    continue
                 if not entry.endswith('.meta'):
                     continue
                 key = entry[:-len('.meta')]

@@ -72,8 +72,13 @@ valid_existing_name() { [[ $1 =~ ^[A-Za-z0-9][A-Za-z0-9._@+-]{0,127}$ && $1 != s
 
 # ---------- action runner ----------
 # Interrupts are ignored while CA/CRL or server.conf changes are half-applied; children inherit this.
-critical_begin() { trap '' INT TERM HUP; }
-critical_end() { trap 'exit 130' INT TERM HUP; }
+# Nested sections are counted, so an inner one cannot let Ctrl+C in before the outer one is done.
+CRITICAL_DEPTH=0
+critical_begin() { CRITICAL_DEPTH=$((CRITICAL_DEPTH + 1)); trap '' INT TERM HUP; }
+critical_end() {
+    if (( CRITICAL_DEPTH > 0 )); then CRITICAL_DEPTH=$((CRITICAL_DEPTH - 1)); fi
+    if (( CRITICAL_DEPTH == 0 )); then trap 'exit 130' INT TERM HUP; fi
+}
 ca_lock() {
     # Held only while something changes, never while waiting for an answer, so a person thinking does not
     # hold up the daily CRL renewal. Whatever was checked before asking must be checked again after this.
@@ -796,7 +801,13 @@ share_client() {
     fi
     SHARED=1
     say
-    choose_profile_password
+    # The link's certificate is settled first, because it decides which password answer is suggested.
+    if (( method == 1 || method == 2 )); then
+        prepare_link || return 1
+        if link_cert_is_trusted; then choose_profile_password 1; else choose_profile_password 2; fi
+    else
+        choose_profile_password 1
+    fi
     if [[ -n $PROFILE_PASSWORD ]]; then
         ca_lock || return 1
         write_profile "$name" yes || return 1
@@ -810,16 +821,37 @@ share_client() {
     esac
     if [[ -n $PROFILE_PASSWORD ]]; then
         say
-        printf '%sProfile password, shown only now. Send it another way than the file or link:%s\n' "$C_BOLD" "$C_RESET" || true
+        printf '%sProfile password, shown only now. Send it another way than the link, for example by SMS or a call:%s\n' "$C_BOLD" "$C_RESET" || true
         printf '%s\n' "$PROFILE_PASSWORD" || true
     fi
 }
+make_password() {
+    # Three groups of three: easy to type on a phone, and no characters that look alike.
+    local alphabet=abcdefghjkmnpqrstuvwxyz23456789 raw out='' i
+    raw=$(openssl rand -hex 9) || return 1
+    for (( i = 0; i < 9; i++ )); do
+        out+=${alphabet:$(( 16#${raw:i*2:2} % ${#alphabet} )):1}
+        if (( i == 2 || i == 5 )); then out+=-; fi
+    done
+    printf '%s\n' "$out"
+}
 choose_profile_password() {
+    # choose_profile_password [1|2]: the answer Enter gives. A link without a trusted certificate starts on Yes.
+    local default=${1:-1} suggested
     PROFILE_PASSWORD=''
-    if confirm_choice 'Lock the private key with a password?' 'No password' 'Yes, make a password' normal; then
-        PROFILE_PASSWORD=$(openssl rand -base64 48 | tr -dc 'A-Za-z0-9' | cut -c1-20)
-        (( ${#PROFILE_PASSWORD} >= 16 )) || { fail 'Could not create a password.'; return 1; }
-    fi
+    if (( default == 2 )); then info 'This link has no trusted certificate, so locking the key is suggested.'; fi
+    confirm_choice 'Lock the private key with a password?' 'No password' 'Yes, make a password' normal '' "$default" || return 0
+    suggested=$(make_password) || { fail 'Could not create a password.'; return 1; }
+    PROFILE_PASSWORD=$suggested
+    (( UI_TTY )) || return 0
+    say
+    info "Press Enter to use $suggested, or type your own (at least 9 characters) and press Enter."
+    while :; do
+        ask "Password [$suggested]: " || { PROFILE_PASSWORD=$suggested; return 0; }
+        PROFILE_PASSWORD=${REPLY:-$suggested}
+        if (( ${#PROFILE_PASSWORD} >= 9 )); then return 0; fi
+        warn 'Use at least 9 characters.'
+    done
 }
 prepare_download_copy() {
     # Profiles live under /root, which only root can read. Another SSH user gets a private copy in their home.
@@ -863,39 +895,95 @@ choose_link_port() {
 }
 host_is_ip() { [[ $1 =~ ^[0-9.]+$ ]]; }
 link_cert_usable() {
-    # Valid for at least another day, and for the address clients will open.
+    # Valid longer than the longest link (24 hours), and for the address clients will open.
     local host=$1 check
     [[ -s $LINK_CERT && -s $LINK_KEY ]] || return 1
-    openssl x509 -in "$LINK_CERT" -noout -checkend 86400 >/dev/null 2>&1 || return 1
+    openssl x509 -in "$LINK_CERT" -noout -checkend 90000 >/dev/null 2>&1 || return 1
     if host_is_ip "$host"; then check=-checkip; else check=-checkhost; fi
     openssl x509 -in "$LINK_CERT" -noout "$check" "$host" 2>/dev/null | grep -q 'does match'
 }
 link_cert_is_trusted() { [[ -L $LINK_CERT ]]; }
+CERT_NAME=darban-ovpn-links
+CERTBOT_VENV=/opt/darban-certbot
+CERTBOT_PIP_VERSION=5.9.0
+# Let's Encrypt issues IP address certificates from Certbot 5.3 on; a hostname works with any version.
+CERTBOT_IP_MIN=5.3
+version_at_least() { [[ $(printf '%s\n%s\n' "$2" "$1" | sort -V | head -n 1) == "$2" ]]; }
+find_certbot() {
+    # find_certbot <minimum version>: prints a certbot that is new enough, if there is one.
+    local candidate version
+    for candidate in /snap/bin/certbot "$CERTBOT_VENV/bin/certbot" "$(command -v certbot 2>/dev/null || true)"; do
+        [[ -n $candidate && -x $candidate ]] || continue
+        version=$("$candidate" --version 2>/dev/null | awk '{print $2; exit}') || continue
+        if [[ $version =~ ^[0-9]+(\.[0-9]+)*$ ]] && version_at_least "$version" "$1"; then printf '%s\n' "$candidate"; return 0; fi
+    done
+    return 1
+}
+record_added() {
+    # What the server setup's record lists is what Remove everything takes away again.
+    local marker=$CONFIG_DIR/.server-setup-started
+    if [[ -e $marker ]]; then printf '%s\n' "$1" >>"$marker" || true; fi
+}
+install_certbot() {
+    # install_certbot <minimum version>: Ubuntu's own package when it is new enough; otherwise the Certbot
+    # project's snap, or, without snapd, a pinned copy from the Python Package Index.
+    local need=$1
+    apt-get -o DPkg::Lock::Timeout=120 -qq update >/dev/null || true
+    if [[ $need == 0 ]]; then
+        info "Installing certbot from Ubuntu${S_ELL}"
+        apt-get -o DPkg::Lock::Timeout=120 -y -q --no-install-recommends install certbot >/dev/null || return 1
+        record_added 'package certbot'
+    elif command -v snap >/dev/null; then
+        info "Installing certbot from the Certbot project (snap)${S_ELL}"
+        snap install --classic certbot >/dev/null || return 1
+        record_added 'snap certbot'
+    else
+        info "Installing certbot $CERTBOT_PIP_VERSION from the Python Package Index into $CERTBOT_VENV${S_ELL}"
+        if ! dpkg-query -W -f='${Status}' python3-venv 2>/dev/null | grep -q 'install ok installed'; then
+            apt-get -o DPkg::Lock::Timeout=120 -y -q --no-install-recommends install python3-venv >/dev/null || return 1
+            record_added 'package python3-venv'
+        fi
+        record_added "certbot_venv $CERTBOT_VENV"
+        if ! python3 -m venv "$CERTBOT_VENV" || ! "$CERTBOT_VENV/bin/pip" install -q "certbot==$CERTBOT_PIP_VERSION" >/dev/null; then
+            rm -rf -- "$CERTBOT_VENV"
+            return 1
+        fi
+    fi
+}
 get_trusted_cert() {
-    # Let's Encrypt, for a hostname only. It needs TCP 80 from the internet for a moment.
-    local host=$1 marker=$CONFIG_DIR/.server-setup-started
+    # Let's Encrypt for a hostname or a public IP address. It needs TCP 80 from the internet for a moment.
+    local host=$1 need=0 certbot
+    local -a target
+    if host_is_ip "$host"; then
+        is_private_ip "$host" && return 1
+        need=$CERTBOT_IP_MIN
+        target=(--preferred-profile shortlived --ip-address "$host")
+    else
+        target=(-d "$host")
+    fi
     say
     info "A trusted certificate for $host avoids a browser warning, and is needed for the app to import from the link."
-    info 'It uses certbot from Ubuntu and needs TCP port 80 open and free for a moment. Choosing yes accepts the Let'"'"'s Encrypt subscriber agreement.'
+    if [[ $need != 0 ]]; then
+        info "For an IP address it lasts six days, and a new one is requested when a link needs it. It needs certbot $CERTBOT_IP_MIN or newer, from the Certbot project."
+    fi
+    info 'It needs TCP port 80 open in your provider firewall and free on this server for a moment. Choosing yes accepts the Let'"'"'s Encrypt subscriber agreement.'
     confirm_choice 'Get a free Let'"'"'s Encrypt certificate?' 'No, use a self-signed certificate' 'Yes, get a certificate' normal || return 1
     if tcp_port_open 80; then warn 'TCP port 80 is in use, so certbot cannot answer on it.'; return 1; fi
-    if ! command -v certbot >/dev/null; then
-        info "Installing certbot${S_ELL}"
-        apt-get -o DPkg::Lock::Timeout=120 -qq update >/dev/null || true
-        apt-get -o DPkg::Lock::Timeout=120 -y -q --no-install-recommends install certbot >/dev/null || { warn 'Could not install certbot.'; return 1; }
-        if [[ -e $marker ]]; then printf 'package certbot\n' >>"$marker" || true; fi
+    if ! certbot=$(find_certbot "$need"); then
+        install_certbot "$need" || { warn 'Could not install certbot.'; return 1; }
+        certbot=$(find_certbot "$need") || { warn "No certbot $need or newer is available."; return 1; }
     fi
-    # Recorded even if certbot was already here, because this certificate is ours either way.
-    if [[ -e $marker ]]; then printf 'certbot_cert darban\n' >>"$marker" || true; fi
     info "Requesting a certificate for $host${S_ELL}"
-    certbot certonly --standalone --non-interactive --agree-tos --register-unsafely-without-email --cert-name darban -d "$host" \
-        --deploy-hook 'systemctl try-restart darban-links.service' >/dev/null 2>&1 || {
-        warn 'certbot could not get a certificate. Check that the DNS record points here and TCP 80 is open in the provider firewall.'
+    "$certbot" certonly --standalone --non-interactive --agree-tos --register-unsafely-without-email --cert-name "$CERT_NAME" \
+        "${target[@]}" --deploy-hook 'systemctl try-restart darban-links.service' >/dev/null 2>&1 || {
+        warn 'certbot could not get a certificate. Check that the address points here and TCP 80 is open in the provider firewall.'
         return 1
     }
+    # Recorded only once it exists, so a removal never deletes a certificate this tool did not get.
+    record_added "certbot_cert $CERT_NAME"
     rm -f -- "$LINK_CERT" "$LINK_KEY"
-    ln -s /etc/letsencrypt/live/darban/fullchain.pem "$LINK_CERT"
-    ln -s /etc/letsencrypt/live/darban/privkey.pem "$LINK_KEY"
+    ln -s "/etc/letsencrypt/live/$CERT_NAME/fullchain.pem" "$LINK_CERT"
+    ln -s "/etc/letsencrypt/live/$CERT_NAME/privkey.pem" "$LINK_KEY"
     ok 'Trusted certificate installed.'
 }
 make_self_signed_cert() {
@@ -909,7 +997,7 @@ make_self_signed_cert() {
 ensure_link_cert() {
     local host=$1
     if link_cert_usable "$host"; then return 0; fi
-    if ! host_is_ip "$host" && get_trusted_cert "$host"; then return 0; fi
+    if get_trusted_cert "$host"; then return 0; fi
     make_self_signed_cert "$host"
 }
 start_link_service() {
@@ -932,19 +1020,24 @@ remove_links_for() {
         if grep -qx "name=$1" "$meta"; then rm -f -- "$meta" "${meta%.meta}.ovpn"; fi
     done
 }
-share_by_link() {
-    local name=$1 want_qr=$2 host minutes label token key now expires url temp
+prepare_link() {
+    # Everything a link needs before the questions about it: python, the address, a port and a certificate.
+    local host
     command -v python3 >/dev/null || { fail 'python3 is needed for temporary links. Install it: apt install python3'; return 1; }
     host=$(domain)
     [[ -n $host ]] && valid_endpoint "$host" || { warn "Set the server address first: Settings $S_CRUMB 1."; return 1; }
+    choose_link_port || return 1
+    ensure_link_cert "$host"
+}
+share_by_link() {
+    local name=$1 want_qr=$2 host minutes label token key now expires url temp
+    host=$(domain)
     choose_one 'How long should the link work?' '1 hour' '15 minutes' '24 hours' || CHOSEN=1
     case $CHOSEN in
         2) minutes=15 label='15 minutes' ;;
         3) minutes=1440 label='24 hours' ;;
         *) minutes=60 label='1 hour' ;;
     esac
-    choose_link_port || return 1
-    ensure_link_cert "$host" || return 1
     ca_lock || return 1
     # The answers above took time: this client may have been revoked since.
     client_valid "$name" || { warn "\"$name\" no longer has a valid certificate, so no link was made."; return 1; }
@@ -986,6 +1079,10 @@ share_by_link() {
         say 'Send this note with the link:'
         say 'Your browser may warn that this connection is not private. That is expected for this link. Choose Advanced, then Continue.'
         say 'ممکن است مرورگر هشدار بدهد که این اتصال خصوصی نیست. برای این لینک طبیعی است. Advanced و بعد Continue را بزن.'
+        if [[ -n $PROFILE_PASSWORD ]]; then
+            say 'The file is locked. Its password comes to you separately.'
+            say 'فایل قفل است و رمز آن جداگانه به دستت می‌رسد.'
+        fi
         say
     fi
     info 'Anyone with this link can get this profile. If the user finds it already used, revoke the client and issue a new one.'
@@ -1538,23 +1635,29 @@ set_vpn_network() {
     say
     confirm_choice "Move the VPN to $candidate/24?" 'No, keep the current network' 'Apply and restart OpenVPN' caution "$candidate" || { cancelled; return 0; }
     ca_lock || return 1
+    # Everything is prepared before anything changes. Then NAT and server.conf change together, or not at all,
+    # and Ctrl+C cannot stop it in between.
+    new_conf_file || return 1
+    conf_set_directive server "$candidate 255.255.255.0" "$CONF_TEMP" || { fail 'Could not prepare server.conf. Nothing was changed.'; return 1; }
     nat_saved=$(mktemp) || return 1
     darban_tmp_register "$nat_saved"
     cp -- "$nat" "$nat_saved" || return 1
-    sed -i "s#ip saddr [0-9.]*/24#ip saddr $candidate/24#" "$nat" || return 1
-    if ! nft -f "$nat"; then
+    critical_begin
+    # nft loads a whole file in one transaction, so a refused file leaves the running rules as they were.
+    if ! sed -i "s#$current/24#$candidate/24#g" "$nat" || ! nft -f "$nat"; then
         cp -- "$nat_saved" "$nat" || true
+        critical_end
         fail 'Could not load the new NAT rule. Nothing was changed.'
         return 1
     fi
-    new_conf_file || return 1
-    conf_set_directive server "$candidate 255.255.255.0" "$CONF_TEMP"
     conf_apply "VPN network $candidate/24" "$CONF_TEMP" || rc=$?
     if (( rc != 0 )); then
         cp -- "$nat_saved" "$nat" || true
         nft -f "$nat" || urgent 'Could not restore the previous NAT rule. Check: nft list ruleset'
+        critical_end
         return 1
     fi
+    critical_end
 }
 valid_ciphers() {
     # AEAD ciphers only: anything else would turn DCO off.
@@ -2005,6 +2108,13 @@ health() {
             check bad "ufw is active and blocks forwarding from the VPN $S_ARROW sudo ufw route allow in on tun0 out on $(ip -4 route show default 2>/dev/null | awk '{for (i=1; i<NF; i++) if ($i=="dev") {print $(i+1); exit}}')"
         else
             check ok 'ufw allows the VPN'
+        fi
+    fi
+    if nft list table ip darban >/dev/null 2>&1; then
+        if nft list chain ip darban forward >/dev/null 2>&1; then
+            check ok 'VPN clients are kept apart, and away from the cloud metadata service'
+        else
+            check warn "VPN clients can reach each other $S_ARROW run the install command again to add the rule"
         fi
     fi
     if nft list table ip darban >/dev/null 2>&1 || nft list table ip mzx_openvpn >/dev/null 2>&1; then check ok 'NAT table for the VPN present'; else check info 'NAT table of this tool not found; NAT may be managed elsewhere'; fi

@@ -46,6 +46,7 @@ Press Enter to accept the suggested address and port, and Enter again to install
 
 **Sharing**
 - One-time links valid for 15 minutes, 1 hour or 24 hours, and QR codes
+- A free trusted certificate for links, for a domain name or a public IP address
 - Optional password on the private key, shown only once
 - `scp` and `sftp` commands for your own operating system
 
@@ -68,7 +69,8 @@ Green is management, blue is profile delivery and orange is VPN traffic. The too
 
 ## Security model
 
-- A profile holds a private key, so links work once and expire. There are no permanent links.
+- A profile holds a private key, so links work once and expire. There are no permanent links. A link without a trusted certificate suggests a short password on the key, sent another way.
+- Clients cannot reach each other, or the cloud provider's metadata service, through the server.
 - Only a hash of each link token stays on the server, and tokens never reach the logs.
 - The CA key has no passphrase, because the daily CRL renewal must run unattended. **Anyone who gains root on the server can issue certificates**, so protect the server and keep an encrypted backup elsewhere.
 - Updates are checked against a checksum published with the release. This detects a damaged download, not a compromised GitHub account.

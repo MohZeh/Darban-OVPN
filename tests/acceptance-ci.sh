@@ -197,8 +197,40 @@ if modinfo -k "$(uname -r)" ovpn >/dev/null 2>&1; then
     ip -d link show tun0 | grep -qw ovpn
     echo 'PASS: the server uses the in-kernel ovpn module (DCO).'
 fi
+# Clients are kept apart, and the cloud metadata service is out of their reach. First without the rule, to
+# show what it prevents on this runner, then with it.
+printf '2\naccept2\n0\n' | darban
+ip netns add "$NS-b"
+ip link add dt2 type veth peer name dt3
+ip link set dt3 netns "$NS-b"
+ip addr add 198.18.0.5/30 dev dt2
+ip link set dt2 up
+ip netns exec "$NS-b" ip link set lo up
+ip netns exec "$NS-b" ip addr add 198.18.0.6/30 dev dt3
+ip netns exec "$NS-b" ip link set dt3 up
+ip netns exec "$NS-b" ip route add default via 198.18.0.5
+sed 's/^remote .*/remote 198.18.0.5 1194/' /root/openvpn-clients/accept2.ovpn > "$LOG/ns-b.ovpn"
+ip netns exec "$NS-b" openvpn --config "$LOG/ns-b.ovpn" --daemon --writepid "$LOG/ns-b.pid" --log "$LOG/g.log" --verb 3
+for attempt in $(seq 1 20); do
+    if grep -q 'Initialization Sequence Completed' "$LOG/g.log"; then break; fi
+    sleep 1
+done
+grep -q 'Initialization Sequence Completed' "$LOG/g.log"
+first_ip=$(grep -oE 'net_addr_v4_add: [0-9.]+' "$LOG/f.log" | awk '{print $2}' | head -n 1)
+metadata() { ip netns exec "$NS" curl -s -o /dev/null -w '%{http_code}' --max-time 5 -H Metadata:true 'http://169.254.169.254/metadata/instance?api-version=2021-02-01' || true; }
+nft delete chain ip darban forward
+reach=no; if ip netns exec "$NS-b" ping -c 2 -W 2 "$first_ip" >/dev/null 2>&1; then reach=yes; fi
+echo "Without the rule: one client reaches another: $reach; metadata service answers: $(metadata)"
+systemctl restart darban-nat.service
+nft list chain ip darban forward >/dev/null
+if ip netns exec "$NS-b" ping -c 2 -W 2 "$first_ip" >/dev/null 2>&1; then echo 'FAIL: one client reaches another.'; exit 1; fi
+if [[ $(metadata) == 200 ]]; then echo 'FAIL: a client reaches the cloud metadata service.'; exit 1; fi
+echo 'PASS: clients are kept apart, and away from the cloud metadata service.'
+kill "$(cat "$LOG/ns-b.pid")" 2>/dev/null || true
 kill "$(cat "$LOG/ns.pid")" 2>/dev/null || true
 sleep 1
+ip netns del "$NS-b"
+ip link del dt2 2>/dev/null || true
 ip netns del "$NS"
 ip link del dt0 2>/dev/null || true
 rm -rf "/etc/netns/$NS"
@@ -225,6 +257,16 @@ bash setup/install.sh
 mv /root/pki/ca.crt.keep /root/pki/ca.crt
 darban status >/dev/null
 echo 'PASS: a broken server is reported, can be updated, and recovers.'
+
+# An install from before clients were kept apart gets the rule from an update.
+awk '/# Clients cannot reach each other/ {skip=1} skip && /^    }$/ {skip=0; next} !skip' /etc/darban/nat.nft > "$LOG/old-nat.nft"
+cp "$LOG/old-nat.nft" /etc/darban/nat.nft
+systemctl restart darban-nat.service
+if nft list chain ip darban forward >/dev/null 2>&1; then echo 'FAIL: the old layout still has the rule.'; exit 1; fi
+bash setup/install.sh
+nft list chain ip darban forward >/dev/null
+grep -q 'chain forward' /etc/darban/nat.nft
+echo 'PASS: an update adds the rule to an older install.'
 
 # A real update and the way back. The new version is this one under another number.
 current=$(darban version)

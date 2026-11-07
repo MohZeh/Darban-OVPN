@@ -31,6 +31,7 @@ MARKER=$CONFIG_DIR/.server-setup-started
 TOOL=/usr/local/sbin/darban
 SETUP_LOG=/var/log/darban-setup.log
 TOOL_LIB=/usr/local/lib/darban
+OUT_DIR=/root/openvpn-clients
 # Never stop for a question, and never restart services such as sshd behind the user's back.
 export DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=l
 
@@ -301,6 +302,18 @@ show_plan() {
     info "These defaults, and more, can be changed later: darban $S_ARROW Settings $S_CRUMB Advanced."
     say
 }
+keep_or_claim() {
+    # keep_or_claim <file>: records whether this setup created the file, or saved the one that was there.
+    local file=$1 saved=$CONFIG_DIR/saved
+    if grep -Eq "^apt_(added|saved) $file\$" "$MARKER"; then return 0; fi
+    if [[ -e $file ]]; then
+        install -d -m 700 "$saved"
+        cp -a -- "$file" "$saved/${file##*/}"
+        printf 'apt_saved %s\n' "$file" >>"$MARKER"
+    else
+        printf 'apt_added %s\n' "$file" >>"$MARKER"
+    fi
+}
 add_repository() {
     local key
     key=$(mktemp)
@@ -308,6 +321,9 @@ add_repository() {
         die 'Could not download the OpenVPN repository key.'
     grep -q 'BEGIN PGP PUBLIC KEY' "$key" || die 'The downloaded file is not a PGP public key.'
     install -d -m 755 "$(dirname -- "$APT_KEY")"
+    # A file that was already here is kept aside, so a removal can put it back instead of deleting it.
+    keep_or_claim "$APT_KEY"
+    keep_or_claim "$APT_LIST"
     install -m 644 "$key" "$APT_KEY"
     rm -f -- "$key"
     printf 'deb [arch=%s signed-by=%s] https://build.openvpn.net/debian/openvpn/stable %s main\n' "$ARCH" "$APT_KEY" "$REPO_SUITE" >"$APT_LIST"
@@ -408,6 +424,7 @@ write_tool_settings() {
     chmod 600 "$CONFIG_DIR/config"
 }
 configure_network() {
+    local rules
     printf 'net.ipv4.ip_forward=1\n' >"$SYSCTL_FILE"
     chmod 644 "$SYSCTL_FILE"
     sysctl -q -p "$SYSCTL_FILE"
@@ -419,6 +436,12 @@ table ip darban {
     chain postrouting {
         type nat hook postrouting priority srcnat;
         ip saddr $VPN_NET/24 oifname "$IFACE" masquerade
+    }
+    # Clients cannot reach each other, or the cloud provider's metadata service, through this server.
+    chain forward {
+        type filter hook forward priority filter; policy accept;
+        ip saddr $VPN_NET/24 ip daddr $VPN_NET/24 drop
+        ip saddr $VPN_NET/24 ip daddr 169.254.0.0/16 drop
     }
 }
 EOF
@@ -443,10 +466,17 @@ EOF
     systemctl enable --now darban-nat.service >/dev/null
     ok "IPv4 forwarding and NAT through $IFACE are on."
     if (( UFW_ACTIVE && OPEN_UFW )); then
-        # Recorded first, so a removal knows about the rules even if adding the second one fails.
-        printf 'ufw_port %s\nufw_iface %s\n' "$PORT" "$IFACE" >>"$MARKER"
-        ufw allow "$PORT/udp" >/dev/null
-        ufw route allow in on tun0 out on "$IFACE" >/dev/null
+        # A rule that was already there stays the user's. Each new one is recorded before it is added, so a
+        # removal knows about it even if adding the next one fails.
+        rules=$(ufw status 2>/dev/null || true)
+        if ! grep -Eq "^$PORT/udp[[:space:]]" <<<"$rules"; then
+            printf 'ufw_port %s\n' "$PORT" >>"$MARKER"
+            ufw allow "$PORT/udp" >/dev/null
+        fi
+        if ! grep -Eq "on ${IFACE}[[:space:]].*ALLOW FWD.*on tun0" <<<"$rules"; then
+            printf 'ufw_iface %s\n' "$IFACE" >>"$MARKER"
+            ufw route allow in on tun0 out on "$IFACE" >/dev/null
+        fi
         ok 'ufw now allows the VPN.'
     fi
 }
@@ -555,6 +585,10 @@ install -d -m 700 "$CONFIG_DIR"
 # The record remove-server.sh works from: only what this setup added is ever removed.
 if [[ ! -e $MARKER ]]; then
     printf 'ip_forward_before %s\n' "$(sysctl -n net.ipv4.ip_forward 2>/dev/null || echo unknown)" >"$MARKER"
+fi
+# A profile folder that already holds files is not this setup's to delete later.
+if [[ -d $OUT_DIR && -n $(ls -A -- "$OUT_DIR" 2>/dev/null) ]] && ! grep -qx out_dir_existed "$MARKER"; then
+    printf 'out_dir_existed\n' >>"$MARKER"
 fi
 # The way back is in place before the first change, because the tool itself is installed only at the end.
 install -d -m 700 "$TOOL_LIB"

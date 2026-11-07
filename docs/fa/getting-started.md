@@ -75,7 +75,7 @@ curl -fsSL https://github.com/MohZeh/darban-ovpn/releases/latest/download/get.sh
 1. **Create your first client now?** Enter بزن.
 2. **Client name:** با Enter نام `client1` انتخاب می‌شود، یا نامی مثل `ali-phone` بنویس.
 3. **How will the client get this profile?** برای **Temporary link** Enter بزن.
-4. **Lock the private key with a password?** برای بدون رمز Enter بزن.
+4. **Lock the private key with a password?** بدون دامنه، پیشنهاد «بله» است. Enter بزن و برای رمز کوتاه پیشنهادی، مثل `k7m-3xt-9vw`، دوباره Enter بزن.
 5. **How long should the link work?** برای یک ساعت Enter بزن.
 
 **باید ببینی:** لینکی که با `https://` شروع می‌شود و پورت TCP آن.
@@ -88,7 +88,7 @@ curl -fsSL https://github.com/MohZeh/darban-ovpn/releases/latest/download/get.sh
 
 لینک را در هر پیام‌رسانی بفرست. پیش‌نمایش پیام‌رسان آن را مصرف نمی‌کند. لینک یک بار کار می‌کند، برای کسی که دکمهٔ داخل صفحه را بزند.
 
-اگر سرور دامنه ندارد، ابزار یک متن کوتاه هم نشان می‌دهد. آن را همراه لینک بفرست، چون مرورگر برای این لینک هشدار امنیتی نشان می‌دهد.
+اگر سرور گواهی معتبر ندارد، ابزار یک متن کوتاه هم نشان می‌دهد. آن را همراه لینک بفرست، چون مرورگر برای این لینک هشدار امنیتی نشان می‌دهد. رمز را از راه دیگری بفرست، مثلاً پیامک یا تماس تلفنی.
 
 ## قدم ۸: دستگاه را وصل کن
 
