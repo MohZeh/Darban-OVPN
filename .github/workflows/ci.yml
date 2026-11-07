@@ -102,11 +102,32 @@ jobs:
           echo "Ubuntu $VERSION_ID, kernel $(uname -r)" >> "$GITHUB_STEP_SUMMARY"
       - name: The runner must not already have a PKI or server
         run: sudo test ! -e /root/pki && test ! -e /etc/openvpn/server/server.conf
-      - name: Record whether this runner offers KVM
-        run: |
-          if [ -c /dev/kvm ]; then ls -l /dev/kvm; echo "KVM: yes" >> "$GITHUB_STEP_SUMMARY"; else echo 'no /dev/kvm'; echo "KVM: no" >> "$GITHUB_STEP_SUMMARY"; fi
       - name: Real setup and client on Ubuntu ${{ matrix.ubuntu }}
         run: sudo bash tests/acceptance-ci.sh --i-know
+
+  # A real virtual machine, so a real reboot. Not on every push: it takes several minutes.
+  reboot:
+    name: Reboot test (Ubuntu ${{ matrix.ubuntu }})
+    needs: lint
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' || github.ref_type == 'tag'
+    strategy:
+      fail-fast: false
+      matrix:
+        ubuntu: ['24.04', '26.04']
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install the virtual machine tools and a client
+        run: |
+          sudo apt-get -o Acquire::Retries=3 update
+          sudo apt-get -o Acquire::Retries=3 install -y --no-install-recommends qemu-system-x86 qemu-utils cloud-image-utils openvpn
+      - name: Set up, reboot and connect from outside
+        env:
+          UBUNTU: ${{ matrix.ubuntu }}
+        run: sudo bash tests/vm-reboot.sh --i-know "$UBUNTU"
 
   # arm64 runners are free only for public repositories. Not on every push: the code is the same.
   acceptance-arm:
@@ -128,7 +149,7 @@ jobs:
   result:
     name: CI result
     if: always()
-    needs: [lint, test, acceptance, acceptance-arm]
+    needs: [lint, test, acceptance, acceptance-arm, reboot]
     runs-on: ubuntu-24.04
     timeout-minutes: 2
     steps:
@@ -139,10 +160,12 @@ jobs:
           TEST: ${{ needs.test.result }}
           ACCEPTANCE: ${{ needs.acceptance.result }}
           ARM: ${{ needs.acceptance-arm.result }}
+          REBOOT: ${{ needs.reboot.result }}
         run: |
-          echo "Lint: $LINT, Test: $TEST, Acceptance: $ACCEPTANCE, arm64: $ARM, code changed: $CODE"
+          echo "Lint: $LINT, Test: $TEST, Acceptance: $ACCEPTANCE, arm64: $ARM, reboot: $REBOOT, code changed: $CODE"
           test "$LINT" = success
           test "$ARM" = success || test "$ARM" = skipped
+          test "$REBOOT" = success || test "$REBOOT" = skipped
           if [ "$CODE" = true ]; then
             test "$TEST" = success
             test "$ACCEPTANCE" = success
