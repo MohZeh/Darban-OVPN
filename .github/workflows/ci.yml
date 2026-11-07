@@ -102,14 +102,33 @@ jobs:
           echo "Ubuntu $VERSION_ID, kernel $(uname -r)" >> "$GITHUB_STEP_SUMMARY"
       - name: The runner must not already have a PKI or server
         run: sudo test ! -e /root/pki && test ! -e /etc/openvpn/server/server.conf
+      - name: Record whether this runner offers KVM
+        run: |
+          if [ -c /dev/kvm ]; then ls -l /dev/kvm; echo "KVM: yes" >> "$GITHUB_STEP_SUMMARY"; else echo 'no /dev/kvm'; echo "KVM: no" >> "$GITHUB_STEP_SUMMARY"; fi
       - name: Real setup and client on Ubuntu ${{ matrix.ubuntu }}
+        run: sudo bash tests/acceptance-ci.sh --i-know
+
+  # arm64 runners are free only for public repositories. Not on every push: the code is the same.
+  acceptance-arm:
+    name: Acceptance (Ubuntu 24.04, arm64)
+    needs: lint
+    if: ${{ !github.event.repository.private && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' || github.ref_type == 'tag') }}
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: The runner must not already have a PKI or server
+        run: sudo test ! -e /root/pki && test ! -e /etc/openvpn/server/server.conf
+      - name: Real setup and client on arm64
         run: sudo bash tests/acceptance-ci.sh --i-know
 
   # The one check a branch rule requires. Matrix job names cannot be required reliably when they are skipped.
   result:
     name: CI result
     if: always()
-    needs: [lint, test, acceptance]
+    needs: [lint, test, acceptance, acceptance-arm]
     runs-on: ubuntu-24.04
     timeout-minutes: 2
     steps:
@@ -119,9 +138,11 @@ jobs:
           LINT: ${{ needs.lint.result }}
           TEST: ${{ needs.test.result }}
           ACCEPTANCE: ${{ needs.acceptance.result }}
+          ARM: ${{ needs.acceptance-arm.result }}
         run: |
-          echo "Lint: $LINT, Test: $TEST, Acceptance: $ACCEPTANCE, code changed: $CODE"
+          echo "Lint: $LINT, Test: $TEST, Acceptance: $ACCEPTANCE, arm64: $ARM, code changed: $CODE"
           test "$LINT" = success
+          test "$ARM" = success || test "$ARM" = skipped
           if [ "$CODE" = true ]; then
             test "$TEST" = success
             test "$ACCEPTANCE" = success

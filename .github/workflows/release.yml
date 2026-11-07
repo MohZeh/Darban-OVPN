@@ -66,11 +66,33 @@ jobs:
           sha256sum -c SHA256SUMS
           test "v$(cat VERSION)" = "$GITHUB_REF_NAME"
 
+  # The command users are told to run, from the published files. Downloads need a public repository.
+  smoke:
+    name: Install with the one-line command (Ubuntu ${{ matrix.ubuntu }})
+    needs: verify
+    if: ${{ !github.event.repository.private }}
+    strategy:
+      fail-fast: false
+      matrix:
+        ubuntu: ['24.04', '26.04']
+    runs-on: ubuntu-${{ matrix.ubuntu }}
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install, update from the release before it, and run again
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          earlier=$(gh release list --repo "$GITHUB_REPOSITORY" --limit 20 --json tagName --jq '.[].tagName' | grep -vxF "$GITHUB_REF_NAME" | sort -V | tail -n 1 || true)
+          bash tests/release-smoke.sh --i-know "$GITHUB_REF_NAME" $earlier
+
   # A tag with a suffix, such as -rc.1, stays a pre-release and is never offered as an update.
   promote:
     name: Mark as the latest release
-    needs: verify
-    if: ${{ !contains(github.ref_name, '-') }}
+    needs: [verify, smoke]
+    if: ${{ !cancelled() && needs.verify.result == 'success' && (needs.smoke.result == 'success' || needs.smoke.result == 'skipped') && !contains(github.ref_name, '-') }}
     runs-on: ubuntu-24.04
     timeout-minutes: 3
     permissions:
