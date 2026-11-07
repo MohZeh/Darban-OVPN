@@ -1,0 +1,2 @@
+# The scripts share variables across sourced files, which ShellCheck reads as unused.
+disable=SC2034

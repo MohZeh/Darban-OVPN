@@ -3,6 +3,10 @@ on:
   push:
     branches: [main]
   pull_request:
+  # Weekly: OpenVPN's repository and Ubuntu's kernels change without any commit here.
+  schedule:
+    - cron: '17 3 * * 1'
+  workflow_dispatch:
   workflow_call:
 
 permissions:
@@ -13,15 +17,43 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
+  # Always runs, and decides whether the slower jobs are needed.
+  lint:
+    name: Lint
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      code: ${{ steps.scope.outputs.code }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Decide which tests this change needs
+        id: scope
+        env:
+          EVENT: ${{ github.event_name }}
+          BEFORE: ${{ github.event.before }}
+          BASE: ${{ github.event.pull_request.base.sha }}
+        run: bash scripts/ci-scope.sh | tee -a "$GITHUB_OUTPUT"
+      - name: ShellCheck, file modes and documentation
+        run: |
+          command -v shellcheck >/dev/null || { sudo apt-get update && sudo apt-get install -y shellcheck; }
+          bash scripts/lint.sh
+      - name: Release assets build
+        run: bash scripts/build-release.sh "$RUNNER_TEMP/release"
+
   test:
     # Each Ubuntu version is its own job, with its own status; one failing does not stop the other.
     name: Test (Ubuntu ${{ matrix.ubuntu }})
+    needs: lint
+    if: needs.lint.outputs.code == 'true'
     strategy:
       fail-fast: false
       matrix:
         ubuntu: ['24.04', '26.04']
     runs-on: ubuntu-${{ matrix.ubuntu }}
-    timeout-minutes: 30
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -33,30 +65,30 @@ jobs:
           . /etc/os-release
           test "$VERSION_ID" = "$EXPECTED"
           echo "Ubuntu $VERSION_ID, kernel $(uname -r)" >> "$GITHUB_STEP_SUMMARY"
-      - name: Install test tools
-        run: sudo apt-get update && sudo apt-get install -y shellcheck easy-rsa
-      - name: Syntax
-        run: for f in setup/*.sh bin/* lib/*.sh scripts/*.sh tests/*.sh; do bash -n "$f"; done
-      - name: ShellCheck
-        run: shellcheck --severity=error setup/*.sh bin/* lib/*.sh scripts/*.sh tests/*.sh
+      - name: Install Easy-RSA
+        run: |
+          sudo apt-get -o Acquire::Retries=3 update
+          sudo apt-get -o Acquire::Retries=3 install -y easy-rsa
+      # The stand-in adds only failure cases Easy-RSA cannot produce, so once is enough.
       - name: Tests with the stand-in Easy-RSA
+        if: matrix.ubuntu == '24.04'
         run: bash tests/run-tests.sh </dev/null
-      - name: Real-terminal key tests
-        run: python3 tests/run-tty-tests.py </dev/null
       - name: Tests with the real Easy-RSA
         run: DARBAN_REAL_EASYRSA=/usr/share/easy-rsa/easyrsa bash tests/run-tests.sh </dev/null
-      - name: Release assets build
-        run: bash scripts/build-release.sh "$RUNNER_TEMP/release"
+      - name: Real-terminal key tests
+        run: python3 tests/run-tty-tests.py </dev/null
 
   # Runs the real setup, OpenVPN, Easy-RSA, systemd and a real client on a throwaway runner.
   acceptance:
     name: Acceptance (Ubuntu ${{ matrix.ubuntu }})
+    needs: lint
+    if: needs.lint.outputs.code == 'true'
     strategy:
       fail-fast: false
       matrix:
         ubuntu: ['24.04', '26.04']
     runs-on: ubuntu-${{ matrix.ubuntu }}
-    timeout-minutes: 30
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -72,3 +104,28 @@ jobs:
         run: sudo test ! -e /root/pki && test ! -e /etc/openvpn/server/server.conf
       - name: Real setup and client on Ubuntu ${{ matrix.ubuntu }}
         run: sudo bash tests/acceptance-ci.sh --i-know
+
+  # The one check a branch rule requires. Matrix job names cannot be required reliably when they are skipped.
+  result:
+    name: CI result
+    if: always()
+    needs: [lint, test, acceptance]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 2
+    steps:
+      - name: Every needed job must have passed
+        env:
+          CODE: ${{ needs.lint.outputs.code }}
+          LINT: ${{ needs.lint.result }}
+          TEST: ${{ needs.test.result }}
+          ACCEPTANCE: ${{ needs.acceptance.result }}
+        run: |
+          echo "Lint: $LINT, Test: $TEST, Acceptance: $ACCEPTANCE, code changed: $CODE"
+          test "$LINT" = success
+          if [ "$CODE" = true ]; then
+            test "$TEST" = success
+            test "$ACCEPTANCE" = success
+          else
+            test "$TEST" = skipped
+            test "$ACCEPTANCE" = skipped
+          fi

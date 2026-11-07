@@ -9,10 +9,30 @@ permissions:
   contents: read
 
 jobs:
+  # Before any slow test: a tag that cannot become a release stops here.
+  check:
+    name: Check the tag
+    runs-on: ubuntu-24.04
+    timeout-minutes: 3
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: The tag must match VERSION
+        run: test "$GITHUB_REF_NAME" = "v$(cat VERSION)"
+      - name: The tagged commit must be on main
+        run: git merge-base --is-ancestor "$GITHUB_SHA" origin/main
+      - name: The version, changelog and archive must be ready
+        run: bash scripts/build-release.sh "$RUNNER_TEMP/release"
+
   test:
+    needs: check
     uses: ./.github/workflows/ci.yml
 
-  release:
+  # Every release starts as a pre-release, so "latest" and the update notice never see an unchecked one.
+  publish:
+    name: Publish as a pre-release
     needs: test
     runs-on: ubuntu-24.04
     timeout-minutes: 10
@@ -22,16 +42,41 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - name: The tag must match VERSION
-        run: test "$GITHUB_REF_NAME" = "v$(cat VERSION)"
       - name: Build assets
         run: bash scripts/build-release.sh "$RUNNER_TEMP/release"
       - name: Publish
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          flags=()
-          # A tag with a suffix is a pre-release: it never becomes "latest" or an offered update.
-          if [[ $GITHUB_REF_NAME == *-* ]]; then flags+=(--prerelease --latest=false); else flags+=(--latest); fi
-          gh release create "$GITHUB_REF_NAME" "$RUNNER_TEMP"/release/* \
-            --title "Darban OVPN $GITHUB_REF_NAME" --notes-file "$RUNNER_TEMP/release/RELEASE-NOTES.txt" "${flags[@]}"
+          gh release create "$GITHUB_REF_NAME" "$RUNNER_TEMP"/release/* --verify-tag --prerelease --latest=false \
+            --title "Darban OVPN $GITHUB_REF_NAME" --notes-file "$RUNNER_TEMP/release/RELEASE-NOTES.txt"
+
+  verify:
+    name: Verify the published files
+    needs: publish
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Download and compare
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release download "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --dir "$RUNNER_TEMP/assets"
+          cd "$RUNNER_TEMP/assets"
+          sha256sum -c SHA256SUMS
+          test "v$(cat VERSION)" = "$GITHUB_REF_NAME"
+
+  # A tag with a suffix, such as -rc.1, stays a pre-release and is never offered as an update.
+  promote:
+    name: Mark as the latest release
+    needs: verify
+    if: ${{ !contains(github.ref_name, '-') }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 3
+    permissions:
+      contents: write
+    steps:
+      - name: Mark as latest
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release edit "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --prerelease=false --latest

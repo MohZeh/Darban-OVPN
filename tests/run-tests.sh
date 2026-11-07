@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# shellcheck disable=SC2319  # "[[ ... ]]; rc_is ... "$?"" is how these tests read a condition's result.
 # Regression tests for Darban OVPN. Run: bash tests/run-tests.sh [name-filter]
 #
 # Each test gets a fresh fake server (see fake-server.sh) and drives the real entry points: the
@@ -1270,6 +1271,7 @@ test_share_questions() {
     has 'Later keeps the file' 'Kept on the server' "$out"
     ok_if 'the file is on the server' test -s "$E/clients/alice.ovpn"
     out=$(menu '4\nalice\n3\n1\n2\n0\n')
+    # shellcheck disable=SC2088  # The literal text the tool prints.
     has 'only the chosen command is shown' '~/Downloads/' "$out"
     lacks 'other commands are not shown' 'USERPROFILE' "$out"
     lacks 'sftp is not shown' 'sftp://' "$out"
@@ -1431,6 +1433,62 @@ test_restore_previous_version() {
     ok_if 'that backup is used up' test ! -e "$backup"
     ok_if 'the CA was not touched' test -s "$PKI/ca.crt"
     grep -q 'restored previous version' "$STUB_LOG"; rc_is 'the restore is audited' 0 "$?"
+}
+
+test_ci_scope_skips_only_documentation() {
+    local dir=$WORK/scope base docs code
+    scope() { (cd "$dir" && env "$@" bash "$REPO/scripts/ci-scope.sh"); }
+    mkdir -p "$dir/docs" && git -C "$dir" init -q
+    git -C "$dir" config user.email t@example.com; git -C "$dir" config user.name t
+    printf 'a\n' >"$dir/README.md"; printf 'a\n' >"$dir/run.sh"
+    git -C "$dir" add . && git -C "$dir" commit -qm base
+    base=$(git -C "$dir" rev-parse HEAD)
+    printf 'b\n' >>"$dir/README.md"; printf 'b\n' >"$dir/docs/guide.md"
+    git -C "$dir" add . && git -C "$dir" commit -qm docs
+    docs=$(git -C "$dir" rev-parse HEAD)
+    has 'a documentation change skips the tests' 'code=false' "$(scope EVENT=push BEFORE="$base")"
+    has 'a pull request is compared with its base' 'code=false' "$(scope EVENT=pull_request BASE="$base")"
+    printf 'c\n' >>"$dir/run.sh"
+    git -C "$dir" add . && git -C "$dir" commit -qm code
+    code=$(git -C "$dir" rev-parse HEAD)
+    has 'a code change runs the tests' 'code=true' "$(scope EVENT=push BEFORE="$docs")"
+    has 'mixed changes run the tests' 'code=true' "$(scope EVENT=push BEFORE="$base")"
+    has 'nothing to compare runs the tests' 'code=true' "$(scope EVENT=push BEFORE=0000000000000000000000000000000000000000)"
+    has 'an unknown commit runs the tests' 'code=true' "$(scope EVENT=push BEFORE=1111111111111111111111111111111111111111)"
+    has 'no changes at all runs the tests' 'code=true' "$(scope EVENT=push BEFORE="$code")"
+    has 'a tag always runs the tests' 'code=true' "$(scope EVENT=push GITHUB_REF=refs/tags/v1.0.0 BEFORE="$base")"
+    has 'the weekly run always runs the tests' 'code=true' "$(scope EVENT=schedule)"
+    has 'a manual run always runs the tests' 'code=true' "$(scope EVENT=workflow_dispatch)"
+}
+
+test_repo_checks_find_problems() {
+    local dir=$WORK/checks out rc
+    check() { (cd "$dir" && git add -A . && python3 "$REPO/scripts/check-repo.py" 2>&1); }
+    mkdir -p "$dir/docs/en" "$dir/docs/fa" "$dir/setup" "$dir/bin" && git -C "$dir" init -q
+    printf '# Title\n\n## Quick start\n\n[guide](docs/en/usage.md) [top](#quick-start)\n\nsudo darban status\n' >"$dir/README.md"
+    printf '# Usage\n' >"$dir/docs/en/usage.md"; printf '# Usage\n' >"$dir/docs/fa/usage.md"
+    printf '#!/bin/sh\n' >"$dir/setup/a.sh"; chmod +x "$dir/setup/a.sh"
+    printf 'Commands:\n  status  print\nOptions:\n' >"$dir/bin/darban"; chmod +x "$dir/bin/darban"
+    out=$(check); rc=$?
+    rc_is 'a healthy repository passes' 0 "$rc"
+
+    printf '[x](docs/missing.md)\n' >>"$dir/README.md"
+    out=$(check); rc_not0 'a broken link fails' "$?"; has 'it names the broken link' 'broken link: docs/missing.md' "$out"
+    sed -i '$d' "$dir/README.md"; printf '[x](#nowhere)\n' >>"$dir/README.md"
+    out=$(check); rc_not0 'a missing heading fails' "$?"; has 'it names the heading' 'no such heading: #nowhere' "$out"
+    sed -i '$d' "$dir/README.md"; printf '```\n[x](docs/missing.md)\n```\n' >>"$dir/README.md"
+    out=$(check); rc_is 'a link inside a code block is ignored' 0 "$?"
+    printf 'sudo darban nosuch\n' >>"$dir/README.md"
+    out=$(check); rc_not0 'an unknown command fails' "$?"; has 'it names the command' 'unknown command: sudo darban nosuch' "$out"
+    sed -i '$d' "$dir/README.md"
+    printf '# New\n' >"$dir/docs/en/new.md"
+    out=$(check); rc_not0 'a guide in one language fails' "$?"; has 'it names the guide' 'new.md exists in only one language' "$out"
+    rm "$dir/docs/en/new.md"
+    chmod -x "$dir/setup/a.sh"
+    out=$(check); rc_not0 'a script without the executable bit fails' "$?"; has 'it names the script' 'setup/a.sh: must be executable' "$out"
+    chmod +x "$dir/setup/a.sh"
+    printf 'a\r\nb\r\n' >"$dir/docs/en/usage.md"
+    out=$(check); rc_not0 'CRLF line endings fail' "$?"; has 'it names the file' 'usage.md: has CRLF' "$out"
 }
 
 mapfile -t TESTS < <(declare -F | awk '$3 ~ /^test_/ {print $3}' | sort)
