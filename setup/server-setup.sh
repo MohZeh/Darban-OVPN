@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Prepares a fresh Ubuntu 24.04 VPS: current OpenVPN from the OpenVPN project's stable repository, the
+# Prepares a fresh Ubuntu 24.04 or 26.04 VPS: current OpenVPN from the OpenVPN project's stable repository, the
 # Virtual HWE kernel (it ships the in-kernel ovpn module, so no DKMS or headers), a new CA and server.
 # Refuses to run on a server that already has an OpenVPN configuration or a PKI it did not create.
 #   server-setup.sh [--host NAME|IP] [--port N] [--subnet A.B.C.0] [--dns "IP [IP]"] [--split-tunnel] [--open-ufw] [--yes]
@@ -22,7 +22,6 @@ MODULES_FILE=/etc/modules-load.d/darban-ovpn.conf
 NAT_UNIT=/etc/systemd/system/darban-nat.service
 TUN_DEV=/dev/net/tun
 UNIT=openvpn-server@server.service
-KERNEL_PKG=linux-image-virtual-hwe-24.04
 SERVER_NAME=darban-server
 DEFAULT_DNS='1.1.1.1 8.8.8.8'
 MIN_BOOT_FREE_KB=150000
@@ -44,7 +43,12 @@ check_system() {
     [[ -r $OS_RELEASE ]] || die "Cannot read $OS_RELEASE."
     id=$(awk -F= '$1=="ID" {gsub(/"/,"",$2); print $2}' "$OS_RELEASE")
     version=$(awk -F= '$1=="VERSION_ID" {gsub(/"/,"",$2); print $2}' "$OS_RELEASE")
-    [[ $id == ubuntu && $version == 24.04 ]] || die "This setup supports Ubuntu 24.04 only; this is ${id:-unknown} ${version:-unknown}."
+    case $id/$version in
+        ubuntu/24.04) REPO_SUITE=noble ;;
+        ubuntu/26.04) REPO_SUITE=resolute ;;
+        *) die "This setup supports Ubuntu 24.04 and 26.04 only; this is ${id:-unknown} ${version:-unknown}." ;;
+    esac
+    KERNEL_PKG=linux-image-virtual-hwe-$version
     ARCH=$(dpkg --print-architecture)
     [[ $ARCH == amd64 || $ARCH == arm64 ]] || die "Unsupported architecture: $ARCH."
     command -v systemctl >/dev/null || die 'systemd is required.'
@@ -204,7 +208,7 @@ add_repository() {
     install -d -m 755 "$(dirname -- "$APT_KEY")"
     install -m 644 "$key" "$APT_KEY"
     rm -f -- "$key"
-    printf 'deb [arch=%s signed-by=%s] https://build.openvpn.net/debian/openvpn/stable noble main\n' "$ARCH" "$APT_KEY" >"$APT_LIST"
+    printf 'deb [arch=%s signed-by=%s] https://build.openvpn.net/debian/openvpn/stable %s main\n' "$ARCH" "$APT_KEY" "$REPO_SUITE" >"$APT_LIST"
     chmod 644 "$APT_LIST"
 }
 install_packages() {
@@ -385,6 +389,8 @@ OPEN_UFW=0
 UFW_ACTIVE=0
 ASSUME_YES=0
 ARCH=''
+REPO_SUITE=''
+KERNEL_PKG=''
 IFACE=''
 LOCAL_IP=''
 while (( $# )); do

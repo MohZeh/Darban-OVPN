@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Real acceptance test for a disposable Ubuntu 24.04 machine ONLY, such as a CI runner: it installs
+# Real acceptance test for a disposable Ubuntu 24.04 or 26.04 machine ONLY, such as a CI runner: it installs
 # packages and a kernel, creates a CA and changes the network. Run as root; it refuses without --i-know.
 # A real OpenVPN client connects over loopback, with the pushed routes ignored so the machine stays online.
 set -Eeuo pipefail

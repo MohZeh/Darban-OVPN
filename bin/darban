@@ -1701,7 +1701,7 @@ toggle_update_notice() {
 }
 about_text() {
     say "Darban OVPN v$DARBAN_VERSION"
-    say 'OpenVPN server manager for Ubuntu 24.04'
+    say 'OpenVPN server manager for Ubuntu 24.04 and 26.04'
     say
     say "  GitHub   $DARBAN_URL"
     say "  Email    $DARBAN_EMAIL"

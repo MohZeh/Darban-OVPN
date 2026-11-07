@@ -25,7 +25,7 @@ python3 tests/run-tty-tests.py
 
 Pass part of a test name to run a subset: `bash tests/run-tests.sh temporary_link`.
 
-`tests/acceptance-ci.sh` **reconfigures the machine it runs on**. Use it only on a disposable Ubuntu 24.04 machine.
+`tests/acceptance-ci.sh` **reconfigures the machine it runs on**. Use it only on a disposable Ubuntu 24.04 or 26.04 machine.
 
 ## Before opening a pull request
 

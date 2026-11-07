@@ -2,12 +2,12 @@
 
 # Darban OVPN
 
-**Run your own OpenVPN server from one terminal menu, on a clean Ubuntu 24.04 VPS.**
+**Run your own OpenVPN server from one terminal menu, on a clean Ubuntu 24.04 or 26.04 VPS.**
 
 [![CI](https://github.com/MohZeh/darban-ovpn/actions/workflows/ci.yml/badge.svg)](https://github.com/MohZeh/darban-ovpn/actions/workflows/ci.yml)
 [![Release](https://img.shields.io/github/v/release/MohZeh/darban-ovpn?include_prereleases&sort=semver)](https://github.com/MohZeh/darban-ovpn/releases)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-![Ubuntu 24.04](https://img.shields.io/badge/Ubuntu-24.04-E95420?logo=ubuntu&logoColor=white)
+![Ubuntu 24.04 and 26.04](https://img.shields.io/badge/Ubuntu-24.04%20%7C%2026.04-E95420?logo=ubuntu&logoColor=white)
 
 [فارسی](README.fa.md) · [Install](docs/en/installation.md) · [Usage](docs/en/usage.md) · [Sharing](docs/en/sharing.md) · [Advanced](docs/en/advanced.md) · [Operations](docs/en/operations.md) · [Case study](docs/case-study.md)
 
@@ -52,7 +52,7 @@ Darban (دربان, "gatekeeper") installs a current OpenVPN server and then han
 
 ## Quick start
 
-On a **fresh Ubuntu 24.04 VPS**, connected through direct SSH:
+On a **fresh Ubuntu 24.04 or 26.04 VPS**, connected through direct SSH:
 
 ```bash
 curl -fsSL https://github.com/MohZeh/darban-ovpn/releases/latest/download/get.sh -o get.sh
@@ -111,14 +111,14 @@ Report vulnerabilities as described in [SECURITY.md](SECURITY.md).
 
 ## Known limits
 
-- Only Ubuntu 24.04 is supported for server setup, with one OpenVPN server, `udp4`, and the layout described in [Installation](docs/en/installation.md).
+- Only Ubuntu 24.04 and 26.04 are supported for server setup, with one OpenVPN server, `udp4`, and the layout described in [Installation](docs/en/installation.md).
 - Only IPv4 goes through the VPN. A client with its own IPv6 connection uses it directly for IPv6.
 - Client, server and CA certificates are not renewed automatically; only the CRL is.
 - Direct import into OpenVPN Connect from a link is still being tested. The download button always works.
 
 ## Project status
 
-Automated tests run on every push, including a real installation, a real OpenVPN client, revocation and full removal on Ubuntu 24.04. Reboot behavior, DCO and client apps are being checked on real servers before `v1.0.0`. Changes are listed in the [changelog](CHANGELOG.md).
+Automated tests run on every push, including a real installation, a real OpenVPN client, revocation and full removal, separately on Ubuntu 24.04 and 26.04. Reboot behavior, DCO and client apps are being checked on real servers before `v1.0.0`. Changes are listed in the [changelog](CHANGELOG.md).
 
 ## Contributing
 

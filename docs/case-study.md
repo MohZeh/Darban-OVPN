@@ -52,7 +52,7 @@ Removal is also designed in. The setup records what it adds, so **Remove everyth
 
 ## Installing less
 
-The server needs one thing from the kernel: the `ovpn` module. The package file lists show that the plain `linux-image-virtual-hwe-24.04` kernel already includes it, so no DKMS, headers, firmware or graphics packages are needed. The setup shows apt's own simulated package list, and stops if firmware or graphics packages appear in it.
+The server needs one thing from the kernel: the `ovpn` module. The package file lists show that the plain `linux-image-virtual-hwe-24.04` and `linux-image-virtual-hwe-26.04` kernels already include it, so no DKMS, headers, firmware or graphics packages are needed. The setup shows apt's own simulated package list, and stops if firmware or graphics packages appear in it.
 
 Questions follow the same rule. Installation asks only for the address and port, and everything else has a default that can be changed later.
 
@@ -64,7 +64,7 @@ Three layers run on every push:
 |---|---|---|
 | Behavior tests against a stand-in server, with real OpenSSL | Failure paths: rollbacks, restored databases, refused operations, real HTTPS for links | Real Easy-RSA, systemd and packages |
 | Key-press tests in a real pseudo-terminal | Arrow keys, cancel, and terminal state after `Ctrl+C` | How it looks in a given terminal |
-| Acceptance test on a throwaway Ubuntu 24.04 machine | Real installation, a real client connecting, revocation refused, links, full removal | Reboot, DCO, the provider's firewall, client apps |
+| Acceptance test on throwaway Ubuntu 24.04 and 26.04 machines, each with its own result | Real installation, a real client connecting, revocation refused, links, full removal | Reboot, DCO, the provider's firewall, client apps |
 
 The last column is checked by hand on a real VPS before each stable release.
 

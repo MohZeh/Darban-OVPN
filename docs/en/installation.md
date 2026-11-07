@@ -5,7 +5,7 @@
 ## Before you start
 
 - Connect through **direct SSH**, not through the VPN you are about to change.
-- Use a fresh **Ubuntu 24.04** VPS for a new server (`amd64` or `arm64`) with a TUN device.
+- Use a fresh **Ubuntu 24.04 or 26.04** VPS for a new server (`amd64` or `arm64`) with a TUN device.
 - Plan to open the VPN's UDP port in your provider's firewall. The tool cannot see or change that firewall.
 - For temporary links, plan to open one TCP port as well (443, 8443 or 9443 by default).
 
@@ -40,7 +40,7 @@ Before changing anything, the setup shows its full plan, including apt's own lis
 ### What the setup does
 
 - Adds the OpenVPN project's apt repository (stable channel) and installs `openvpn`, `easy-rsa`, `socat` and `nftables`
-- Installs `linux-image-virtual-hwe-24.04` without recommended packages, unless the system is a container. The kernel ships the `ovpn` module, so no DKMS or headers are needed. If apt plans firmware or graphics packages, the setup stops.
+- Installs `linux-image-virtual-hwe-24.04` or `linux-image-virtual-hwe-26.04`, matching the system, without recommended packages, unless the system is a container. The kernel ships the `ovpn` module, so no DKMS or headers are needed. If apt plans firmware or graphics packages, the setup stops.
 - Creates a CA in `/root/pki` and a server certificate valid for 10 years
 - Writes `/etc/openvpn/server/server.conf`, enables IPv4 forwarding, and adds NAT for the VPN only, in its own nftables table
 - Starts OpenVPN

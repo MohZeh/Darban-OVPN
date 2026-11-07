@@ -7,7 +7,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 First pre-release, for testing only.
 
 ### Server
-- Set up a new Ubuntu 24.04 server with OpenVPN from the stable project channel and the Virtual HWE kernel.
+- Set up a new Ubuntu 24.04 or 26.04 server with OpenVPN from the stable project channel and the Virtual HWE kernel.
 - Remove everything the setup added, or only the tool.
 
 ### Clients

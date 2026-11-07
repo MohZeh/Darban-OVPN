@@ -598,7 +598,7 @@ test_uninstall_removes_only_the_tool() {
 }
 
 prepare_blank_server() {
-    # A fresh Ubuntu 24.04 stand-in: no server.conf, no PKI, and stubs for what the setup calls.
+    # A fresh Ubuntu stand-in, 24.04 unless a test changes it: no server.conf, no PKI, and stubs for what the setup calls.
     # Easy-RSA is the same stand-in as elsewhere, restored from a template PKI at init-pki.
     local conf_dir=$E/setup-root
     mv "$PKI" "$E/pki-template"
@@ -704,13 +704,26 @@ test_server_setup_builds_a_server_the_manager_accepts() {
     has 'it says nothing changed' 'Nothing was changed' "$out"
 }
 
+test_server_setup_follows_the_ubuntu_version() {
+    local out rc
+    prepare_blank_server
+    printf 'ID=ubuntu\nVERSION_ID="26.04"\n' > "$SETUP_ROOT/os-release"
+    out=$(APT_PLAN='Inst linux-image-virtual-hwe-26.04 Inst linux-modules-7.0.0-42-generic' setup_run --port 21194 --yes); rc=$?
+    rc_is 'setup finishes on Ubuntu 26.04' 0 "$rc"
+    has 'it names the 26.04 kernel' 'linux-image-virtual-hwe-26.04' "$out"
+    grep -q 'build.openvpn.net/debian/openvpn/stable resolute main' "$SETUP_ROOT/sources/openvpn.list"; rc_is 'the 26.04 OpenVPN repository is used' 0 "$?"
+    grep -q -- 'nftables linux-image-virtual-hwe-26.04' "$STUB_LOG"; rc_is 'the 26.04 kernel is installed' 0 "$?"
+    if grep -q 'hwe-24.04' "$STUB_LOG"; then result 0 'the 24.04 kernel is not requested'; else result 1 'the 24.04 kernel is not requested'; fi
+    if grep -q 'noble' "$SETUP_ROOT/sources/openvpn.list"; then result 0 'the 24.04 repository is not used'; else result 1 'the 24.04 repository is not used'; fi
+}
+
 test_server_setup_refuses_or_changes_nothing() {
     local out rc
     prepare_blank_server
     printf 'ID=ubuntu\nVERSION_ID="22.04"\n' > "$SETUP_ROOT/os-release"
     out=$(setup_run --port 21194 --yes); rc=$?
     rc_not0 'another Ubuntu version is refused' "$rc"
-    has 'it names the supported version' 'Ubuntu 24.04 only' "$out"
+    has 'it names the supported versions' 'Ubuntu 24.04 and 26.04 only' "$out"
     printf 'ID=ubuntu\nVERSION_ID="24.04"\n' > "$SETUP_ROOT/os-release"
 
     out=$(setup_run --port 80 --yes); rc=$?
@@ -912,11 +925,13 @@ test_remove_everything_removes_only_what_setup_added() {
     done
     ok_if 'unrelated files stay' test -s "$E/unrelated"
     has 'forwarding goes back to what it was' 'net.ipv4.ip_forward=0' "$log"
-    local backup
+    local backup listing
     backup=$(ls "$E"/backups/darban-backup-*.tar.gz)
     ok_if 'a backup exists' test -s "$backup"
-    tar -tzPf "$backup" | grep -q 'pki/private/ca.key'; rc_is 'the backup holds the CA key' 0 "$?"
-    tar -tzPf "$backup" | grep -q 'clients/first.ovpn'; rc_is 'the backup holds the profiles' 0 "$?"
+    # Read the whole list first: grep -q stops early, and with pipefail that can fail tar with SIGPIPE.
+    listing=$(tar -tzPf "$backup")
+    has 'the backup holds the CA key' 'pki/private/ca.key' "$listing"
+    has 'the backup holds the profiles' 'clients/first.ovpn' "$listing"
 }
 
 test_remove_everything_backup_choice() {
