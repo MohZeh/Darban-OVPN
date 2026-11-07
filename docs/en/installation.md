@@ -12,15 +12,23 @@
 ## New server
 
 ```bash
-curl -fsSL https://github.com/MohZeh/darban-ovpn/releases/latest/download/get.sh -o get.sh
-sudo bash get.sh
-sudo darban
+curl -fsSL https://github.com/MohZeh/darban-ovpn/releases/latest/download/get.sh | sudo bash
 ```
 
-To install a specific version, including a pre-release, download `get.sh` from that release and run:
+The same command updates an existing installation. To read the script first, download it and then run it:
 
 ```bash
-sudo bash get.sh --version v1.0.0-rc.1
+curl -fsSL https://github.com/MohZeh/darban-ovpn/releases/latest/download/get.sh -o get.sh
+```
+
+```bash
+sudo bash get.sh
+```
+
+To install a specific version, including a pre-release, use the address of that release:
+
+```bash
+curl -fsSL https://github.com/MohZeh/darban-ovpn/releases/download/v1.0.0-rc.1/get.sh | sudo bash
 ```
 
 `get.sh` downloads the release, checks it against `SHA256SUMS`, and runs nothing if they do not match.
@@ -29,13 +37,18 @@ sudo bash get.sh --version v1.0.0-rc.1
 
 | Question | Default |
 |---|---|
-| Server hostname or IP | The detected public IPv4 address |
-| OpenVPN UDP port | `1194` |
-| Add `ufw` rules (only if `ufw` is active) | No |
+| Server address (IP or hostname) | The public IPv4 address of this server |
+| VPN port (UDP) | `1194`, or the next free port if it is in use |
+| Add `ufw` rules (only if `ufw` is active) | Yes |
+| Install | Yes |
+
+Press Enter to accept each default. Details of each step go to `/var/log/darban-setup.log`.
 
 Use a hostname if you can: moving the server later is easier. A DNS record must not be proxied, for example Cloudflare must be set to DNS only, because this is UDP traffic.
 
-Before changing anything, the setup shows its full plan, including apt's own list of kernel packages, and asks for confirmation.
+Nothing changes before you confirm. **Show details** lists the full plan, including apt's own list of kernel packages.
+
+The address is found from the network interface. If the server is behind NAT, it is looked up with `api.ipify.org`, then `ifconfig.me`, which see this server's address.
 
 ### What the setup does
 

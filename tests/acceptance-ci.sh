@@ -44,6 +44,12 @@ printf '2\naccept1\n0\n' | darban
 cp /root/openvpn-clients/accept1.ovpn "$LOG/old.ovpn"
 connect "$LOG/old.ovpn" "$LOG/a.log"
 echo 'PASS: a real client connected.'
+for attempt in $(seq 1 10); do
+    if darban connected | grep -q accept1; then break; fi
+    sleep 1
+done
+darban connected | grep -q accept1
+echo 'PASS: the connected client is listed.'
 disconnect
 
 printf '3\naccept1\naccept1\n1\n0\n' | darban

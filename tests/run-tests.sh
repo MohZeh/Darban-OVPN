@@ -446,7 +446,7 @@ test_menu_groups_profile_files_together() {
     has 'active links are in that group' '5  Active links' "$out"
     has 'delete is in that group' '6  Delete server copy' "$out"
     out=$(menu '7\n0\n0\n')
-    has 'settings holds the hostname' 'VPN hostname' "$out"
+    has 'settings holds the address' 'Server address' "$out"
     lacks 'settings no longer holds maintenance' 'Restart OpenVPN' "$out"
     out=$(menu '8\n1\n0\n0\n')
     has 'maintenance runs diagnostics' 'Revocation (CRL)' "$out"
@@ -646,12 +646,13 @@ if [[ $1 == --genkey ]]; then echo 'tls-crypt key' > "$3"; exit 0; fi
 STUB
     cat > "$E/bin/curl" <<'STUB'
 #!/usr/bin/env bash
+if [[ " $* " == *ipify* || " $* " == *ifconfig.me* ]]; then if [[ -n ${FAKE_PUBLIC_IP:-} ]]; then echo "$FAKE_PUBLIC_IP"; exit 0; fi; exit 6; fi
 while (( $# )); do if [[ $1 == -o ]]; then echo '-----BEGIN PGP PUBLIC KEY BLOCK-----' > "$2"; fi; shift; done
 STUB
     cat > "$E/bin/ip" <<'STUB'
 #!/usr/bin/env bash
 case " $* " in
-  *" route get "*) echo '1.1.1.1 via 192.0.2.1 dev eth0 src 203.0.113.50 uid 0' ;;
+  *" route get "*) echo "1.1.1.1 via 192.0.2.1 dev eth0 src ${FAKE_LOCAL_IP:-203.0.113.50} uid 0" ;;
   *" route show default "*) echo 'default via 192.0.2.1 dev eth0 proto dhcp' ;;
   *" route show "*) printf 'default via 192.0.2.1 dev eth0\n192.0.2.0/24 dev eth0\n172.20.0.0/16 dev docker0\n'; if [[ -n ${FAKE_ROUTE:-} ]]; then echo "$FAKE_ROUTE dev tun7"; fi ;;
 esac
@@ -668,7 +669,7 @@ STUB
         -e "s#^CONFIG_DIR=.*#CONFIG_DIR=$E/cfg#" -e "s#^APT_KEY=.*#APT_KEY=$conf_dir/keyrings/key.asc#" \
         -e "s#^APT_LIST=.*#APT_LIST=$conf_dir/sources/openvpn.list#" -e "s#^SYSCTL_FILE=.*#SYSCTL_FILE=$conf_dir/sysctl/darban.conf#" \
         -e "s#^MODULES_FILE=.*#MODULES_FILE=$conf_dir/modules/darban.conf#" -e "s#^NAT_UNIT=.*#NAT_UNIT=$conf_dir/units/nat.service#" \
-        -e "s#^TOOL=.*#TOOL=$E/fake-sbin/darban#" -e "s#^TOOL_LIB=.*#TOOL_LIB=$conf_dir/lib#" \
+        -e "s#^TOOL=.*#TOOL=$E/fake-sbin/darban#" -e "s#^TOOL_LIB=.*#TOOL_LIB=$conf_dir/lib#" -e "s#^SETUP_LOG=.*#SETUP_LOG=$E/setup.log#" \
         -e "s#^TUN_DEV=.*#TUN_DEV=\${FAKE_TUN:-/dev/null}#" "$REPO/setup/server-setup.sh" > "$E/setup/server-setup.sh"
     cp "$REPO/setup/remove-server.sh" "$REPO/setup/uninstall.sh" "$E/setup/"
     SETUP_ROOT=$conf_dir
@@ -681,8 +682,7 @@ test_server_setup_builds_a_server_the_manager_accepts() {
     out=$(setup_run --host VPN.Example.COM --port 21194 --subnet 10.9.0.0 --dns '9.9.9.9 149.112.112.112' --yes); rc=$?
     rc_is 'setup finishes' 0 "$rc"
     has 'it names the kernel it will install' 'linux-image-virtual-hwe-24.04' "$out"
-    has 'it warns about the provider firewall' 'Open UDP 21194' "$out"
-    has 'it says a reboot is needed for DCO' 'reboot when convenient' "$out"
+    has 'the plan warns nothing is hidden' 'adds the OpenVPN project apt repository' "$out"
     grep -q 'build.openvpn.net/debian/openvpn/stable noble main' "$SETUP_ROOT/sources/openvpn.list"; rc_is 'the stable OpenVPN channel is used' 0 "$?"
     grep -q -- '-y -q --no-install-recommends install openvpn easy-rsa socat nftables linux-image-virtual-hwe-24.04' "$STUB_LOG"; rc_is 'recommended packages are not installed' 0 "$?"
     if grep -q 'linux-headers\|linux-firmware\|linux-modules-extra' "$STUB_LOG"; then result 0 'no headers, firmware or extra modules are requested'; else result 1 'no headers, firmware or extra modules are requested'; fi
@@ -749,7 +749,7 @@ test_server_setup_refuses_or_changes_nothing() {
     rc_not0 'a bad port is refused' "$rc"
 
     : > "$STUB_LOG"
-    out=$(printf '\n21194\n1\n' | bash "$E/setup/server-setup.sh" 2>&1); rc=$?
+    out=$(printf '\n21194\n3\n' | bash "$E/setup/server-setup.sh" 2>&1); rc=$?
     has 'Enter accepts the detected public IP' 'Address   203.0.113.50' "$out"
     rc_is 'answering No ends cleanly' 0 "$rc"
     has 'it says nothing changed' 'Cancelled; nothing was changed' "$out"
@@ -791,7 +791,7 @@ test_server_setup_questions() {
     has 'it says what to do' 'does not offer a TUN device' "$out"
     ok_if 'nothing was configured by the refusals' test ! -e "$SERVER_CONF"
 
-    out=$(printf 'bad_name!\n10.0.0.5\n80\n21194\n1\n' | bash "$E/setup/server-setup.sh" 2>&1); rc=$?
+    out=$(printf 'bad_name!\n10.0.0.5\n80\n21194\n2\n3\n' | bash "$E/setup/server-setup.sh" 2>&1); rc=$?
     rc_is 'wrong answers are asked again' 0 "$rc"
     has 'a private address gets a warning' 'private address' "$out"
     has 'the plan shows the address' '10.0.0.5' "$out"
@@ -814,7 +814,7 @@ test_server_setup_in_a_container_installs_no_kernel() {
     rc_is 'setup finishes in a container' 0 "$rc"
     has 'it explains the host kernel' 'uses the host kernel' "$out"
     if grep -q 'linux-image' "$STUB_LOG"; then result 0 'no kernel is planned or installed'; else result 1 'no kernel is planned or installed'; fi
-    has 'it does not ask for a reboot' 'This is a container' "$out"
+    has 'it does not ask for a reboot' 'this is a container' "$out"
 }
 
 test_server_setup_ufw_rules_are_asked_and_removed() {
@@ -907,7 +907,7 @@ install_removal_scripts() {
         -e "s#^APT_LIST=.*#APT_LIST=$root/sources/openvpn.list#" -e "s#^SYSCTL_FILE=.*#SYSCTL_FILE=$root/sysctl/darban.conf#" \
         -e "s#^MODULES_FILE=.*#MODULES_FILE=$root/modules/darban.conf#" -e "s#^NAT_UNIT=.*#NAT_UNIT=$root/units/nat.service#" \
         -e "s#^BACKUP_DIR=.*#BACKUP_DIR=$E/backups#" -e "s#^TOOL_BACKUPS=.*#TOOL_BACKUPS=$E/tool-backups#" \
-        -e "s#^LOCK_FILE=.*#LOCK_FILE=$E/run/lock#" "$REPO/setup/remove-server.sh" > "$E/lib/remove-server.sh"
+        -e "s#^SETUP_LOG=.*#SETUP_LOG=$E/setup.log#" -e "s#^LOCK_FILE=.*#LOCK_FILE=$E/run/lock#" "$REPO/setup/remove-server.sh" > "$E/lib/remove-server.sh"
     sed -e "s#^LIB=.*#LIB=$E/fake-lib#" -e "s#^SBIN=.*#SBIN=$E/fake-sbin#" -e "s#^UNITS=.*#UNITS=$E/fake-units#" \
         -e 's/^\[\[ \$EUID == 0 \]\] .*/:/' "$REPO/setup/uninstall.sh" > "$E/lib/uninstall.sh"
 }
@@ -1197,7 +1197,7 @@ test_temporary_link_end_to_end() {
     has 'the link is shown' "https://127.0.0.1:$LINK_TEST_PORT/l/" "$out"
     has 'it says how long it works' '1 hour, one person, one time' "$out"
     has 'it warns about the firewall' "TCP $LINK_TEST_PORT must be open" "$out"
-    has 'it warns about the self-signed certificate' 'self-signed' "$out"
+    has 'it warns about the browser warning' 'no trusted certificate' "$out"
     url=$(grep -oE 'https://[^ ]+/l/[0-9a-f]{64}' <<<"$out")
     base=${url%/l/*}
     ok_if 'no copy stays in the download folder' test ! -e "$E/clients/alice.ovpn"
@@ -1327,7 +1327,7 @@ test_link_certificate_for_a_hostname() {
     echo vpn.example.com > "$E/cfg/domain"
     out=$(menu '4\nalice\n1\n1\n1\n1\n0\n')
     has 'a hostname offers a trusted certificate' "Let's Encrypt" "$out"
-    has 'declining falls back to self-signed' 'self-signed' "$out"
+    has 'declining falls back to a self-signed certificate' 'no trusted certificate' "$out"
     has 'the link uses the hostname' "https://vpn.example.com:$LINK_TEST_PORT/l/" "$out"
     openssl x509 -in "$E/cfg/link-cert.pem" -noout -checkhost vpn.example.com | grep -q 'does match'; rc_is 'the certificate fits the hostname' 0 "$?"
     menu '5\n1\n0\n' >/dev/null
@@ -1539,8 +1539,9 @@ test_server_setup_continues_after_a_failure() {
     local out rc record
     prepare_blank_server
     record=$E/cfg/.server-setup-started
-    out=$(printf '\n\n1\n' | bash "$E/setup/server-setup.sh" 2>&1)
+    out=$(printf '\n\n3\n' | bash "$E/setup/server-setup.sh" 2>&1)
     lacks 'a cancelled setup offers nothing to undo' 'To undo everything' "$out"
+    ok_if 'a cancelled setup changes nothing' test ! -e "$record"
 
     out=$(FAIL_RESTART=1 setup_run --port 21194 --yes); rc=$?
     rc_not0 'a failed start is reported' "$rc"
@@ -1597,7 +1598,7 @@ test_server_setup_installs_a_kernel_only_when_needed() {
     has 'it says why no kernel is installed' 'already has the ovpn module' "$out"
     if grep -q 'linux-image' "$STUB_LOG"; then result 0 'no kernel is planned or installed'; else result 1 'no kernel is planned or installed'; fi
     if grep -q '^kernel ' "$E/cfg/.server-setup-started"; then result 0 'no kernel is recorded'; else result 1 'no kernel is recorded'; fi
-    has 'DCO is available at once' 'so DCO is available' "$out"
+    lacks 'no reboot is asked for' 'Reboot' "$(FAKE_OVPN=1 mgr welcome)"
 
     prepare_blank_server_again
     out=$(FAKE_OVPN=1 setup_run --port 21194 --install-kernel --yes); rc=$?
@@ -1734,6 +1735,219 @@ test_remove_everything_keeps_files_it_did_not_create() {
     ok_if 'the other file stays' test -s "$E/server/other.conf"
     ok_if 'its own configuration is gone' test ! -e "$E/server/server.conf"
     has 'it says what stayed' 'this setup did not create them' "$out"
+}
+
+test_setup_needs_only_enter() {
+    local out rc
+    prepare_blank_server
+    out=$(printf '\n\n\n' | bash "$E/setup/server-setup.sh" 2>&1); rc=$?
+    rc_is 'Enter at every question installs' 0 "$rc"
+    has 'each question says what Enter does' 'Press Enter to use 203.0.113.50' "$out"
+    has 'and how to answer otherwise' 'Or type another IP or hostname, then press Enter' "$out"
+    has 'the port question too' 'Press Enter to use 1194' "$out"
+    grep -qx '203.0.113.50' "$E/cfg/domain"; rc_is 'the detected address is used' 0 "$?"
+    grep -q '^port 1194$' "$E/server/server.conf"; rc_is 'the usual port is used' 0 "$?"
+    grep -qx setup_complete "$E/cfg/.server-setup-started"; rc_is 'the setup finished' 0 "$?"
+}
+
+test_setup_screen_is_quiet() {
+    local out rc
+    prepare_blank_server
+    sed -i '1a echo NOISE-FROM-APT' "$E/bin/apt-get"
+    out=$(printf '\n\n\n' | bash "$E/setup/server-setup.sh" 2>&1); rc=$?
+    rc_is 'setup finishes' 0 "$rc"
+    has 'the steps are numbered' '[5/5] Starting OpenVPN' "$out"
+    lacks 'apt output stays off the screen' 'NOISE-FROM-APT' "$out"
+    lacks 'the plan stays off the screen' 'adds the OpenVPN project' "$out"
+    grep -q NOISE-FROM-APT "$E/setup.log"; rc_is 'apt output is in the log' 0 "$?"
+
+    prepare_blank_server_again
+    sed -i '1a echo LAST-WORDS-OF-APT' "$E/bin/systemctl"
+    out=$(FAIL_RESTART=1 setup_run --port 21194 --yes); rc=$?
+    rc_not0 'a failure is reported' "$rc"
+    has 'it shows the end of the log' 'LAST-WORDS-OF-APT' "$out"
+    has 'and what failed' 'OpenVPN did not start' "$out"
+    has 'and names the log' 'setup.log' "$out"
+
+    prepare_blank_server_again
+    out=$(printf '\n\n2\n3\n' | bash "$E/setup/server-setup.sh" 2>&1)
+    has 'details are one choice away' 'adds the OpenVPN project' "$out"
+    has 'cancel changes nothing' 'nothing was changed' "$out"
+}
+
+test_setup_finds_the_address_behind_nat() {
+    local out
+    prepare_blank_server
+    out=$(printf '\n\n3\n' | FAKE_LOCAL_IP=10.0.0.4 FAKE_PUBLIC_IP=198.51.100.7 bash "$E/setup/server-setup.sh" 2>&1)
+    has 'the public address is the default' 'Press Enter to use 198.51.100.7' "$out"
+    lacks 'without a warning about a private address' 'private address' "$out"
+    out=$(printf '\n203.0.113.9\n\n3\n' | FAKE_LOCAL_IP=10.0.0.4 bash "$E/setup/server-setup.sh" 2>&1)
+    has 'without an answer it says so' 'could not be detected' "$out"
+    has 'and gives an example' 'Example: 203.0.113.10 or vpn.example.com' "$out"
+    has 'Enter alone asks again' 'Enter a hostname such as' "$out"
+    out=$(printf '\n\n3\n' | FAKE_LOCAL_IP=10.0.0.4 FAKE_PUBLIC_IP=10.9.9.9 bash "$E/setup/server-setup.sh" 2>&1)
+    has 'a private answer is not trusted' 'could not be detected' "$out"
+    out=$(FAKE_LOCAL_IP=10.0.0.4 FAKE_PUBLIC_IP=198.51.100.7 setup_run --port 21194 --yes)
+    grep -qx '198.51.100.7' "$E/cfg/domain"; rc_is 'the unattended setup uses it too' 0 "$?"
+}
+
+test_setup_suggests_a_free_port() {
+    local out
+    prepare_blank_server
+    printf '#!/usr/bin/env bash\nlast=${*: -1}; want=${last##*:}; for p in ${BUSY_PORTS:-}; do if [[ $p == "$want" ]]; then echo "UNCONN 0 0 0.0.0.0:$want 0.0.0.0:*"; fi; done\n' > "$E/bin/ss"
+    export BUSY_PORTS='1194 1195'
+    out=$(printf '\n1195\n70000\n\n3\n' | bash "$E/setup/server-setup.sh" 2>&1)
+    has 'a busy default says why it changed' 'Port 1194 is already in use, so 1196 is suggested' "$out"
+    has 'Enter takes the new default' 'Press Enter to use 1196' "$out"
+    has 'a busy answer gets a suggestion' 'Port 1195 is already in use. Suggested: 1196' "$out"
+    has 'an impossible answer gets one too' 'Enter a number from 1024 to 65535. Suggested: 1196' "$out"
+    has 'the summary shows the choice' '1196/UDP' "$out"
+    out=$(setup_run --yes)
+    grep -q '^port 1196$' "$E/server/server.conf"; rc_is 'the unattended setup takes a free port' 0 "$?"
+    unset BUSY_PORTS
+}
+
+test_setup_firewall_question() {
+    local out
+    prepare_blank_server
+    out=$(printf '\n\n3\n' | bash "$E/setup/server-setup.sh" 2>&1)
+    lacks 'no ufw: no question' 'ufw is active' "$out"
+    printf '#!/usr/bin/env bash\necho "ufw $*" >> "$STUB_LOG"\nif [[ ${1:-} == status ]]; then echo "Status: inactive"; fi\n' > "$E/bin/ufw"; chmod +x "$E/bin/ufw"
+    out=$(printf '\n\n3\n' | bash "$E/setup/server-setup.sh" 2>&1)
+    lacks 'ufw off: no question' 'ufw is active' "$out"
+    printf '#!/usr/bin/env bash\necho "ufw $*" >> "$STUB_LOG"\nif [[ ${1:-} == status ]]; then echo "Status: active"; fi\n' > "$E/bin/ufw"
+    : > "$STUB_LOG"
+    out=$(printf '\n\n\n\n' | bash "$E/setup/server-setup.sh" 2>&1)
+    has 'ufw on: it explains' 'ufw is active here' "$out"
+    grep -q 'ufw allow 1194/udp' "$STUB_LOG"; rc_is 'Enter adds the port rule' 0 "$?"
+    grep -q 'ufw route allow in on tun0 out on eth0' "$STUB_LOG"; rc_is 'Enter adds the forwarding rule' 0 "$?"
+}
+
+test_diagnostics_see_ufw_turned_on_later() {
+    local out
+    local port
+    port=$(awk '$1=="port" {print $2}' "$SERVER_CONF")
+    printf '#!/usr/bin/env bash\necho "Status: active"\n' > "$E/bin/ufw"; chmod +x "$E/bin/ufw"
+    out=$(mgr status)
+    has 'a missing port rule is reported' "sudo ufw allow $port/udp" "$out"
+    printf '#!/usr/bin/env bash\necho "Status: active"\necho "%s/udp ALLOW Anywhere"\n' "$port" > "$E/bin/ufw"
+    out=$(mgr status)
+    has 'a missing forwarding rule is reported' 'sudo ufw route allow in on tun0' "$out"
+    printf '#!/usr/bin/env bash\necho "Status: active"\necho "%s/udp ALLOW Anywhere"\necho "Anywhere on eth0 ALLOW FWD Anywhere on tun0"\n' "$port" > "$E/bin/ufw"
+    has 'both rules are fine' 'ufw allows the VPN' "$(mgr status)"
+    printf '#!/usr/bin/env bash\necho "Status: inactive"\n' > "$E/bin/ufw"
+    lacks 'ufw off is not mentioned' 'ufw' "$(mgr status)"
+}
+
+test_next_steps_after_a_new_setup() {
+    local out rc
+    prepare_blank_server
+    setup_run --port 21194 --yes >/dev/null
+    out=$(mgr welcome); rc=$?
+    rc_is 'it works without a terminal' 0 "$rc"
+    has 'it says the server is ready' 'Your VPN server is ready' "$out"
+    has 'it names the firewall step' 'Open UDP 21194 in your server provider' "$out"
+    has 'a new kernel needs a reboot' 'Reboot once when convenient' "$out"
+    has 'it says what comes next' 'sudo darban' "$out"
+    lacks 'with the module there is no reboot' 'Reboot' "$(FAKE_OVPN=1 mgr welcome)"
+}
+
+mgmt_stub() {
+    # A management interface that answers with the file $E/mgmt-reply.
+    python3 -c 'import socket,sys; s=socket.socket(socket.AF_UNIX); s.bind(sys.argv[1])' "$E/mgmt.sock"
+    sed -i '/^management /d' "$SERVER_CONF"
+    printf 'management %s unix\n' "$E/mgmt.sock" >> "$SERVER_CONF"
+    printf '#!/usr/bin/env bash\ncat >/dev/null\ncat "$E/mgmt-reply"\n' > "$E/bin/socat"; chmod +x "$E/bin/socat"
+    printf 'TITLE\tOpenVPN\nEND\n' > "$E/mgmt-reply"
+}
+
+test_connected_clients() {
+    local out
+    mgmt_stub
+    has 'nobody connected is said plainly' 'No client is connected right now' "$(mgr connected)"
+    lacks 'and the header counts nothing' 'connected' "$(menu '0\n' | grep -E '^  Clients')"
+    printf 'TITLE\tOpenVPN\nHEADER\tCLIENT_LIST\tCommon Name\nCLIENT_LIST\talice\t198.51.100.7:51234\t10.8.0.2\t\t10\t20\t2026-11-07 10:00:00\t1\tUNDEF\t0\t0\tAES-256-GCM\nCLIENT_LIST\tUNDEF\t198.51.100.9:4\t\t\t0\t0\t2026-11-07 10:01:00\nEND\n' > "$E/mgmt-reply"
+    out=$(mgr connected)
+    has 'a connected client is listed' 'alice' "$out"
+    has 'with its address, without the port' '198.51.100.7 ' "$out"
+    lacks 'a half-open session is not counted' 'UNDEF' "$out"
+    has 'the header counts it' '1 connected' "$(menu '0\n')"
+    has 'the menu offers it' 'Connected now' "$(menu '8\n4\n\n0\n0\n')"
+    sed -i '/^management /d' "$SERVER_CONF"
+    has 'without the interface it says so' 'Not available' "$(mgr connected)"
+}
+
+test_first_client_in_a_real_terminal() {
+    # From the end of the setup to a link and a confirmed connection: Enter at every step.
+    local script=$E/script out rc
+    start_links_stub
+    mgmt_stub
+    printf 'TITLE\tOpenVPN\nCLIENT_LIST\tclient1\t198.51.100.7:1\t10.8.0.2\t\t1\t1\t2026-11-07 10:00:00\nEND\n' > "$E/mgmt-reply"
+    cat > "$script" <<'EOF'
+Enter: Create a client => \r
+Client name [client1] => \r
+Enter: Temporary link => \r
+Enter: No password => \r
+Enter: 1 hour => \r
+client1 is connected from 198.51.100.7 => \r
+Choose [0-9] => 0\r
+EOF
+    out=$(NO_COLOR=1 python3 "$HERE/pty-drive.py" --timeout 30 "$script" -- bash "$E/manager.sh" welcome 2>&1); rc=$?
+    rc_is 'the whole path takes only Enter' 0 "$rc"
+    has 'it ends with a link' "/l/" "$out"
+    has 'and a note for the person receiving it' 'Send this note with the link' "$out"
+    if (( rc != 0 )); then printf '%s\n' "$out" | tail -n 25 | cut -c1-150 | sed 's/^/    | /'; fi
+    ok_if 'the client exists' test -s "$PKI/issued/client1.crt"
+}
+
+test_setup_in_a_real_terminal() {
+    local script=$E/script out rc
+    prepare_blank_server
+    cat > "$script" <<'EOF'
+Server address [203.0.113.50]:  => \r
+VPN port [1194]:  => \r
+Enter: Install now => \r
+[5/5] Starting OpenVPN
+OpenVPN is running on UDP 1194
+EOF
+    out=$(NO_COLOR=1 python3 "$HERE/pty-drive.py" --timeout 30 "$script" -- bash "$E/setup/server-setup.sh" 2>&1); rc=$?
+    rc_is 'the real terminal path takes only Enter' 0 "$rc"
+    if (( rc != 0 )); then printf '%s\n' "$out" | tail -n 25 | cut -c1-150 | sed 's/^/    | /'; fi
+    grep -qx setup_complete "$E/cfg/.server-setup-started"; rc_is 'the setup finished' 0 "$?"
+}
+
+test_download_uses_a_copy_the_user_can_read() {
+    local out home=$E/home/ali
+    mkdir -p "$home"
+    printf '#!/usr/bin/env bash\nif [[ ${1:-} == passwd ]]; then echo "ali:x:1000:1000::%s:/bin/bash"; exit 0; fi\nexec /usr/bin/getent "$@"\n' "$home" > "$E/bin/getent"; chmod +x "$E/bin/getent"
+    sed -i 's/^DOWNLOAD_SSH_USER=.*/DOWNLOAD_SSH_USER=ali/' "$E/cfg/config"
+    out=$(printf '4\nalice\n3\n1\n2\n\n0\n' | bash "$E/manager.sh" 2>&1)
+    has 'the command fetches the copy' "ali@" "$out"
+    has 'from the user home' "$home/alice.ovpn" "$out"
+    ok_if 'the copy exists' test -s "$home/alice.ovpn"
+}
+
+test_link_page_guides_the_person_receiving_it() {
+    local url base second out
+    start_links_stub
+    url=$(menu '4\nalice\n1\n1\n1\n0\n' | grep -oE 'https://[^ ]+/l/[0-9a-f]{64}')
+    base=${url%/l/*}
+    second=$(web -o /dev/null -w '%{redirect_url}' -X POST "$url")
+    out=$(web -A 'Mozilla/5.0 (Linux; Android 14)' "$second")
+    has 'Android gets the store link' 'play.google.com/store/apps/details?id=net.openvpn.openvpn' "$out"
+    has 'the steps are in Persian' 'اپ OpenVPN Connect را نصب کن' "$out"
+    has 'and in English' 'Install the OpenVPN Connect app' "$out"
+    out=$(web -A 'Mozilla/5.0 (iPhone; CPU iPhone OS 18_0)' "$second")
+    has 'iPhone gets the App Store link' 'apps.apple.com/app/openvpn-connect' "$out"
+    out=$(web -A 'Mozilla/5.0 (Windows NT 10.0)' "$second")
+    has 'a computer gets the download page' 'openvpn.net/client/' "$out"
+}
+
+test_first_client_suggests_a_name() {
+    local out
+    out=$(printf 'bad name!\n\n' | bash "$E/manager.sh" welcome 2>&1)
+    has 'without a terminal it only shows the next steps' 'sudo darban' "$out"
+    ok_if 'and creates nothing' test ! -e "$PKI/issued/client1.crt"
 }
 
 test_ci_scope_skips_only_documentation() {

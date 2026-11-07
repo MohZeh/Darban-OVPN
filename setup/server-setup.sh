@@ -4,7 +4,8 @@
 # Refuses to run on a server that already has an OpenVPN configuration or a PKI it did not create.
 # A setup that stopped half way continues when it runs again.
 #   server-setup.sh [--host NAME|IP] [--port N] [--subnet A.B.C.0] [--dns "IP [IP]"] [--split-tunnel] [--open-ufw] [--install-kernel] [--yes]
-# Only the address and port are asked. --yes takes the defaults for those too, and leaves ufw alone without --open-ufw.
+# Only the address and port are asked, and Enter accepts a usable default for each. --yes takes those defaults
+# without asking, and leaves ufw alone without --open-ufw. The details of each step go to a log file.
 set -Eeuo pipefail
 umask 077
 cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.."
@@ -28,13 +29,43 @@ DEFAULT_DNS='1.1.1.1 8.8.8.8'
 MIN_BOOT_FREE_KB=150000
 MARKER=$CONFIG_DIR/.server-setup-started
 TOOL=/usr/local/sbin/darban
+SETUP_LOG=/var/log/darban-setup.log
 TOOL_LIB=/usr/local/lib/darban
 # Never stop for a question, and never restart services such as sshd behind the user's back.
 export DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=l
 
 die() { fail "$*"; exit 1; }
 port_busy() { [[ -n $(ss -H -lun "sport = :$1" 2>/dev/null) ]]; }
-step() { say; printf '%s%s %s%s\n' "$C_BOLD" "$S_ARROW" "$*" "$C_RESET"; }
+run_step() {
+    # run_step <text> <function>...: one line on the screen, and the details in the log.
+    local name=$1 work
+    shift
+    STEP=$((STEP + 1))
+    if (( UI_TTY )); then
+        printf '%s [%d/%d] %s%s' "$S_INFO" "$STEP" "$STEP_COUNT" "$name" "$S_ELL" || true
+    else
+        printf '%s [%d/%d] %s%s\n' "$S_INFO" "$STEP" "$STEP_COUNT" "$name" "$S_ELL" || true
+    fi
+    for work; do "$work" >>"$SETUP_LOG" 2>&1 </dev/null; done
+    if (( UI_TTY )); then printf '\r\e[K' || true; fi
+    ok "[$STEP/$STEP_COUNT] $name"
+}
+public_address() {
+    # This machine sits behind NAT, so only an outside service can say which address the internet sees.
+    local url answer
+    command -v curl >/dev/null || return 1
+    for url in https://api.ipify.org https://ifconfig.me/ip; do
+        answer=$(curl -4 -fsS --proto '=https' --proto-redir '=https' --tlsv1.2 --max-time 5 "$url" 2>/dev/null) || continue
+        if valid_ipv4 "$answer" && ! is_private_ip "$answer"; then printf '%s\n' "$answer"; return 0; fi
+    done
+    return 1
+}
+free_port() {
+    # The first free UDP port from the usual one up.
+    local port=1194
+    while port_busy "$port" && (( port < 1294 )); do port=$((port + 1)); done
+    printf '%s\n' "$port"
+}
 easyrsa() { env EASYRSA_PKI="$PKI" EASYRSA_BATCH=1 "$EASYRSA_BIN" "$@" </dev/null >/dev/null; }
 # A fresh VPS often runs unattended-upgrades right after boot, so wait for the dpkg lock instead of failing.
 apt_run() { apt-get -o DPkg::Lock::Timeout=300 -o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold "$@"; }
@@ -44,9 +75,16 @@ new_packages() { awk '$1=="Inst" && $3 !~ /^\[/ {print $2}'; }
 in_container() { command -v systemd-detect-virt >/dev/null && systemd-detect-virt --container --quiet; }
 on_exit() {
     local rc=$?
+    # Back to the terminal, even if a step that was writing to the log called exit.
+    exec 1>&3 2>&4
     ui_restore
     if (( rc != 0 && CHANGES_STARTED )); then
         say
+        if [[ -s $SETUP_LOG ]]; then
+            say "The last lines of $SETUP_LOG:"
+            tail -n 20 "$SETUP_LOG" | sed 's/^/  /' || true
+            say
+        fi
         warn 'The setup did not finish.'
         say 'To try again, run the same command. It continues from where it stopped.'
         say 'To undo everything it did so far:'
@@ -94,6 +132,7 @@ check_system() {
 choose_host() {
     local default='' resolved
     if [[ -n $LOCAL_IP ]] && ! is_private_ip "$LOCAL_IP"; then default=$LOCAL_IP; fi
+    if [[ -z $default ]]; then default=$(public_address || true); fi
     if [[ -n $RESUME_HOST ]]; then default=$RESUME_HOST; fi
     if [[ -z $HOST ]] && (( ASSUME_YES )); then HOST=$default; fi
     if [[ -n $HOST ]]; then
@@ -101,13 +140,27 @@ choose_host() {
     elif (( ASSUME_YES )); then
         die 'Could not detect a public IPv4 address. Give the address clients connect to: --host NAME|IP'
     else
-        info 'Clients connect to this address. Use a hostname or an IPv4 address; a hostname is easier to move later.'
-        info 'A DNS record must not be proxied (for example, Cloudflare must be DNS only): this is UDP traffic.'
+        say
+        printf '%s Step 1 of 2: Server address%s\n' "$C_BOLD" "$C_RESET"
+        say ' Clients use this address to connect.'
+        if [[ -n $default ]]; then
+            say " Detected address: $default"
+            say
+            say "   Press Enter to use $default"
+            say '   Or type another IP or hostname, then press Enter'
+        else
+            say ' The public address could not be detected.'
+            say " Type this server's IP or hostname, then press Enter."
+            say ' Example: 203.0.113.10 or vpn.example.com'
+        fi
+        say
+        say ' With a domain name, temporary links open without a browser warning.'
+        say
         while :; do
-            ask "Server hostname or IP${default:+ [$default]}: " || die 'Cancelled; nothing was changed.'
+            ask "Server address${default:+ [$default]}: " || die 'Cancelled; nothing was changed.'
             HOST=${REPLY:-$default}
             if [[ -n $HOST ]] && valid_endpoint "$HOST"; then break; fi
-            warn 'Enter a hostname such as vpn.example.com, or an IPv4 address.'
+            warn 'Enter a hostname such as vpn.example.com, or an IPv4 address such as 203.0.113.10.'
         done
     fi
     HOST=${HOST,,}
@@ -115,6 +168,7 @@ choose_host() {
         if is_private_ip "$HOST"; then warn "$HOST is a private address; clients outside this network cannot reach it without port forwarding."; fi
         return 0
     fi
+    info 'A DNS record must not be proxied (for example, Cloudflare must be DNS only): this is UDP traffic.'
     resolved=$(timeout 5 getent ahostsv4 "$HOST" 2>/dev/null | awk 'NR==1 {print $1}' || true)
     if [[ -z $resolved ]]; then
         warn "$HOST does not resolve to an IPv4 address yet. Clients need that DNS record before they can connect."
@@ -125,7 +179,7 @@ choose_host() {
     fi
 }
 choose_port() {
-    local default=${RESUME_PORT:-1194}
+    local default=${RESUME_PORT:-$(free_port)}
     if [[ -z $PORT ]] && (( ASSUME_YES )); then PORT=$default; fi
     if [[ -n $PORT ]]; then
         valid_port "$PORT" || die "Port must be a number from 1024 to 65535: $PORT"
@@ -133,12 +187,25 @@ choose_port() {
         if [[ $PORT != "$RESUME_PORT" ]] && port_busy "$PORT"; then die "UDP $PORT is already in use."; fi
         return 0
     fi
+    say
+    printf '%s Step 2 of 2: VPN port (UDP)%s\n' "$C_BOLD" "$C_RESET"
+    if [[ -n $RESUME_PORT ]]; then
+        say ' The earlier setup chose this port.'
+    elif [[ $default == 1194 ]]; then
+        say ' 1194 is the usual port for OpenVPN.'
+    else
+        say " Port 1194 is already in use, so $default is suggested."
+    fi
+    say
+    say "   Press Enter to use $default"
+    say '   Or type another port from 1024 to 65535, then press Enter'
+    say
     while :; do
-        ask "OpenVPN UDP port [$default]: " || die 'Cancelled; nothing was changed.'
+        ask "VPN port [$default]: " || die 'Cancelled; nothing was changed.'
         PORT=${REPLY:-$default}
-        if ! valid_port "$PORT"; then warn 'Enter a number from 1024 to 65535.'; continue; fi
+        if ! valid_port "$PORT"; then warn "Enter a number from 1024 to 65535. Suggested: $default"; continue; fi
         PORT=$((10#$PORT))
-        if [[ $PORT != "$RESUME_PORT" ]] && port_busy "$PORT"; then warn "UDP $PORT is already in use. Choose another port."; continue; fi
+        if [[ $PORT != "$RESUME_PORT" ]] && port_busy "$PORT"; then warn "Port $PORT is already in use. Suggested: $default"; continue; fi
         return 0
     done
 }
@@ -165,6 +232,7 @@ choose_dns() {
     valid_dns "${DNS_LIST:-$DEFAULT_DNS}" || die "DNS must be one or two IPv4 addresses: $DNS_LIST"
 }
 choose_firewall() {
+    # A firewall that is off, or not installed, needs nothing and is not asked about.
     local status
     command -v ufw >/dev/null || return 0
     status=$(ufw status 2>/dev/null || true)
@@ -172,8 +240,9 @@ choose_firewall() {
     UFW_ACTIVE=1
     if (( OPEN_UFW || ASSUME_YES )); then return 0; fi
     say
-    warn "ufw is active and would block the VPN unless it allows UDP $PORT and forwarding from tun0."
-    if confirm_choice 'Add those two ufw rules?' 'No, I will handle ufw myself' 'Add the two rules' caution; then
+    say " ufw is active here. It would block the VPN unless it allows UDP $PORT and forwarding from tun0."
+    say
+    if confirm_choice 'Add those two rules?' 'No, I will handle ufw myself' 'Add the two rules' caution '' 2; then
         OPEN_UFW=1
     fi
 }
@@ -212,6 +281,7 @@ show_plan() {
         kv DNS "$DNS_LIST"
     fi
     say
+    bullet 'Only IPv4 goes through the VPN. A client with its own IPv6 connection still uses it directly for IPv6.'
     bullet 'adds the OpenVPN project apt repository (stable channel) and installs openvpn, easy-rsa, socat, nftables'
     if in_container; then
         bullet 'this is a container, so it uses the host kernel; no kernel is installed and DCO depends on the host'
@@ -324,14 +394,17 @@ EOF
 }
 write_tool_settings() {
     # The address clients connect to, and how to download profiles; an existing file is kept as is.
-    local ssh_port ssh_host
+    local ssh_port ssh_host ssh_user
     printf '%s\n' "$HOST" >"$CONFIG_DIR/domain"
     chmod 600 "$CONFIG_DIR/domain"
     [[ ! -e $CONFIG_DIR/config ]] || return 0
     ssh_port=$( { sshd -T 2>/dev/null || true; } | awk '$1=="port" && p=="" {p=$2} END {print p}')
     ssh_host=$HOST
     if [[ -n $LOCAL_IP ]] && ! is_private_ip "$LOCAL_IP"; then ssh_host=$LOCAL_IP; fi
-    printf 'DOWNLOAD_SSH_HOST=%s\nDOWNLOAD_SSH_PORT=%s\nDOWNLOAD_SSH_USER=root\n' "$ssh_host" "${ssh_port:-22}" >"$CONFIG_DIR/config"
+    # The person running this setup is the one who will download profiles.
+    ssh_user=${SUDO_USER:-root}
+    [[ $ssh_user =~ ^[a-z_][a-z0-9_-]{0,31}$ ]] || ssh_user=root
+    printf 'DOWNLOAD_SSH_HOST=%s\nDOWNLOAD_SSH_PORT=%s\nDOWNLOAD_SSH_USER=%s\n' "$ssh_host" "${ssh_port:-22}" "$ssh_user" >"$CONFIG_DIR/config"
     chmod 600 "$CONFIG_DIR/config"
 }
 configure_network() {
@@ -394,25 +467,33 @@ start_server() {
     done
     die "OpenVPN is not listening on UDP $PORT. Check: journalctl -u $UNIT -n 50 --no-pager"
 }
+confirm_install() {
+    while :; do
+        say
+        section 'Ready to install'
+        kv Address "$HOST"
+        kv Port "$PORT/UDP"
+        say
+        say ' Nothing has changed yet.'
+        say
+        choose_one 'Install this server?' 'Install now' 'Show details' 'Cancel' || return 1
+        case $CHOSEN in
+            1) return 0 ;;
+            2) say; show_plan ;;
+            *) return 1 ;;
+        esac
+    done
+}
+configure_server() {
+    write_server_config
+    write_tool_settings
+    configure_network
+}
 finish() {
     say
-    section 'Server setup finished'
-    if modinfo -k "$(uname -r)" ovpn >/dev/null 2>&1; then
-        ok 'The running kernel has the ovpn module, so DCO is available.'
-    elif in_container; then
-        warn 'This is a container. The VPN runs in user space unless the host kernel offers the ovpn module.'
-    else
-        warn 'The running kernel has no ovpn module. The VPN works now in user space; reboot when convenient to use the new kernel and DCO.'
-    fi
-    warn "Open UDP $PORT in your provider firewall; this setup cannot check it."
+    ok "OpenVPN is running on UDP $PORT."
     if (( UFW_ACTIVE && ! OPEN_UFW )); then
         warn "ufw is active and was not changed. It needs: ufw allow $PORT/udp, and: ufw route allow in on tun0 out on $IFACE"
-    fi
-    if (( ! UFW_ACTIVE )) && iptables -S FORWARD 2>/dev/null | grep -q '^-P FORWARD DROP'; then
-        warn 'The iptables FORWARD policy is DROP, for example because of Docker. Clients may connect but have no internet until it allows tun0.'
-    fi
-    if (( ! SPLIT_TUNNEL )); then
-        info 'Only IPv4 goes through the VPN. A client with its own IPv6 connection still uses it directly for IPv6.'
     fi
 }
 
@@ -430,6 +511,8 @@ RESUMING=0
 RESUME_HOST=''
 RESUME_PORT=''
 CHANGES_STARTED=0
+STEP=0
+STEP_COUNT=5
 ARCH=''
 REPO_SUITE=''
 KERNEL_PKG=''
@@ -448,6 +531,8 @@ while (( $# )); do
         *) printf 'Usage: server-setup.sh [--host NAME|IP] [--port N] [--subnet A.B.C.0] [--dns "IP [IP]"] [--split-tunnel] [--open-ufw] [--install-kernel] [--yes]\n' >&2; exit 2 ;;
     esac
 done
+# Kept so the end of the setup can always reach the terminal.
+exec 3>&1 4>&2
 trap on_exit EXIT
 ui_init
 check_system
@@ -456,12 +541,15 @@ choose_port
 choose_subnet
 choose_dns
 choose_firewall
-step 'Reading the package lists'
-apt_run -qq update
+info "Checking this server${S_ELL}"
+apt_run -qq update >/dev/null
 plan_kernel
-show_plan
-if (( ! ASSUME_YES )); then
-    confirm_choice 'Install and configure this server now?' 'No, change nothing' 'Install and configure' caution install || { info 'Cancelled; nothing was changed.'; exit 0; }
+if (( ASSUME_YES )); then
+    say
+    show_plan
+elif ! confirm_install; then
+    info 'Cancelled; nothing was changed.'
+    exit 0
 fi
 install -d -m 700 "$CONFIG_DIR"
 # The record remove-server.sh works from: only what this setup added is ever removed.
@@ -478,18 +566,17 @@ if [[ -n $KERNEL_INSTALL ]]; then
     # shellcheck disable=SC2086  # one line per planned package
     printf 'kernel %s\n' $KERNEL_PLAN >>"$MARKER"
 fi
-step 'Adding the OpenVPN repository'
-add_repository
-step 'Installing packages'
-install_packages
-step 'Creating the CA and server certificate'
-create_pki
-step 'Writing the server configuration'
-write_server_config
-write_tool_settings
-step 'Configuring forwarding and NAT'
-configure_network
-step 'Starting OpenVPN'
-start_server
+say
+: >>"$SETUP_LOG"
+chmod 600 "$SETUP_LOG"
+run_step 'Preparing the system' add_repository
+if [[ -n $KERNEL_INSTALL ]]; then
+    run_step 'Installing OpenVPN and the kernel (a few minutes)' install_packages
+else
+    run_step 'Installing OpenVPN' install_packages
+fi
+run_step 'Creating the certificates' create_pki
+run_step 'Configuring the server' configure_server
+run_step 'Starting OpenVPN' start_server
 printf 'setup_complete\n' >>"$MARKER"
 finish

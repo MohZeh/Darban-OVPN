@@ -66,7 +66,6 @@ if [[ -e /usr/local/sbin/darban && -e $LIB/common.sh ]]; then
     if [[ -e /etc/systemd/system/darban-links.service ]]; then cp -a -- /etc/systemd/system/darban-links.service "$backup_dir/units/"; fi
     # The newest three are enough.
     find /var/backups/darban -mindepth 1 -maxdepth 1 -type d -print | sort | head -n -3 | xargs -r rm -rf --
-    printf 'The previous version was kept in: %s\n' "$backup_dir"
 fi
 
 install -o root -g root -m 600 lib/common.sh "$LIB/common.sh"
@@ -88,27 +87,24 @@ install -d -o root -g root -m 700 "$CONFIG_DIR"
 if [[ ! -e $CONFIG_DIR/config ]]; then
     ssh_host=$(ip -4 route get 1.1.1.1 2>/dev/null | awk '{for(i=1;i<NF;i++) if($i=="src") {print $(i+1); exit}}' || true)
     ssh_port=$( { sshd -T 2>/dev/null || true; } | awk '$1=="port" && p=="" {p=$2} END {print p}')
-    printf 'DOWNLOAD_SSH_HOST=%s\nDOWNLOAD_SSH_PORT=%s\nDOWNLOAD_SSH_USER=root\n' "$ssh_host" "${ssh_port:-22}" >"$CONFIG_DIR/config"
+    ssh_user=${SUDO_USER:-root}
+    [[ $ssh_user =~ ^[a-z_][a-z0-9_-]{0,31}$ ]] || ssh_user=root
+    printf 'DOWNLOAD_SSH_HOST=%s\nDOWNLOAD_SSH_PORT=%s\nDOWNLOAD_SSH_USER=%s\n' "$ssh_host" "${ssh_port:-22}" "$ssh_user" >"$CONFIG_DIR/config"
     chmod 600 "$CONFIG_DIR/config"
-    printf 'Download settings written to %s: host %s, SSH port %s. Edit it if this is not the public SSH address.\n' \
-        "$CONFIG_DIR/config" "${ssh_host:-(not detected)}" "${ssh_port:-22}"
 fi
 
-systemctl enable --now darban-crl.timer
+systemctl enable --now darban-crl.timer >/dev/null 2>&1 || true
 if ! systemctl is-active --quiet darban-crl.timer; then
     echo 'INSTALL INCOMPLETE: CRL timer is not active. Inspect systemctl status darban-crl.timer' >&2
     exit 1
 fi
 # Checks the current CRL without replacing it or restarting OpenVPN. One run under the hardened unit also
 # proves the sandbox allows the job; it only renews if renewal is due. An update reports a failure and goes on.
-if ! /usr/local/sbin/darban-crl-maintain --check || ! systemctl start darban-crl.service; then
+if ! /usr/local/sbin/darban-crl-maintain --check >/dev/null || ! systemctl start darban-crl.service; then
     if (( ! UPDATING )); then
         echo 'INSTALL INCOMPLETE: CRL check or service failed. Inspect journalctl -u darban-crl.service' >&2
         exit 1
     fi
     echo 'WARNING: the CRL check did not pass; see: sudo darban status.' >&2
 fi
-printf '\nDarban OVPN v%s installed. Run: sudo darban\n' "$VERSION"
-printf 'CRL daily maintenance timer is active; no standalone CRL user menu.\n'
-printf 'Project: https://github.com/MohZeh/darban-ovpn | Contact: zehtabex@gmail.com\n'
-systemctl list-timers --all darban-crl.timer --no-pager
+printf 'Darban OVPN v%s is installed. To open it: sudo darban\n' "$VERSION"

@@ -122,6 +122,12 @@ choice_row() {
         printf '\r\e[K   %s%s%s  %s%s%s\n' "$C_DIM" "$1" "$C_RESET" "$3" "$label" "$C_RESET" || true
     fi
 }
+choice_hint() {
+    # What Enter does right now, and exactly how to choose something else. Three rows: redrawing counts them.
+    printf '\r\e[K %sEnter: %s%s\n' "$C_BOLD" "${1:0:UI_WIDTH-10}" "$C_RESET" || true
+    printf '\r\e[K %sAnother option: press %s or its number, then Enter%s\n' "$C_DIM" "$S_UPDOWN" "$C_RESET" || true
+    printf '\r\e[K %sEsc: Cancel%s\n' "$C_DIM" "$C_RESET" || true
+}
 confirm_line() {
     # A script or pipe has no arrow keys: 2 or the exact target agrees, and so does y when there is no target.
     local no=$1 yes=$2 target=$3 selected=$4
@@ -159,7 +165,7 @@ confirm_choice() {
             choice_row 1 "$no" "$C_GREEN" 0
             choice_row 2 "$yes" "$color" 1
         fi
-        printf '\r\e[K %s%s or 1/2 to choose %s Enter to confirm %s Esc to cancel%s\n' "$C_DIM" "$S_UPDOWN" "$S_SEP" "$S_SEP" "$C_RESET" || true
+        if (( selected == 1 )); then choice_hint "$no"; else choice_hint "$yes"; fi
         rc=0; key=''; DARBAN_INT=0
         IFS= read -rsn1 -t "$IDLE_TIMEOUT" key || rc=$?
         if (( DARBAN_INT )); then answer=cancel
@@ -183,7 +189,7 @@ confirm_choice() {
             esac
         fi
         # Back to the first row: redraw in place, or replace the rows with the answer once there is one.
-        printf '\e[3A\r' || true
+        printf '\e[5A\r' || true
     done
     printf '\e[J' || true
     ui_restore
@@ -221,7 +227,7 @@ choose_one() {
         for i in "${!options[@]}"; do
             if (( i + 1 == selected )); then choice_row $((i + 1)) "${options[i]}" "$C_CYAN" 1; else choice_row $((i + 1)) "${options[i]}" '' 0; fi
         done
-        printf '\r\e[K %s%s or 1-%d to choose %s Enter to confirm %s Esc to cancel%s\n' "$C_DIM" "$S_UPDOWN" "$n" "$S_SEP" "$S_SEP" "$C_RESET" || true
+        choice_hint "${options[selected - 1]}"
         rc=0; key=''; digit=''; DARBAN_INT=0
         IFS= read -rsn1 -t "$IDLE_TIMEOUT" key || rc=$?
         if (( DARBAN_INT )); then answer=cancel
@@ -246,7 +252,7 @@ choose_one() {
             esac
             if [[ -n $digit ]] && (( digit <= n )); then selected=$digit; fi
         fi
-        printf '\e[%dA\r' $((n + 1)) || true
+        printf '\e[%dA\r' $((n + 3)) || true
     done
     printf '\e[J' || true
     ui_restore

@@ -1,4 +1,4 @@
-<a href="#quick-start"><img src="docs/assets/hero.png" alt="Darban OVPN: your own OpenVPN server, run from one terminal menu. One-time links for sharing profiles, verified revocation and automatic rollback on Ubuntu 24.04 and 26.04." width="100%"></a>
+<img src="docs/assets/hero.png" alt="Darban OVPN: your own OpenVPN server, run from one terminal menu. One-time links for sharing profiles, verified revocation and automatic rollback on Ubuntu 24.04 and 26.04." width="100%">
 
 <div align="center">
 
@@ -28,19 +28,19 @@ Darban (دربان, "gatekeeper") installs a current OpenVPN server and then han
 | Change settings without locking users out | Keeps a backup, restarts, checks the port, and restores the old configuration if the service does not return |
 | Stay in control of your server | Installs nothing without showing it first, updates only after your confirmation, and can remove only what it added |
 
-## Quick start
+## Install or update
 
-On a **fresh Ubuntu 24.04 or 26.04 VPS**, connected through direct SSH:
+On a **fresh Ubuntu 24.04 or 26.04 VPS**, connected through direct SSH. The same command also updates an existing installation:
 
 ```bash
-curl -fsSL https://github.com/MohZeh/darban-ovpn/releases/latest/download/get.sh -o get.sh
-sudo bash get.sh
-sudo darban
+curl -fsSL https://github.com/MohZeh/darban-ovpn/releases/latest/download/get.sh | sudo bash
 ```
 
-While only pre-releases exist, choose a version from [Releases](https://github.com/MohZeh/darban-ovpn/releases) and install it with `sudo bash get.sh --version vX.Y.Z-rc.N`, downloading `get.sh` from that release.
+Press Enter to accept the suggested address and port, and Enter again to install. The tool then offers to create your first client and share it.
 
-The setup asks only for the server address and UDP port. Everything else has a sensible default that you can change later under **Settings › Advanced**. On a server that already runs OpenVPN, the setup step is skipped and your configuration is not changed. Read [Installation](docs/en/installation.md) first.
+While only pre-releases exist, take the same command from the version you want on the [Releases](https://github.com/MohZeh/darban-ovpn/releases) page: replace `latest/download` with `download/vX.Y.Z-rc.N`.
+
+On a server that already runs OpenVPN, the setup step is skipped and your configuration is not changed. See [Installation](docs/en/installation.md) for the details, and for reading the script before you run it.
 
 ## Features
 

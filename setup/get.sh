@@ -67,8 +67,20 @@ run_server_setup() {
         die 'There is no terminal to answer the setup questions. Connect with a normal SSH session, or give the answers: curl ... | sudo bash -s -- --yes --host YOUR_ADDRESS --port 1194'
     fi
 }
+welcome() {
+    # The next steps of a new server, and the offer to create its first client.
+    if [[ " ${setup_args[*]} " == *' --yes '* ]]; then
+        "$TOOL" welcome </dev/null
+    elif [[ -t 0 ]]; then
+        "$TOOL" welcome
+    elif { : </dev/tty; } 2>/dev/null; then
+        "$TOOL" welcome </dev/tty
+    else
+        "$TOOL" welcome </dev/null
+    fi
+}
 main() {
-    local requested='' version installed='' expected
+    local requested='' version installed='' expected new_server=0
     while (( $# )); do
         case $1 in
             --version) (( $# >= 2 )) || die "$USAGE"; requested=$2; shift 2 ;;
@@ -128,7 +140,9 @@ main() {
         run_server_setup "$work/release/setup/server-setup.sh"
         # A cancelled setup leaves no finished server, and the installer has nothing to manage.
         if needs_server_setup; then return 0; fi
+        new_server=1
     fi
     bash "$work/release/setup/install.sh" </dev/null
+    if (( new_server )); then welcome; fi
 }
 main "$@"

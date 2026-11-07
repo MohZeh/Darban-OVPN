@@ -136,6 +136,22 @@ def page(body):
             f'<style>{STYLE}</style></head><body><main>{body}</main></body></html>').encode()
 
 
+APPS = {
+    'android': 'https://play.google.com/store/apps/details?id=net.openvpn.openvpn',
+    'ios': 'https://apps.apple.com/app/openvpn-connect/id590379981',
+    'desktop': 'https://openvpn.net/client/',
+}
+
+
+def device(agent):
+    agent = agent.lower()
+    if 'android' in agent:
+        return 'android'
+    if 'iphone' in agent or 'ipad' in agent:
+        return 'ios'
+    return 'desktop'
+
+
 GONE = page('<div class="fa"><h1>این لینک دیگر معتبر نیست</h1><p>منقضی شده یا قبلاً استفاده شده است. '
             'اگر خودت از آن استفاده نکرده‌ای، فوراً به مدیر سرور خبر بده.</p></div>'
             '<h1>This link is no longer valid</h1><p>It has expired or was already used. '
@@ -193,11 +209,16 @@ class Handler(http.server.BaseHTTPRequestHandler):
             if not meta:
                 return self._gone()
             url = f'https://{self.server.public_host}/c/{token}/file'
+            app = APPS[device(self.headers.get('User-Agent', ''))]
             return self._send(200, page(
-                '<div class="fa"><h1>پروفایل آماده است</h1><p>تا ۱۰ دقیقه می‌توانی آن را بگیری. '
-                'اگر اپ OpenVPN Connect باز نشد، فایل را دانلود کن و داخل اپ وارد کن.</p></div>'
-                '<h1>Your profile is ready</h1><p>Available for 10 minutes. If OpenVPN Connect does not open, '
-                'download the file and import it in the app.</p>'
+                '<div class="fa"><h1>پروفایل آماده است</h1><p>تا ۱۰ دقیقه می‌توانی آن را بگیری.</p><ol>'
+                f'<li><a href="{app}">اپ OpenVPN Connect را نصب کن</a>.</li>'
+                '<li>دکمهٔ OpenVPN Connect را بزن. اگر باز نشد، فایل را دانلود کن و داخل اپ وارد کن.</li>'
+                '<li>در اپ Connect را بزن.</li></ol></div>'
+                '<h1>Your profile is ready</h1><p>Available for 10 minutes.</p><ol>'
+                f'<li><a href="{app}">Install the OpenVPN Connect app</a>.</li>'
+                '<li>Press the OpenVPN Connect button. If it does not open, download the file and import it in the app.</li>'
+                '<li>Press Connect in the app.</li></ol>'
                 f'<a class="button" href="openvpn://import-profile/{html.escape(url)}">OpenVPN Connect</a>'
                 f'<a class="button other" href="/c/{token}/file">دانلود فایل / Download .ovpn</a>'
                 '<p class="small">این فایل کلید خصوصی دارد؛ آن را منتشر نکن. '

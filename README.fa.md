@@ -1,4 +1,4 @@
-<a href="#شروع-سریع"><img src="docs/assets/hero.png" alt="Darban OVPN: your own OpenVPN server, run from one terminal menu. One-time links for sharing profiles, verified revocation and automatic rollback on Ubuntu 24.04 and 26.04." width="100%"></a>
+<img src="docs/assets/hero.png" alt="Darban OVPN: your own OpenVPN server, run from one terminal menu. One-time links for sharing profiles, verified revocation and automatic rollback on Ubuntu 24.04 and 26.04." width="100%">
 
 <div dir="rtl">
 
@@ -20,23 +20,23 @@
 | تنظیمات را بدون قطع دائمی کاربران عوض کنی | پشتیبان می‌گیرد، ری‌استارت می‌کند، پورت را بررسی می‌کند و در صورت شکست تنظیمات قبلی را برمی‌گرداند |
 | کنترل سرور دست خودت بماند | چیزی را بدون نشان دادن نصب نمی‌کند، فقط با تأیید تو به‌روزرسانی می‌شود و فقط چیزهایی را حذف می‌کند که خودش اضافه کرده |
 
-## شروع سریع
+## نصب یا به‌روزرسانی
 
-روی **یک VPS تازهٔ Ubuntu 24.04 یا 26.04** و با اتصال مستقیم SSH:
+روی **یک VPS تازهٔ Ubuntu 24.04 یا 26.04** و با اتصال مستقیم SSH. همین دستور نصب موجود را هم به‌روز می‌کند:
 
 </div>
 
 ```bash
-curl -fsSL https://github.com/MohZeh/darban-ovpn/releases/latest/download/get.sh -o get.sh
-sudo bash get.sh
-sudo darban
+curl -fsSL https://github.com/MohZeh/darban-ovpn/releases/latest/download/get.sh | sudo bash
 ```
 
 <div dir="rtl">
 
-تا زمانی که فقط نسخهٔ پیش از انتشار وجود دارد، نسخه را از [Releases](https://github.com/MohZeh/darban-ovpn/releases) انتخاب کن، `get.sh` همان نسخه را بگیر و با `sudo bash get.sh --version vX.Y.Z-rc.N` نصب کن.
+با Enter آدرس و پورت پیشنهادی را قبول کن و با یک Enter دیگر نصب را شروع کن. بعد از آن، ابزار پیشنهاد می‌دهد اولین کلاینت را بسازی و به اشتراک بگذاری.
 
-نصب فقط آدرس سرور و پورت UDP را می‌پرسد. بقیه پیش‌فرض مناسب دارند و بعداً از **Settings › Advanced** قابل تغییرند. روی سروری که OpenVPN دارد، مرحلهٔ نصب سرور اجرا نمی‌شود و تنظیماتت تغییر نمی‌کند. پیش از شروع [راهنمای نصب](docs/fa/installation.md) را بخوان.
+تا زمانی که فقط نسخهٔ پیش از انتشار وجود دارد، همین دستور را با نسخهٔ دلخواه از صفحهٔ [Releases](https://github.com/MohZeh/darban-ovpn/releases) اجرا کن: به‌جای `latest/download` بنویس `download/vX.Y.Z-rc.N`.
+
+روی سروری که OpenVPN دارد، مرحلهٔ نصب سرور اجرا نمی‌شود و تنظیماتت تغییر نمی‌کند. جزئیات و روش خواندن اسکریپت پیش از اجرا در [راهنمای نصب](docs/fa/installation.md) است.
 
 ## قابلیت‌ها
 

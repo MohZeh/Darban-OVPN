@@ -18,6 +18,7 @@ MODULES_FILE=/etc/modules-load.d/darban-ovpn.conf
 NAT_UNIT=/etc/systemd/system/darban-nat.service
 BACKUP_DIR=/root
 TOOL_BACKUPS=/var/backups/darban
+SETUP_LOG=/var/log/darban-setup.log
 LOCK_FILE=/run/darban.lock
 UNIT=openvpn-server@server.service
 MARKER=$CONFIG_DIR/.server-setup-started
@@ -148,6 +149,7 @@ fi
 here=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 bash "$here/uninstall.sh" --yes >/dev/null || { echo 'Could not remove the tool itself; run uninstall.sh --yes.' >&2; exit 1; }
 rm -rf -- "$CONFIG_DIR" "$TOOL_BACKUPS"
+rm -f -- "$SETUP_LOG"
 rm -f -- "$LOCK_FILE"
 
 echo

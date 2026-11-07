@@ -16,19 +16,31 @@
 </div>
 
 ```bash
-curl -fsSL https://github.com/MohZeh/darban-ovpn/releases/latest/download/get.sh -o get.sh
-sudo bash get.sh
-sudo darban
+curl -fsSL https://github.com/MohZeh/darban-ovpn/releases/latest/download/get.sh | sudo bash
 ```
 
 <div dir="rtl">
 
-برای نصب نسخهٔ مشخص، حتی نسخهٔ پیش از انتشار، `get.sh` را از همان نسخه بگیر و اجرا کن:
+همین دستور نصب موجود را هم به‌روز می‌کند. برای خواندن اسکریپت پیش از اجرا، اول آن را دانلود کن و بعد اجرا کن:
 
 </div>
 
 ```bash
-sudo bash get.sh --version v1.0.0-rc.1
+curl -fsSL https://github.com/MohZeh/darban-ovpn/releases/latest/download/get.sh -o get.sh
+```
+
+```bash
+sudo bash get.sh
+```
+
+<div dir="rtl">
+
+برای نصب نسخهٔ مشخص، حتی نسخهٔ پیش از انتشار، از آدرس همان نسخه استفاده کن:
+
+</div>
+
+```bash
+curl -fsSL https://github.com/MohZeh/darban-ovpn/releases/download/v1.0.0-rc.1/get.sh | sudo bash
 ```
 
 <div dir="rtl">
@@ -39,13 +51,18 @@ sudo bash get.sh --version v1.0.0-rc.1
 
 | پرسش | پیش‌فرض |
 |---|---|
-| hostname یا IP سرور | IPv4 عمومی تشخیص‌داده‌شده |
-| پورت UDP سرور | `1194` |
-| افزودن قوانین `ufw` (فقط اگر فعال باشد) | خیر |
+| آدرس سرور (IP یا hostname) | IPv4 عمومی همین سرور |
+| پورت VPN (UDP) | `1194`، یا پورت آزاد بعدی اگر اشغال باشد |
+| افزودن قوانین `ufw` (فقط اگر فعال باشد) | بله |
+| نصب | بله |
+
+با Enter هر پیش‌فرض را قبول کن. جزئیات هر مرحله در `/var/log/darban-setup.log` ثبت می‌شود.
 
 اگر می‌توانی hostname بده تا انتقال سرور در آینده راحت‌تر باشد. رکورد DNS نباید پروکسی شود؛ مثلاً Cloudflare باید روی DNS only باشد، چون این ترافیک UDP است.
 
-پیش از هر تغییر، برنامهٔ کامل، از جمله فهرست بسته‌های کرنل از شبیه‌سازی خود `apt`، نمایش داده می‌شود و تأیید می‌گیرد.
+پیش از تأیید تو چیزی تغییر نمی‌کند. **Show details** برنامهٔ کامل، از جمله فهرست بسته‌های کرنل از شبیه‌سازی خود `apt` را نشان می‌دهد.
+
+آدرس از کارت شبکه خوانده می‌شود. اگر سرور پشت NAT باشد، از `api.ipify.org` و بعد `ifconfig.me` پرسیده می‌شود، که آدرس این سرور را می‌بینند.
 
 ### کارهایی که نصب انجام می‌دهد
 

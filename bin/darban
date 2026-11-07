@@ -50,6 +50,10 @@ ACTION_RUNNING=0
 # Why this server cannot be managed right now; empty when it is healthy. Diagnostics and removal still work.
 SERVER_PROBLEM=''
 CA_LOCKED=0
+# Set once a client has been given a way to get its profile, so the tool can wait for its first connection.
+SHARED=0
+# What the scp and sftp commands should fetch; another SSH user than root gets a private copy of the file.
+DOWNLOAD_FILE=''
 HEALTH_BAD=0
 # Revoked clients are history: list_clients hides them unless LIST_ALL is set, and counts them in LIST_HIDDEN.
 LIST_ALL=0
@@ -192,7 +196,7 @@ server_data_ciphers() {
     printf '%s\n' "$value"
 }
 profile_preconditions() {
-    valid_domain "$(domain)" || { warn "The VPN hostname is not set yet. Set it first: Settings ${S_CRUMB} 1."; return 1; }
+    valid_domain "$(domain)" || { warn "The server address is not set yet. Set it first: Settings ${S_CRUMB} 1."; return 1; }
     server_port >/dev/null || { warn 'Cannot detect a unique OpenVPN server port in server.conf.'; return 1; }
     server_proto_ok || { warn 'Profile generation only supports the existing udp4 configuration.'; return 1; }
     server_tls_ok || {
@@ -490,13 +494,13 @@ security_note() {
 download_panel() {
     # download_panel <file> <title> [windows|unix|sftp]. Commands are printed uncolored, unindented and one
     # per line, so copying them from the terminal never picks up escape codes or frame characters.
-    local file=$1 title=$2 only=${3:-all} name filename current_remote expected cert_exp target
+    local file=$1 title=$2 only=${3:-all} name filename current_remote expected cert_exp target fetch=${DOWNLOAD_FILE:-$1}
     filename=${file##*/}
     name=${filename%.ovpn}
     ok "$title"
     hr
     current_remote=$(grep -m1 '^remote ' "$file" || true)
-    kv File "$file"
+    kv File "$fetch"
     if [[ -n $current_remote ]]; then
         kv Server "$(awk '{print $2 ":" $3 "/UDP"}' <<<"$current_remote")"
     else
@@ -514,17 +518,17 @@ download_panel() {
         target=$DOWNLOAD_SSH_USER@$DOWNLOAD_SSH_HOST
         if [[ $only == all || $only == windows ]]; then
             say '  Windows (PowerShell):'
-            printf 'scp -P %s %s:%s "$env:USERPROFILE\\Downloads\\%s"\n' "$DOWNLOAD_SSH_PORT" "$target" "$file" "$filename" || true
+            printf 'scp -P %s %s:%s "$env:USERPROFILE\\Downloads\\%s"\n' "$DOWNLOAD_SSH_PORT" "$target" "$fetch" "$filename" || true
             say
         fi
         if [[ $only == all || $only == unix ]]; then
             say '  macOS / Linux:'
-            printf 'scp -P %s %s:%s ~/Downloads/\n' "$DOWNLOAD_SSH_PORT" "$target" "$file" || true
+            printf 'scp -P %s %s:%s ~/Downloads/\n' "$DOWNLOAD_SSH_PORT" "$target" "$fetch" || true
             say
         fi
         if [[ $only == all || $only == sftp ]]; then
             say '  WinSCP / FileZilla (SFTP):'
-            printf 'sftp://%s:%s%s\n' "$target" "$DOWNLOAD_SSH_PORT" "$file" || true
+            printf 'sftp://%s:%s%s\n' "$target" "$DOWNLOAD_SSH_PORT" "$fetch" || true
             say
         fi
     fi
@@ -538,6 +542,7 @@ offer_delete_copy() {
     if confirm_choice 'Finished downloading? The server copy can be deleted now.' 'Keep it and return to the menu' 'Delete the server copy' danger; then
         ca_lock || return 1
         rm -f -- "$file"
+        if [[ -n $DOWNLOAD_FILE ]]; then rm -f -- "$DOWNLOAD_FILE"; fi
         ca_unlock
         ok "Server copy deleted: $file"
         audit "profile deleted from server: $file"
@@ -551,33 +556,33 @@ set_domain() {
     old=$(domain)
     kv Current "${old:-not set}"
     say
-    info 'Only NEW or re-exported .ovpn files use the hostname.'
+    info 'Only new or shared-again .ovpn files use this address.'
     info 'Use a DNS-only record (no Cloudflare orange-cloud proxy) for this UDP service.'
     say
     prompt_valid 'New hostname or IP, e.g. vpn.example.com (Enter = cancel): ' valid_endpoint \
         'Enter a hostname such as vpn.example.com, or an IPv4 address such as 203.0.113.10.' || return 0
     value=${REPLY,,}
-    [[ $value != "$old" ]] || { info 'Same as the current hostname; nothing changed.'; return 0; }
+    [[ $value != "$old" ]] || { info 'Same as the current address; nothing changed.'; return 0; }
     if command -v getent >/dev/null; then
         resolved=$(getent ahostsv4 "$value" 2>/dev/null | awk 'NR==1 {print $1}' || true)
         if [[ -z $resolved ]]; then
-            warn 'This hostname does not resolve to an IPv4 address yet. Check the DNS record before clients use it.'
+            warn 'This name does not resolve to an IPv4 address yet. Check the DNS record before clients use it.'
         elif valid_ipv4 "$DOWNLOAD_SSH_HOST" && [[ $resolved != "$DOWNLOAD_SSH_HOST" ]]; then
             warn "It resolves to $resolved, but this VPS is $DOWNLOAD_SSH_HOST. Make sure that is intentional."
         else
             ok "Resolves to $resolved."
         fi
     fi
-    confirm_choice "Save $value as the VPN hostname?" 'No, keep the current one' "Save $value" normal || { cancelled; return 0; }
+    confirm_choice "Save $value as the server address?" 'No, keep the current one' "Save $value" normal || { cancelled; return 0; }
     ca_lock || return 1
     tmp=$(mktemp "$CONFIG_DIR/.domain.XXXXXXXX") || return 1
     darban_tmp_register "$tmp"
     if ! printf '%s\n' "$value" >"$tmp" || ! chmod 600 "$tmp" || ! mv -f -- "$tmp" "$DOMAIN_FILE"; then
-        fail 'Could not save the hostname.'; return 1
+        fail 'Could not save the address.'; return 1
     fi
-    audit "VPN hostname changed: ${old:-unset} -> $value"
+    audit "server address changed: ${old:-unset} -> $value"
     ok 'Saved.'
-    info 'Profiles downloaded earlier still use the old hostname; share them again (menu 4).'
+    info 'Profiles downloaded earlier still use the old address; share them again (menu 4).'
 }
 list_clients() {
     local cn status expiry serial e now label rank days name_w=6 out line cell color profile shown reason pending
@@ -701,13 +706,21 @@ confirm_name_reuse() {
     confirm_choice "Issue a new certificate for $name with those settings?" 'No, choose another name' 'Yes, issue it' caution "$name"
 }
 create_client() {
-    local name similar reason reused=0 rc=0
+    # create_client [suggested name]: with a suggestion, Enter takes it; without one, Enter cancels.
+    local suggested=${1:-} name similar reason reused=0 rc=0
+    local hint='Use 1-64 letters, digits, _ or -, starting with a letter or digit. It cannot be "server" or only digits.'
     profile_preconditions || return 1
-    info 'Allowed: letters, digits, _ and - (max 64), e.g. ali-laptop.'
+    info 'A name for this person or device, such as ali-phone. Letters, digits, _ and - only.'
+    if [[ -n $suggested ]]; then info "Press Enter to use $suggested, or type a name and press Enter."; fi
     say
     while :; do
-        prompt_valid 'New client name (Enter = cancel): ' valid_name \
-            'Use 1-64 letters, digits, _ or -, starting with a letter or digit. It cannot be "server" or only digits.' || return 0
+        if [[ -n $suggested ]]; then
+            ask "Client name [$suggested]: " || { cancelled; return 0; }
+            REPLY=${REPLY:-$suggested}
+            if ! valid_name "$REPLY"; then warn "$hint"; continue; fi
+        else
+            prompt_valid 'New client name (Enter = cancel): ' valid_name "$hint" || return 0
+        fi
         name=$REPLY
         reused=0
         if name_taken "$name"; then
@@ -753,7 +766,7 @@ create_client() {
     ok "Client \"$name\" created and verified"
     say
     share_client "$name"
-    pause
+    if ! { (( SHARED )) && wait_for_connection "$name"; }; then pause; fi
     no_pause
 }
 # ---------- sharing ----------
@@ -766,6 +779,7 @@ share_profile() {
     audit "profile rebuilt: $PICKED"
     clear_screen
     share_client "$PICKED"
+    if (( SHARED )) && wait_for_connection "$PICKED"; then no_pause; fi
 }
 share_client() {
     # share_client <name>: asks how the profile travels and shows only that method.
@@ -780,6 +794,7 @@ share_client() {
         info "Kept on the server: $OUT_DIR/$name.ovpn. Share it from menu 4, or delete it from menu 6."
         return 0
     fi
+    SHARED=1
     say
     choose_profile_password
     if [[ -n $PROFILE_PASSWORD ]]; then
@@ -806,10 +821,27 @@ choose_profile_password() {
         (( ${#PROFILE_PASSWORD} >= 16 )) || { fail 'Could not create a password.'; return 1; }
     fi
 }
+prepare_download_copy() {
+    # Profiles live under /root, which only root can read. Another SSH user gets a private copy in their home.
+    local file=$1 home
+    DOWNLOAD_FILE=''
+    [[ $DOWNLOAD_SSH_USER != root ]] || return 0
+    home=$(getent passwd "$DOWNLOAD_SSH_USER" 2>/dev/null | cut -d: -f6) || home=''
+    if [[ -z $home || ! -d $home ]]; then
+        warn "$DOWNLOAD_SSH_USER has no home directory here, so it cannot read $file."
+        return 0
+    fi
+    if install -o "$DOWNLOAD_SSH_USER" -m 600 "$file" "$home/${file##*/}"; then
+        DOWNLOAD_FILE=$home/${file##*/}
+    else
+        warn "Could not make a copy for $DOWNLOAD_SSH_USER, which cannot read $file."
+    fi
+}
 share_by_download() {
     local name=$1 only
     choose_one 'Where will you download it?' 'Windows (PowerShell)' 'macOS or Linux' 'WinSCP or FileZilla (SFTP)' || CHOSEN=1
     case $CHOSEN in 1) only=windows ;; 2) only=unix ;; *) only=sftp ;; esac
+    prepare_download_copy "$OUT_DIR/$name.ovpn"
     say
     download_panel "$OUT_DIR/$name.ovpn" "Profile for \"$name\" rebuilt" "$only"
     offer_delete_copy "$OUT_DIR/$name.ovpn"
@@ -904,7 +936,7 @@ share_by_link() {
     local name=$1 want_qr=$2 host minutes label token key now expires url temp
     command -v python3 >/dev/null || { fail 'python3 is needed for temporary links. Install it: apt install python3'; return 1; }
     host=$(domain)
-    [[ -n $host ]] && valid_endpoint "$host" || { warn "Set the VPN hostname first: Settings $S_CRUMB 1."; return 1; }
+    [[ -n $host ]] && valid_endpoint "$host" || { warn "Set the server address first: Settings $S_CRUMB 1."; return 1; }
     choose_one 'How long should the link work?' '1 hour' '15 minutes' '24 hours' || CHOSEN=1
     case $CHOSEN in
         2) minutes=15 label='15 minutes' ;;
@@ -948,8 +980,13 @@ share_by_link() {
     if [[ $want_qr == yes ]]; then show_qr "$url"; fi
     warn "TCP $LINK_PORT must be open in your provider firewall."
     if ! link_cert_is_trusted; then
-        warn 'The certificate is self-signed: the browser shows a warning, and importing directly into the app may not work; use the download button.'
+        warn 'This server has no trusted certificate, so the browser shows a warning for this link, and importing directly into the app may not work; use the download button.'
         info "Certificate fingerprint: $(openssl x509 -in "$LINK_CERT" -noout -fingerprint -sha256 | sed 's/^.*=//')"
+        say
+        say 'Send this note with the link:'
+        say 'Your browser may warn that this connection is not private. That is expected for this link. Choose Advanced, then Continue.'
+        say 'ممکن است مرورگر هشدار بدهد که این اتصال خصوصی نیست. برای این لینک طبیعی است. Advanced و بعد Continue را بزن.'
+        say
     fi
     info 'Anyone with this link can get this profile. If the user finds it already used, revoke the client and issue a new one.'
     hr
@@ -1033,10 +1070,10 @@ run_easyrsa() {
     rm -f -- "$log"
     return "$rc"
 }
-mgmt_kill_client() {
-    # Disconnect one CN through a password-less management interface on localhost TCP or a
-    # unix socket. Returns 0 = killed, 3 = no such session, 2 = no usable interface, 1 = failed.
-    local name=$1 spec addr port extra reply
+mgmt_send() {
+    # mgmt_send <command>: prints the reply of a password-less management interface on a unix socket
+    # or localhost TCP. Returns 2 = no usable interface, 1 = failed.
+    local command=$1 spec addr port extra
     spec=$(awk '$1=="management" {n++; s=$2 "\t" $3 "\t" $4} END {if(n==1) print s}' "$DARBAN_SERVER_CONF")
     [[ -n $spec ]] || return 2
     IFS=$'\t' read -r addr port extra <<<"$spec"
@@ -1044,11 +1081,61 @@ mgmt_kill_client() {
     if [[ $port == unix ]]; then
         addr=$(darban_conf_path "$addr")
         command -v socat >/dev/null && [[ -S $addr ]] || return 2
-        reply=$(printf 'kill %s\nquit\n' "$name" | timeout 10 socat -t 2 - "UNIX-CONNECT:$addr" 2>/dev/null) || return 1
+        printf '%s\nquit\n' "$command" | timeout 10 socat -t 2 - "UNIX-CONNECT:$addr" 2>/dev/null || return 1
     else
         [[ $addr == 127.0.0.1 || $addr == localhost || $addr == ::1 ]] && [[ $port =~ ^[0-9]+$ ]] || return 2
-        reply=$(timeout 10 bash -c 'exec 3<>"/dev/tcp/$1/$2" && printf "kill %s\nquit\n" "$3" >&3 && cat <&3' _ "$addr" "$port" "$name" 2>/dev/null) || return 1
+        timeout 10 bash -c 'exec 3<>"/dev/tcp/$1/$2" && printf "%s\nquit\n" "$3" >&3 && cat <&3' _ "$addr" "$port" "$command" 2>/dev/null || return 1
     fi
+}
+connected_rows() {
+    # name<TAB>address<TAB>connected since, one line per connected client. Fails when the interface cannot answer.
+    local reply
+    reply=$(mgmt_send 'status 3') || return 1
+    awk -F '\t' '$1=="CLIENT_LIST" && $2!="" && $2!="UNDEF" {a=$3; sub(/:[0-9]+$/,"",a); print $2 "\t" a "\t" $8}' <<<"$reply"
+}
+connected_clients() {
+    local rows name address since
+    if ! mgmt_available; then
+        info "Not available: this needs a local management interface in server.conf, and socat."
+        return 0
+    fi
+    rows=$(connected_rows) || { fail 'The OpenVPN management interface did not answer.'; return 1; }
+    if [[ -z $rows ]]; then info 'No client is connected right now.'; return 0; fi
+    printf '  %s%-24s %-18s %s%s\n' "$C_BOLD" CLIENT ADDRESS SINCE "$C_RESET" || true
+    while IFS=$'\t' read -r name address since; do
+        printf '  %-24s %-18s %s\n' "$(safe_text "$name")" "$(safe_text "$address")" "$(safe_text "$since")" || true
+    done <<<"$rows"
+}
+wait_for_connection() {
+    # The only proof of the whole path, including the provider's firewall, which nothing here can see.
+    # Returns 1 when it cannot help, so the caller pauses instead.
+    local name=$1 attempt rows row address key port
+    (( UI_TTY )) && mgmt_available || return 1
+    port=$(server_port 2>/dev/null || printf '?')
+    say
+    info "Waiting for $name to connect, to prove the VPN works. Press Enter to stop waiting."
+    for (( attempt = 0; attempt < 200; attempt++ )); do
+        rows=$(connected_rows 2>/dev/null) || rows=''
+        row=$(awk -F '\t' -v n="$name" '$1==n {print; exit}' <<<"$rows")
+        if [[ -n $row ]]; then
+            IFS=$'\t' read -r _ address _ <<<"$row"
+            ok "$name is connected from $(safe_text "$address"). The VPN works."
+            pause
+            return 0
+        fi
+        if IFS= read -r -t 3 key; then
+            info 'Stopped waiting. Later, check: Maintenance › Connected now.'
+            return 0
+        fi
+    done
+    warn "$name did not connect in 10 minutes. Check that UDP $port is open in your server provider's firewall."
+    pause
+}
+mgmt_kill_client() {
+    # Disconnect one CN. Returns 0 = killed, 3 = no such session, 2 = no usable interface, 1 = failed.
+    local name=$1 reply rc=0
+    reply=$(mgmt_send "kill $name") || rc=$?
+    (( rc == 0 )) || return "$rc"
     [[ $reply == *"SUCCESS: common name '$name' found"* ]] && return 0
     [[ $reply == *"ERROR: common name '$name' not found"* ]] && return 3
     printf '%s\n' "$reply" >&2 || true
@@ -1577,7 +1664,7 @@ set_download_access() {
         if valid_ssh_user "$user"; then break; fi
         warn 'Enter a valid Linux user name.'; user=$DOWNLOAD_SSH_USER
     done
-    if [[ $user != root ]]; then warn "$OUT_DIR is readable by root only, so $user also needs access to it."; fi
+    if [[ $user != root ]]; then info "$OUT_DIR is readable by root only, so $user gets a private copy of a profile when it is shared."; fi
     DOWNLOAD_SSH_HOST=$host DOWNLOAD_SSH_PORT=$port DOWNLOAD_SSH_USER=$user
     save_config || { fail 'Could not save the settings.'; return 1; }
     audit "download access changed: $user@$host:$port"
@@ -1909,15 +1996,25 @@ health() {
         0) check bad 'IPv4 forwarding disabled: VPN clients have no internet access' ;;
         *) check info 'IPv4 forwarding: unknown' ;;
     esac
+    # ufw can be turned on long after the setup, and then it quietly blocks the VPN.
+    if [[ -n ${port:-} ]] && command -v ufw >/dev/null && value=$(ufw status 2>/dev/null) && [[ $value == *'Status: active'* ]]; then
+        if ! grep -Eq "^$port(/udp)?[[:space:]]" <<<"$value"; then
+            check bad "ufw is active and blocks UDP $port $S_ARROW sudo ufw allow $port/udp"
+        elif ! grep -q 'tun0' <<<"$value"; then
+            check bad "ufw is active and blocks forwarding from the VPN $S_ARROW sudo ufw route allow in on tun0 out on $(ip -4 route show default 2>/dev/null | awk '{for (i=1; i<NF; i++) if ($i=="dev") {print $(i+1); exit}}')"
+        else
+            check ok 'ufw allows the VPN'
+        fi
+    fi
     if nft list table ip darban >/dev/null 2>&1 || nft list table ip mzx_openvpn >/dev/null 2>&1; then check ok 'NAT table for the VPN present'; else check info 'NAT table of this tool not found; NAT may be managed elsewhere'; fi
 
     group 'Profiles & downloads'
     host=$(domain)
     if valid_domain "$host"; then
         resolved=$(getent ahostsv4 "$host" 2>/dev/null | awk 'NR==1 {print $1}' || true)
-        if [[ -n $resolved ]]; then check ok "VPN hostname $host $S_ARROW $resolved"; else check warn "VPN hostname $host does not resolve to IPv4"; fi
+        if [[ -n $resolved ]]; then check ok "Server address $host $S_ARROW $resolved"; else check warn "Server address $host does not resolve to IPv4"; fi
     else
-        check bad "VPN hostname not set $S_ARROW Settings $S_CRUMB 1"
+        check bad "Server address not set $S_ARROW Settings $S_CRUMB 1"
     fi
     if [[ -n $DOWNLOAD_SSH_HOST ]]; then check ok "Download endpoint $DOWNLOAD_SSH_USER@$DOWNLOAD_SSH_HOST:$DOWNLOAD_SSH_PORT"; fi
     for issue in "${CONFIG_ISSUES[@]}"; do check warn "$issue"; done
@@ -1945,13 +2042,13 @@ status_block() {
     if valid_domain "$host"; then
         endpoint="$host:$port/UDP"
     else
-        endpoint="${C_YELLOW}hostname not set $S_ARROW Settings $S_CRUMB 1$C_RESET (port $port/UDP)"
+        endpoint="${C_YELLOW}address not set $S_ARROW Settings $S_CRUMB 1$C_RESET (port $port/UDP)"
     fi
     kv Server "$state $S_SEP $endpoint"
     if { darban_crl_configured && darban_verify_crl "$DARBAN_CRL"; } >/dev/null 2>&1 && e=$(darban_crl_expiry_epoch "$DARBAN_CRL"); then
-        kv CRL "$C_GREEN$S_OK$C_RESET valid $S_SEP $(days_until "$e") days left"
+        kv Blocklist "$C_GREEN$S_OK$C_RESET valid $S_SEP $(days_until "$e") days left"
     else
-        kv CRL "$C_RED$S_BAD problem$C_RESET $S_ARROW details: Maintenance $S_CRUMB 1, repair: Maintenance $S_CRUMB 2"
+        kv Blocklist "$C_RED$S_BAD problem$C_RESET $S_ARROW details: Maintenance $S_CRUMB 1, repair: Maintenance $S_CRUMB 2"
     fi
     pending=$(revocation_pending_names 2>/dev/null | join_lines) || pending=''
     leftovers=$(revoked_with_profile 2>/dev/null | join_lines) || leftovers=''
@@ -1959,6 +2056,7 @@ status_block() {
     clients="$valid valid $S_SEP $revoked revoked"
     if (( expired > 0 )); then clients+=" $S_SEP $expired expired"; fi
     if (( soon > 0 )); then clients+=" $S_SEP $C_YELLOW$soon expiring soon$C_RESET"; fi
+    if mgmt_available && e=$(connected_rows 2>/dev/null) && [[ -n $e ]]; then clients+=" $S_SEP $(wc -l <<<"$e") connected"; fi
     kv Clients "$clients"
     # Alerts live in the header so clearing the screen can never hide them.
     {
@@ -2004,7 +2102,7 @@ draw_settings() {
     port=$(server_port 2>/dev/null || printf '?')
     clear_screen
     title_bar Settings
-    menu_item 1 "$(printf '%-24s %s' 'VPN hostname' "${host:-not set}")"
+    menu_item 1 "$(printf '%-24s %s' 'Server address' "${host:-not set}")"
     menu_item 2 "$(printf '%-24s %s' 'OpenVPN UDP port' "$port")"
     menu_item 3 'Advanced'
     menu_item 0 'Back'
@@ -2064,7 +2162,7 @@ settings_menu() {
         redraw=1
         ask 'Choose [0-3, Enter = back]: ' || return 0
         case $REPLY in
-            1) menu_action 'Change VPN hostname' set_domain ;;
+            1) menu_action 'Change server address' set_domain ;;
             2) menu_action 'Change OpenVPN UDP port' change_port ;;
             3) advanced_menu ;;
             0|'') return 0 ;;
@@ -2078,6 +2176,7 @@ draw_maintenance() {
     menu_item 1 'Diagnostics (read-only)'
     menu_item 2 'Repair CRL / finish a revocation'
     menu_item 3 'Restart OpenVPN'
+    menu_item 4 'Connected now'
     menu_item 0 'Back'
     hr
 }
@@ -2086,13 +2185,14 @@ maintenance_menu() {
     while :; do
         if (( redraw )); then draw_maintenance || true; fi
         redraw=1
-        ask 'Choose [0-3, Enter = back]: ' || return 0
+        ask 'Choose [0-4, Enter = back]: ' || return 0
         case $REPLY in
             1) menu_action 'Diagnostics' health ;;
             2) menu_action 'Repair CRL' repair_crl ;;
             3) menu_action 'Restart OpenVPN' restart_openvpn ;;
+            4) menu_action 'Connected now' connected_clients ;;
             0|'') return 0 ;;
-            *) warn "Unknown option \"$REPLY\". Enter a number from 0 to 3."; redraw=0 ;;
+            *) warn "Unknown option \"$REPLY\". Enter a number from 0 to 4."; redraw=0 ;;
         esac
     done
 }
@@ -2168,15 +2268,50 @@ recovery_menu() {
         esac
     done
 }
+needs_reboot() {
+    # A kernel was added for the ovpn module, and the system is not running one with it yet.
+    grep -q '^kernel ' "$CONFIG_DIR/.server-setup-started" 2>/dev/null && ! modinfo -k "$(uname -r)" ovpn >/dev/null 2>&1
+}
+next_steps() {
+    local port
+    port=$(server_port 2>/dev/null || printf '?')
+    say
+    section 'Your VPN server is ready'
+    kv Address "$(domain)"
+    kv Port "$port/UDP"
+    say
+    printf '%sDo this now:%s\n' "$C_BOLD" "$C_RESET" || true
+    bullet "Open UDP $port in your server provider's firewall. This tool cannot see or change it."
+    if needs_reboot; then
+        say
+        printf '%sLater:%s\n' "$C_BOLD" "$C_RESET" || true
+        bullet 'Reboot once when convenient, for a faster VPN: sudo reboot'
+    fi
+    if iptables -S FORWARD 2>/dev/null | grep -q '^-P FORWARD DROP' && ! command -v ufw >/dev/null; then
+        say
+        warn 'The iptables FORWARD policy is DROP, for example because of Docker. Clients may connect but have no internet until it allows tun0.'
+    fi
+    say
+}
+welcome() {
+    # The end of a new setup: what is left to do, and one Enter to the first client.
+    next_steps
+    if (( ! UI_TTY )); then say 'Next, create a client: sudo darban'; return 0; fi
+    if confirm_choice 'Create your first client now?' 'Not now' 'Create a client' normal '' 2; then
+        say
+        run_action create_client client1
+    fi
+    main_menu
+}
 first_run() {
     # Profiles cannot be built without a hostname, so guide a fresh install there first.
     valid_domain "$(domain)" && return 0
     (( UI_TTY )) || return 0
     clear_screen
     title_bar
-    info 'Welcome! The VPN hostname is not set yet; client profiles need it.'
-    if confirm_choice 'Set the VPN hostname now?' 'Not now' 'Set it now' normal '' 2; then
-        menu_action 'Change VPN hostname' set_domain
+    info 'Welcome! The server address is not set yet; client profiles need it.'
+    if confirm_choice 'Set the server address now?' 'Not now' 'Set it now' normal '' 2; then
+        menu_action 'Change server address' set_domain
     fi
 }
 main_menu() {
@@ -2215,7 +2350,9 @@ Commands:
   list       print the client table; --all includes revoked clients
   status     print the diagnostics checklist
   repair-crl publish a fresh CRL and finish an interrupted revocation
+  connected  list the clients connected right now
   update     check for a new release and install it
+  welcome    show the next steps of a new server
   about      show the version, project address and contact
   uninstall  remove this tool; OpenVPN, the PKI and the CRL are kept
   remove-all remove this tool, OpenVPN, the CA and all profiles (only after server-setup)
@@ -2240,7 +2377,7 @@ main() {
             -h|--help|help) usage; exit 0 ;;
             -V|--version|version) printf '%s\n' "$DARBAN_VERSION"; exit 0 ;;
             about) about_text; exit 0 ;;
-            list|status|repair-crl|update|uninstall|remove-all) [[ -z $cmd ]] || { usage >&2; exit 2; }; cmd=$1 ;;
+            list|status|repair-crl|connected|update|uninstall|remove-all|welcome) [[ -z $cmd ]] || { usage >&2; exit 2; }; cmd=$1 ;;
             *) printf 'Unknown argument: %s\n\n' "$1" >&2; usage >&2; exit 2 ;;
         esac
         shift
@@ -2249,7 +2386,7 @@ main() {
     ui_init
     setup
     # Diagnostics, updates and removal must work on a broken server; these two cannot.
-    if [[ -n $SERVER_PROBLEM ]] && [[ $cmd == list || $cmd == repair-crl ]]; then
+    if [[ -n $SERVER_PROBLEM ]] && [[ $cmd == list || $cmd == repair-crl || $cmd == connected || $cmd == welcome ]]; then
         fail "$SERVER_PROBLEM"
         info 'Details: sudo darban status'
         exit 1
@@ -2258,6 +2395,8 @@ main() {
         list) run_action list_clients; exit "$ACTION_RC" ;;
         status) run_action health; exit "$ACTION_RC" ;;
         repair-crl) run_action repair_crl; exit "$ACTION_RC" ;;
+        connected) run_action connected_clients; exit "$ACTION_RC" ;;
+        welcome) welcome; exit 0 ;;
         update) run_action update_tool; exit "$ACTION_RC" ;;
         uninstall) run_action uninstall_tool; exit "$ACTION_RC" ;;
         remove-all) run_action remove_everything; exit "$ACTION_RC" ;;

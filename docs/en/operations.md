@@ -60,7 +60,7 @@ The previous version is kept. **Setup › Restore previous version** goes back t
 Pre-releases are never offered automatically. To install one:
 
 ```bash
-sudo bash get.sh --version v1.0.0-rc.1
+curl -fsSL https://github.com/MohZeh/darban-ovpn/releases/download/v1.0.0-rc.1/get.sh | sudo bash
 ```
 
 ## Removing

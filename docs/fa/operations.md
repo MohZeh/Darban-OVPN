@@ -80,7 +80,7 @@ sudo darban-crl-maintain --renew --allow-crl-shrink
 </div>
 
 ```bash
-sudo bash get.sh --version v1.0.0-rc.1
+curl -fsSL https://github.com/MohZeh/darban-ovpn/releases/download/v1.0.0-rc.1/get.sh | sudo bash
 ```
 
 <div dir="rtl">

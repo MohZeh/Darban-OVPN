@@ -105,7 +105,7 @@ class Manager:
         self.press('3', ENTER)
         assert self.wait_for('Number or name'), self.seen[-400:]
         self.press('alice', ENTER)
-        assert self.wait_for('Esc to cancel'), self.seen[-400:]
+        assert self.wait_for('Esc: Cancel'), self.seen[-400:]
         self.drain()
 
 
@@ -218,9 +218,19 @@ def typed_ahead_keys_do_not_answer(m):
     assert m.wait_for('Number or name')
     # 2 and Enter arrive together with the name, before the question has been shown.
     os.write(m.master, ('alice' + ENTER + '2' + ENTER).encode())
-    m.wait_for('Esc to cancel')
+    m.wait_for('Esc: Cancel')
     m.drain(1.0)
     check('type-ahead does not revoke', m.index_state('alice') == 'V', m.seen)
+
+
+def hint_says_what_enter_does(m):
+    m.to_revoke_prompt()
+    check('the hint names the default', 'Enter: No, keep this client' in plain(m.seen), m.seen[-300:])
+    check('the hint says how to choose otherwise', 'Another option: press' in plain(m.seen), m.seen[-300:])
+    m.press(DOWN)
+    check('the hint follows the selection', m.wait_for('Enter: Revoke alice'), m.seen[-300:])
+    m.press(UP)
+    check('and back again', m.wait_for('Enter: No, keep this client'), m.seen[-300:])
 
 
 def colors_follow_the_risk(m):
@@ -241,16 +251,16 @@ def rows_redraw_in_place(m):
     m.press(DOWN, UP, DOWN)
     m.drain()
     screen = m.seen[before:]
-    check('each key redraws in place', screen.count('\x1b[3A') >= 3, repr(screen))
+    check('each key redraws in place', screen.count('\x1b[5A') >= 3, repr(screen))
     check('nothing else is printed while moving', 'Revoke which' not in screen, repr(screen))
 
 
 def restart_needs_two_key_presses(m):
     assert m.wait_for('Choose [0-9]')
     m.press('8', ENTER)
-    assert m.wait_for('Choose [0-3')
+    assert m.wait_for('Choose [0-4')
     m.press('3', ENTER)
-    assert m.wait_for('Esc to cancel')
+    assert m.wait_for('Esc: Cancel')
     check('the option is yellow', '\x1b[33mRestart OpenVPN' in m.seen, repr(m.seen[-400:]))
     m.drain()
     m.press(ENTER)
@@ -258,9 +268,9 @@ def restart_needs_two_key_presses(m):
     with open(m.env_dir + '/stub.log') as handle:
         check('no restart was issued', 'systemctl restart' not in handle.read())
     m.press(ENTER)
-    assert m.wait_for('Choose [0-3')
+    assert m.wait_for('Choose [0-4')
     m.press('3', ENTER)
-    assert m.wait_for('Esc to cancel')
+    assert m.wait_for('Esc: Cancel')
     m.drain()
     m.press(DOWN, ENTER)
     check('Down then Enter restarts', m.wait_for('listening on UDP 1194'), m.seen)
@@ -270,7 +280,7 @@ def revoke_alice(m):
     m.to_revoke_prompt()
     m.press(DOWN, ENTER)
     assert m.wait_for('Marked revoked')
-    assert m.wait_for('Esc to cancel')
+    assert m.wait_for('Esc: Cancel')
     m.drain()
     m.press(ENTER)
     assert m.wait_for('alice is revoked.')
@@ -281,7 +291,7 @@ def revoke_alice(m):
 def list_offers_revoked_history(m):
     revoke_alice(m)
     m.press('1', ENTER)
-    assert m.wait_for('Esc to cancel')
+    assert m.wait_for('Esc: Cancel')
     check('the question is asked', 'Show revoked clients too?' in plain(m.seen), m.seen)
     check('the first view hides the revoked client', 'REVOKED' not in plain(m.seen), m.seen)
     m.drain()
@@ -301,13 +311,13 @@ def name_reuse_asks_when_server_settings_exist(m):
     m.press('2', ENTER)
     assert m.wait_for('New client name')
     m.press('alice', ENTER)
-    assert m.wait_for('Esc to cancel')
+    assert m.wait_for('Esc: Cancel')
     m.drain()
     m.press(ENTER)
     check('Enter alone goes back to the name', m.wait_for('New client name'), m.seen)
     check('nothing was issued', m.index_state('alice') == 'R')
     m.press('alice', ENTER)
-    assert m.wait_for('Esc to cancel')
+    assert m.wait_for('Esc: Cancel')
     m.drain()
     m.press(DOWN, ENTER)
     check('Down then Enter issues the new certificate', m.wait_for('created and verified'), m.seen)
@@ -319,16 +329,16 @@ def share_chooser_moves_with_keys(m):
     m.press('4', ENTER)
     assert m.wait_for('Number or name')
     m.press('alice', ENTER)
-    assert m.wait_for('Esc to cancel')
+    assert m.wait_for('Esc: Cancel')
     screen = plain(m.seen)
     check('it asks how to share', 'How will alice get this profile?' in screen, screen)
     m.drain()
     m.press(DOWN, DOWN, ENTER)
-    assert m.wait_for('Esc to cancel')
+    assert m.wait_for('Esc: Cancel')
     check('it asks about a password', 'Lock the private key' in plain(m.seen), m.seen)
     m.drain()
     m.press(ENTER)
-    assert m.wait_for('Esc to cancel')
+    assert m.wait_for('Esc: Cancel')
     check('it asks where to download', 'Where will you download it?' in plain(m.seen), m.seen)
     m.drain()
     m.press('2', ENTER)
@@ -341,7 +351,7 @@ def share_esc_means_later(m):
     m.press('4', ENTER)
     assert m.wait_for('Number or name')
     m.press('alice', ENTER)
-    assert m.wait_for('Esc to cancel')
+    assert m.wait_for('Esc: Cancel')
     m.drain()
     time.sleep(0.2)
     m.press(ESC)
@@ -361,7 +371,7 @@ for function, options in [
     (default_is_no, {}), (down_then_enter_revokes, {}), (digit_two_moves_only, {}), (persian_digit_works, {}),
     (up_returns_to_no, {}), (application_mode_arrows, {}), (esc_cancels, {}), (ctrl_c_cancels_and_restores, {}),
     (unknown_keys_ignored, {}), (typed_ahead_keys_do_not_answer, {}), (colors_follow_the_risk, {'colors': True}),
-    (rows_redraw_in_place, {}), (restart_needs_two_key_presses, {'colors': True}), (list_offers_revoked_history, {}),
+    (hint_says_what_enter_does, {}), (rows_redraw_in_place, {}), (restart_needs_two_key_presses, {'colors': True}), (list_offers_revoked_history, {}),
     (name_reuse_asks_when_server_settings_exist, {}),
     (share_chooser_moves_with_keys, {}), (share_esc_means_later, {}), (ctrl_c_at_main_menu_exits, {}),
 ]:
