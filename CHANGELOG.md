@@ -18,6 +18,8 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 - Remove everything never deletes the profile folder as a whole, and removing or revoking a profile also deletes the copy made for a non-root download user.
 - The Advanced menu no longer prints every shell variable.
 - Diagnostics report NAT that sends traffic out through an interface the server no longer has, or through another one than the default route, and a NAT rule without masquerade. An update moves NAT from a missing interface to the one of the default route.
+- A temporary link never lasts longer than its certificate; a longer time is asked again.
+- The installer says when it could not check a NAT file edited by hand, and setup and guides no longer tie the browser warning to a domain name.
 
 ## [1.0.0-beta.1] - 2026-11-07
 

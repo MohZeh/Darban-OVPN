@@ -45,7 +45,7 @@ For example, after a new phone or a changed server address:
 1. Press `3` **Revoke client (permanent)**, and choose the client.
 2. Press `2` to move to the revoke option, then Enter.
 
-The old profile stops working everywhere, and the current connection of that client ends. Other users are not affected. On a server this tool did not set up, ending one connection may not be possible: the tool then says so and asks whether to restart OpenVPN, which drops everyone for a few seconds. If you answer No, the open connection can last up to an hour. This cannot be undone, but you can later create a new client with the same name.
+The old profile stops working everywhere, and the current connection of that client ends. Other users are not affected. If ending that one connection is not possible, for example on a server this tool did not set up, the tool says so and asks whether to restart OpenVPN, which drops everyone for a few seconds. If you answer No, the open connection can last up to an hour. This cannot be undone, but you can later create a new client with the same name.
 
 ## Cancel a link that was not used
 

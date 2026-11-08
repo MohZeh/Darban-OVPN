@@ -44,7 +44,7 @@ curl -fsSL https://github.com/MohZeh/Darban-OVPN/releases/latest/download/get.sh
 
 **اگر ندیدی:**
 - `curl: command not found`: دستور `sudo apt update && sudo apt install -y curl` را اجرا کن و بعد دوباره دستور نصب را بزن.
-- `No stable release is published yet`: آدرس یک نسخه را از صفحهٔ [Releases](https://github.com/MohZeh/Darban-OVPN/releases) بردار. در دستور، به‌جای `latest/download` بنویس `download/vX.Y.Z-rc.N`.
+- `No stable release is published yet`: آدرس یک نسخه را از صفحهٔ [Releases](https://github.com/MohZeh/Darban-OVPN/releases) بردار. در دستور، به‌جای `latest/download` بنویس `download/` و بعد نام نسخه، مثلاً `download/v1.0.0-beta.1`.
 
 ## قدم ۴: به پرسش‌ها جواب بده
 
@@ -54,7 +54,7 @@ curl -fsSL https://github.com/MohZeh/Darban-OVPN/releases/latest/download/get.sh
 2. **VPN port:** Enter بزن.
 3. **Install this server?** روی **Install now** Enter بزن.
 
-تا پیش از جواب سوم، چیزی روی سرور تغییر نمی‌کند. برای دیدن برنامهٔ کامل، `2` را بزن و بعد روی **Show details** Enter بزن.
+تا پیش از جواب سوم چیزی نصب نمی‌شود؛ تا آن وقت ابزار فقط فهرست بسته‌ها را تازه می‌کند. برای دیدن برنامهٔ کامل، `2` را بزن و بعد روی **Show details** Enter بزن.
 
 **باید ببینی:** پنج مرحلهٔ کوتاه و بعد `Your VPN server is ready`.
 

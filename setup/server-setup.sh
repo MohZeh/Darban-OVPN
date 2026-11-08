@@ -155,7 +155,8 @@ choose_host() {
             say ' Example: 203.0.113.10 or vpn.example.com'
         fi
         say
-        say ' With a domain name, temporary links open without a browser warning.'
+        say ' With a domain name or a public IP, the tool can get a trusted certificate,'
+        say ' so temporary links open without a browser warning.'
         say
         while :; do
             ask "Server address${default:+ [$default]}: " || die 'Cancelled; nothing was changed.'

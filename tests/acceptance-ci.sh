@@ -308,6 +308,15 @@ grep -q "oifname \"$route_iface\" masquerade" /etc/darban/nat.nft
 darban status >/dev/null
 echo 'PASS: NAT through a missing interface is reported, and the installer moves it to the default route.'
 
+# A NAT file edited by hand is not repaired, but the installer says it did not check it.
+cp -a /etc/darban/nat.nft "$LOG/nat.kept"
+sed -i 's/ oifname "[^"]*"//' /etc/darban/nat.nft
+bash setup/install.sh 2>"$LOG/skip-install.log"
+grep -q 'NOTE: the NAT rules were not checked' "$LOG/skip-install.log"
+cp -a "$LOG/nat.kept" /etc/darban/nat.nft
+darban status >/dev/null
+echo 'PASS: a NAT file the installer cannot check is reported, not passed over.'
+
 # A real update and the way back. The new version is this one under another number.
 current=$(darban version)
 next=$(mktemp -d)
