@@ -4,6 +4,12 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## [Unreleased]
 
+### Changed
+- The install command is now `sudo bash -c 'curl -fsSL .../get.sh | bash'`, with options after `bash -s --`. The README, the guides and the hints in the tool use it.
+
+### Fixed
+- The install command no longer stops at the first question. With `curl ... | sudo bash`, as `v1.0.0-rc.1` and earlier showed it, sudo on Ubuntu 24.04 and 26.04 keeps the keys from the setup questions over SSH, as a normal user and as root. That form on a new server is now refused before anything is downloaded, with the command that works.
+
 ## [1.0.0-rc.1] - 2026-11-08
 
 Release candidate for `v1.0.0`, for testing on a server that is not in use.

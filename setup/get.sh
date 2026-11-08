@@ -1,9 +1,12 @@
 #!/usr/bin/env bash
 # Installs or updates Darban OVPN from a published release, after verifying it.
 #
-#   curl -fsSL https://github.com/MohZeh/Darban-OVPN/releases/latest/download/get.sh | sudo bash
-#   ... | sudo bash -s -- --version vX.Y.Z
-#   ... | sudo bash -s -- --yes --host vpn.example.com --port 1194
+#   sudo bash -c 'curl -fsSL https://github.com/MohZeh/Darban-OVPN/releases/latest/download/get.sh | bash'
+#   sudo bash -c 'curl ... | bash -s -- --version vX.Y.Z'
+#   sudo bash -c 'curl ... | bash -s -- --yes --host vpn.example.com --port 1194'
+#
+# curl runs inside sudo on purpose. With "curl ... | sudo bash", sudo reads the pipe and, on Ubuntu, runs the
+# command in a terminal of its own, so the keys pressed never reach the questions.
 #
 # All the work starts from the last line, so a partial download cannot run half of this script.
 # The checksum comes from the same release, so it catches a damaged download, not a compromised account.
@@ -22,6 +25,7 @@ tag=''
 base=''
 work=''
 setup_args=()
+given_args=()
 
 die() { printf 'ERROR: %s\n' "$*" >&2; exit 1; }
 valid_version() { [[ $1 =~ ^[0-9]+\.[0-9]+\.[0-9]+(-(alpha|beta|rc)\.[0-9]+)?$ ]]; }
@@ -65,7 +69,41 @@ run_server_setup() {
         # Started from a pipe: the questions must read the terminal, not the rest of the pipe.
         bash "$script" "${setup_args[@]}" </dev/tty
     else
-        die 'There is no terminal to answer the setup questions. Connect with a normal SSH session, or give the answers: curl ... | sudo bash -s -- --yes --host YOUR_ADDRESS --port 1194'
+        die "There is no terminal to answer the setup questions. Connect with a normal SSH session, or give the answers: sudo bash -c 'curl ... | bash -s -- --yes --host YOUR_ADDRESS --port 1194'"
+    fi
+}
+keys_cannot_reach_setup() {
+    # keys_cannot_reach_setup PROC PID: true when PID runs under "curl ... | sudo bash" and that sudo gave it a
+    # terminal of its own (use_pty, the Ubuntu default): sudo then reads the pipe and never passes on the keys,
+    # so the first question would wait forever. Without use_pty both share one terminal, and the keys arrive.
+    local proc=$1 pid=$2 top='' stat name own_tty='' top_tty=''
+    local -a fields
+    while [[ $pid =~ ^[0-9]+$ ]] && (( pid > 1 )); do
+        stat=$(cat "$proc/$pid/stat" 2>/dev/null) || return 1
+        read -r -a fields <<<"${stat##*) }"
+        [[ -n $own_tty ]] || own_tty=${fields[4]}
+        name=$(cat "$proc/$pid/comm" 2>/dev/null) || name=''
+        # The nearest sudo: with use_pty it runs as two processes, and the outer one holds the user's input.
+        if [[ $name == sudo || $name == sudo-rs || $name == sudo.ws ]]; then
+            top=$pid top_tty=${fields[4]}
+        elif [[ -n $top ]]; then
+            break
+        fi
+        pid=${fields[1]}
+    done
+    [[ -n $top && $(readlink "$proc/$top/fd/0" 2>/dev/null) == pipe:* && $top_tty != "$own_tty" ]]
+}
+right_command() {
+    # The form that works, with this copy's own address and the options it was given.
+    local url=https://github.com/$REPO/releases/latest/download/get.sh arg
+    if [[ -n $RELEASE_TAG ]]; then url=https://github.com/$REPO/releases/download/$RELEASE_TAG/get.sh; fi
+    for arg in "${given_args[@]}"; do
+        [[ $arg =~ ^[A-Za-z0-9._:/=-]+$ ]] || { printf "sudo bash -c 'curl -fsSL %s | bash -s -- OPTIONS'\n" "$url"; return 0; }
+    done
+    if (( ${#given_args[@]} )); then
+        printf "sudo bash -c 'curl -fsSL %s | bash -s -- %s'\n" "$url" "${given_args[*]}"
+    else
+        printf "sudo bash -c 'curl -fsSL %s | bash'\n" "$url"
     fi
 }
 welcome() {
@@ -82,6 +120,7 @@ welcome() {
 }
 main() {
     local requested='' version installed='' expected new_server=0
+    given_args=("$@")
     while (( $# )); do
         case $1 in
             --version) (( $# >= 2 )) || die "$USAGE"; requested=$2; shift 2 ;;
@@ -97,6 +136,11 @@ main() {
     for cmd in curl tar sha256sum mktemp grep sort; do
         command -v "$cmd" >/dev/null || die "Missing dependency: $cmd"
     done
+    # Before anything is downloaded: a new server asks questions, and this form could never take the answers.
+    if [[ ! -t 0 && " ${setup_args[*]} " != *' --yes '* ]] && needs_server_setup && keys_cannot_reach_setup /proc "$$"; then
+        printf 'ERROR: Started as "curl ... | sudo bash", sudo keeps the keys you press from the setup questions. Nothing was installed. Run this instead:\n\n  %s\n' "$(right_command)" >&2
+        exit 1
+    fi
     if [[ -n $tag ]]; then
         base=https://github.com/$REPO/releases/download/$tag
     else

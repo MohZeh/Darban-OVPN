@@ -37,6 +37,32 @@ in_terminal() {
     python3 tests/pty-drive.py --timeout "$seconds" "$LOG/$name.keys" -- "$@" | tee "$LOG/$name.log"
 }
 
+# The install command, typed by the runner's own user into an interactive shell, through the real sudo: the
+# form that cannot take answers is refused before any download, and the documented form gets past that check.
+# A version that does not exist stops the documented form at the download, before anything is installed.
+if [[ -n ${SUDO_USER:-} && $SUDO_USER != root ]]; then
+    keys=$(runuser -u "$SUDO_USER" -- mktemp -d)
+    cat > "$LOG/old-form.keys" <<'EOF'
+CHECK$ => cat setup/get.sh | sudo bash -s -- --version v0.0.0-rc.99\r
+CHECK$ => exit\r
+EOF
+    cat > "$LOG/new-form.keys" <<'EOF'
+CHECK$ => sudo bash -c 'cat setup/get.sh | bash -s -- --version v0.0.0-rc.99'\r
+CHECK$ => exit\r
+EOF
+    install -o "$SUDO_USER" -m 600 "$LOG/old-form.keys" "$LOG/new-form.keys" "$keys/"
+    for form in old-form new-form; do
+        runuser -u "$SUDO_USER" -- env PS1='CHECK$ ' python3 tests/pty-drive.py --timeout 60 "$keys/$form.keys" -- bash --norc --noprofile -i | tee "$LOG/$form.log" || true
+    done
+    grep -q 'sudo keeps the keys you press' "$LOG/old-form.log"
+    grep -qF "latest/download/get.sh | bash -s -- --version v0.0.0-rc.99'" "$LOG/old-form.log"
+    if grep -q 'Downloading' "$LOG/old-form.log"; then echo 'FAIL: the old form downloaded before it was refused.'; exit 1; fi
+    if grep -q 'sudo keeps the keys you press' "$LOG/new-form.log"; then echo 'FAIL: the documented form was refused.'; exit 1; fi
+    grep -q 'Downloading v0.0.0-rc.99' "$LOG/new-form.log"
+    rm -rf -- "$keys"
+    echo 'PASS: "curl ... | sudo bash" is refused at once; "sudo bash -c '"'"'curl ... | bash'"'"'" goes on.'
+fi
+
 # The two versions cover both firewall paths: ufw on and answering its question, and ufw off.
 USE_UFW=0
 if [[ $VERSION_ID == 26.04 ]]; then

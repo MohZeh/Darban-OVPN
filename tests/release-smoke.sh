@@ -10,17 +10,20 @@ earlier=${3:-}
 cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.."
 LOG=$(mktemp -d)
 url() { printf 'https://github.com/MohZeh/Darban-OVPN/releases/download/%s/get.sh' "$1"; }
-one_line() { printf 'curl -fsSL %s | sudo bash' "$(url "$1")"; }
+one_line() { printf "sudo bash -c 'curl -fsSL %s | bash'" "$(url "$1")"; }
+# Releases before v1.0.0-rc.2 documented "curl ... | sudo bash", which cannot take the answers on Ubuntu.
+# They are installed with the form that works, so an update from them can still be tested.
 in_terminal() {
-    # in_terminal <name> <shell command>: answers it from $LOG/<name>.keys in a real terminal.
-    python3 tests/pty-drive.py --timeout 600 "$LOG/$1.keys" -- bash -c "$2" | tee "$LOG/$1.log"
+    # in_terminal <name> <command>: types the command into an interactive shell, as a person does over SSH, and
+    # answers it from $LOG/<name>.keys. The shell then exits with the command's own status.
+    { printf 'SMOKE$ => %s\\r\n' "$2"; cat "$LOG/$1.keys"; printf 'SMOKE$ => exit\\r\n'; } > "$LOG/$1.script"
+    PS1='SMOKE$ ' python3 tests/pty-drive.py --timeout 600 "$LOG/$1.script" -- bash --norc --noprofile -i | tee "$LOG/$1.log"
 }
 new_install() {
     cat > "$LOG/new.keys" <<'EOF'
-Server address => 127.0.0.1\r
-VPN port [1194] => \r
+Server address [ => 127.0.0.1\r
+VPN port [ => \r
 Enter: Install now => \r
-Your VPN server is ready
 Enter: Create a client => 1\r
 Choose [0-9] => 0\r
 EOF
@@ -45,3 +48,8 @@ fi
 printf 'is already up to date\n' > "$LOG/again.keys"
 in_terminal again "$(one_line "$tag")"
 echo 'PASS: running it again changes nothing.'
+
+# The old form on a server that needs no questions: an update changes nothing, and nothing waits for keys.
+printf 'is already up to date\n' > "$LOG/old.keys"
+in_terminal old "curl -fsSL $(url "$tag") | sudo bash"
+echo 'PASS: the old form still works where nothing is asked.'
