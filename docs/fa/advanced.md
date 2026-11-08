@@ -22,6 +22,8 @@ sudo bash get.sh
 
 <div dir="rtl">
 
+دستور یک‌خطی عمداً `curl` را داخل `sudo` اجرا می‌کند. در شکل `curl ... | sudo bash`، sudo ورودی را از pipe می‌خواند و در اوبونتو دستور را در ترمینال جداگانهٔ خودش اجرا می‌کند؛ برای همین کلیدهایی که می‌زنی هیچ‌وقت به پرسش‌های نصب نمی‌رسند. `get.sh` روی سرور تازه این شکل را تشخیص می‌دهد و پیش از دانلود هر چیزی می‌ایستد.
+
 `get.sh` نسخه را دانلود و با `SHA256SUMS` مقایسه می‌کند و اگر یکی نباشند، چیزی اجرا نمی‌شود. هش از همان نسخه می‌آید، پس دانلود خراب را تشخیص می‌دهد، نه حساب هک‌شده را.
 
 ## نصب نسخهٔ مشخص
@@ -31,7 +33,7 @@ sudo bash get.sh
 </div>
 
 ```bash
-curl -fsSL https://github.com/MohZeh/Darban-OVPN/releases/download/v1.0.0-rc.1/get.sh | sudo bash
+sudo bash -c 'curl -fsSL https://github.com/MohZeh/Darban-OVPN/releases/download/v1.0.0-rc.1/get.sh | bash'
 ```
 
 <div dir="rtl">
@@ -41,7 +43,7 @@ curl -fsSL https://github.com/MohZeh/Darban-OVPN/releases/download/v1.0.0-rc.1/g
 </div>
 
 ```bash
-curl -fsSL https://github.com/MohZeh/Darban-OVPN/releases/download/v1.0.0-rc.1/get.sh | sudo bash -s -- --version v1.0.0-beta.1
+sudo bash -c 'curl -fsSL https://github.com/MohZeh/Darban-OVPN/releases/download/v1.0.0-rc.1/get.sh | bash -s -- --version v1.0.0-beta.1'
 ```
 
 <div dir="rtl">
@@ -51,7 +53,7 @@ curl -fsSL https://github.com/MohZeh/Darban-OVPN/releases/download/v1.0.0-rc.1/g
 </div>
 
 ```bash
-curl -fsSL https://github.com/MohZeh/Darban-OVPN/releases/download/v1.0.0-rc.1/get.sh | sudo bash -s -- --yes --host vpn.example.com --port 1194
+sudo bash -c 'curl -fsSL https://github.com/MohZeh/Darban-OVPN/releases/download/v1.0.0-rc.1/get.sh | bash -s -- --yes --host vpn.example.com --port 1194'
 ```
 
 <div dir="rtl">

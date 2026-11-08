@@ -16,6 +16,8 @@ curl -fsSL https://github.com/MohZeh/Darban-OVPN/releases/download/v1.0.0-rc.1/g
 sudo bash get.sh
 ```
 
+The one-line command runs `curl` inside `sudo` on purpose. In the form `curl ... | sudo bash`, sudo reads the pipe and, on Ubuntu, runs the command in a terminal of its own, so the keys you press never reach the setup questions. `get.sh` notices that form on a new server and stops before it downloads anything.
+
 `get.sh` downloads the release and checks it against `SHA256SUMS`. If they do not match, it runs nothing. The checksum comes from the same release, so it catches a damaged download, not a compromised account.
 
 ## Install a specific version
@@ -23,19 +25,19 @@ sudo bash get.sh
 Use the address of that release. It installs its own version:
 
 ```bash
-curl -fsSL https://github.com/MohZeh/Darban-OVPN/releases/download/v1.0.0-rc.1/get.sh | sudo bash
+sudo bash -c 'curl -fsSL https://github.com/MohZeh/Darban-OVPN/releases/download/v1.0.0-rc.1/get.sh | bash'
 ```
 
 To go back to an older version on an installed server, name it:
 
 ```bash
-curl -fsSL https://github.com/MohZeh/Darban-OVPN/releases/download/v1.0.0-rc.1/get.sh | sudo bash -s -- --version v1.0.0-beta.1
+sudo bash -c 'curl -fsSL https://github.com/MohZeh/Darban-OVPN/releases/download/v1.0.0-rc.1/get.sh | bash -s -- --version v1.0.0-beta.1'
 ```
 
 ## Install without questions
 
 ```bash
-curl -fsSL https://github.com/MohZeh/Darban-OVPN/releases/download/v1.0.0-rc.1/get.sh | sudo bash -s -- --yes --host vpn.example.com --port 1194
+sudo bash -c 'curl -fsSL https://github.com/MohZeh/Darban-OVPN/releases/download/v1.0.0-rc.1/get.sh | bash -s -- --yes --host vpn.example.com --port 1194'
 ```
 
 | Option | Meaning |

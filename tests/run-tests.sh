@@ -1547,11 +1547,69 @@ test_get_sh_survives_a_partial_download() {
     out=$(bash "$E/cut.sh" 2>&1 </dev/null)
     ok_if 'without the last line nothing runs' test ! -e "$MARKER"
     if grep -q '^curl' "$STUB_LOG"; then result 0 'without the last line nothing is downloaded'; else result 1 'without the last line nothing is downloaded'; fi
-    head -n 60 "$E/get.sh" > "$E/cut.sh"
+    # A few lines into main, so the cut always lands inside a function.
+    head -n "$(( $(grep -n '^main() {' "$E/get.sh" | cut -d: -f1) + 5 ))" "$E/get.sh" > "$E/cut.sh"
     out=$(bash "$E/cut.sh" 2>&1 </dev/null); rc=$?
     rc_not0 'cut inside a function is an error' "$rc"
     ok_if 'cut inside a function nothing runs' test ! -e "$MARKER"
     if grep -q '^curl' "$STUB_LOG"; then result 0 'cut inside a function nothing is downloaded'; else result 1 'cut inside a function nothing is downloaded'; fi
+}
+
+test_get_sh_knows_when_sudo_keeps_the_keys() {
+    local P=$E/proc out REPO_SAVED=$REPO REPO RELEASE_TAG
+    local -a given_args
+    fake_proc() { # fake_proc PID PPID TTY COMM [FD0]
+        mkdir -p "$P/$1/fd"
+        printf '%s (%s) S %s %s %s %s 0 0\n' "$1" "$4" "$2" "$1" "$1" "$3" > "$P/$1/stat"
+        printf '%s\n' "$4" > "$P/$1/comm"
+        if [[ -n ${5:-} ]]; then ln -sfn "$5" "$P/$1/fd/0"; fi
+    }
+    eval "$(sed -n -e '/^keys_cannot_reach_setup() {/,/^}/p' -e '/^right_command() {/,/^}/p' "$REPO_SAVED/setup/get.sh")"
+    # A login shell on the user's terminal (34816).
+    fake_proc 200 1 34816 bash /dev/pts/0
+    # "curl ... | sudo bash" with use_pty: sudo reads the pipe, and the command has a terminal of its own (34817).
+    fake_proc 298 200 34816 sudo 'pipe:[11]'
+    fake_proc 299 298 34817 sudo /dev/pts/1
+    fake_proc 300 299 34817 bash 'pipe:[12]'
+    ok_if 'the pipe into sudo with a terminal of its own is caught' keys_cannot_reach_setup "$P" 300
+    # The same without use_pty: one terminal, and the keys arrive.
+    fake_proc 310 298 34816 bash 'pipe:[12]'
+    ok_if 'without use_pty it goes on' eval '! keys_cannot_reach_setup "$P" 310'
+    # "sudo bash -c 'curl ... | bash'": sudo reads the terminal.
+    fake_proc 398 200 34816 sudo /dev/pts/0
+    fake_proc 399 398 34818 sudo /dev/pts/2
+    fake_proc 400 399 34818 bash 'pipe:[13]'
+    ok_if 'the documented form goes on' eval '! keys_cannot_reach_setup "$P" 400'
+    # The documented form started from a script that itself runs under a sudo fed by a pipe: only the nearest
+    # sudo counts.
+    fake_proc 196 1 0 sudo 'pipe:[9]'
+    fake_proc 197 196 0 bash 'pipe:[9]'
+    fake_proc 201 197 34816 bash /dev/pts/0
+    fake_proc 498 201 34816 sudo /dev/pts/0
+    fake_proc 499 498 34819 sudo /dev/pts/3
+    fake_proc 500 499 34819 bash 'pipe:[14]'
+    ok_if 'only the nearest sudo counts' eval '! keys_cannot_reach_setup "$P" 500'
+    # As root without sudo: "curl ... | bash".
+    fake_proc 600 200 34816 bash 'pipe:[15]'
+    ok_if 'no sudo: it goes on' eval '! keys_cannot_reach_setup "$P" 600'
+    # sudo-rs names itself sudo too; a name with spaces and brackets does not confuse the reading.
+    fake_proc 700 1 34816 'tmux: server (1)' /dev/pts/0
+    fake_proc 701 700 34816 sudo 'pipe:[16]'
+    fake_proc 702 701 34820 sudo /dev/pts/4
+    fake_proc 703 702 34820 bash 'pipe:[17]'
+    ok_if 'a parent with an odd name is read correctly' keys_cannot_reach_setup "$P" 703
+
+    REPO=MohZeh/Darban-OVPN RELEASE_TAG=v1.2.3 given_args=()
+    out=$(right_command)
+    has 'the message names this release and the form that works' \
+        "sudo bash -c 'curl -fsSL https://github.com/MohZeh/Darban-OVPN/releases/download/v1.2.3/get.sh | bash'" "$out"
+    RELEASE_TAG='' given_args=(--port 1195 --open-ufw)
+    out=$(right_command)
+    has 'the options given are kept' \
+        "sudo bash -c 'curl -fsSL https://github.com/MohZeh/Darban-OVPN/releases/latest/download/get.sh | bash -s -- --port 1195 --open-ufw'" "$out"
+    given_args=(--dns '1.1.1.1 8.8.8.8')
+    out=$(right_command)
+    has 'options that need quotes become a placeholder' '| bash -s -- OPTIONS' "$out"
 }
 
 test_get_sh_from_a_pipe() {

@@ -30,12 +30,13 @@ ssh root@203.0.113.10
 
 **اگر ندیدی:** آدرس و نام کاربری را در پنل ارائه‌دهنده بررسی کن. مستقیم وصل شو، نه از طریق VPN‌ای که قرار است تغییر کند.
 
+<a id="step-3"></a>
 ## قدم ۳: دستور نصب را اجرا کن
 
 </div>
 
 ```bash
-curl -fsSL https://github.com/MohZeh/Darban-OVPN/releases/download/v1.0.0-rc.1/get.sh | sudo bash
+sudo bash -c 'curl -fsSL https://github.com/MohZeh/Darban-OVPN/releases/download/v1.0.0-rc.1/get.sh | bash'
 ```
 
 <div dir="rtl">
@@ -44,6 +45,7 @@ curl -fsSL https://github.com/MohZeh/Darban-OVPN/releases/download/v1.0.0-rc.1/g
 
 **اگر ندیدی:**
 - `curl: command not found`: دستور `sudo apt update && sudo apt install -y curl` را اجرا کن و بعد دوباره دستور نصب را بزن.
+- `Started as "curl ... | sudo bash"`: دستور به شکل دیگری نوشته شده است. دستور بالا را دقیقاً همان‌طور که هست کپی کن و دوباره اجرا کن. چیزی نصب نشده است.
 - `curl: (22)` و `404`: آن نسخه منتشر نشده است. دستور یک نسخه را از صفحهٔ [Releases](https://github.com/MohZeh/Darban-OVPN/releases) بردار.
 
 ## قدم ۴: به پرسش‌ها جواب بده
