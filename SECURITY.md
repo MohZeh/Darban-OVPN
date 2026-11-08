@@ -10,7 +10,7 @@ This is a project maintained in spare time, so responses are best effort. I will
 
 ## Supported versions
 
-Only the latest stable release receives security fixes. Pre-releases are for testing.
+Only the latest stable release receives security fixes. Until `v1.0.0` is out, that is the latest pre-release. Pre-releases are for testing.
 
 ## What this tool protects, and what it does not
 

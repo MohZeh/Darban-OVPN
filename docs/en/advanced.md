@@ -123,7 +123,7 @@ UPDATE_CHECK=no
 |---|---|
 | Your chosen UDP port | VPN clients |
 | 443, 8443 or 9443 TCP | Temporary links; the first free one is kept |
-| 80 TCP, for a moment | Only when requesting a Let's Encrypt certificate: once for a domain name, and for each new six-day certificate of an IP address |
+| 80 TCP, for a moment | Only for a Let's Encrypt certificate, when it is requested and at each renewal: about every 60 days for a domain name, and for each new six-day certificate of an IP address |
 
 ## The blocklist (CRL)
 
@@ -174,7 +174,7 @@ Keep an **encrypted** copy of these paths away from the server. They hold the CA
 
 **After Uninstall, nothing renews the CRL.** Renew it yourself before it expires, or OpenVPN may refuse clients.
 
-**After Remove everything, every `.ovpn` file stops working for good,** even if you install OpenVPN again. A backup is offered first and is the default. This option works only on a server the setup created. Packages are removed only if the setup added them and nothing else needs them. The running kernel is never removed. Closing ports in your provider's firewall is up to you.
+**After Remove everything, every `.ovpn` file stops working,** even if you install OpenVPN again. Only restoring the backup brings the old CA, and with it the old profiles, back. Copies on devices are not deleted; they just cannot connect. A backup is offered first and is the default. This option works only on a server the setup created. Packages are removed only if the setup added them and nothing else needs them. The running kernel is never removed. Closing ports in your provider's firewall is up to you.
 
 If a setup stopped half way, undo it with:
 

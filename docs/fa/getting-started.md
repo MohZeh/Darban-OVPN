@@ -50,7 +50,7 @@ curl -fsSL https://github.com/MohZeh/Darban-OVPN/releases/latest/download/get.sh
 
 هر پرسش یک پیشنهاد نشان می‌دهد. **با Enter آن را قبول کن.**
 
-1. **Server address:** Enter بزن. دامنه اختیاری است و با آن لینک موقت بدون هشدار مرورگر باز می‌شود.
+1. **Server address:** Enter بزن. دامنه اختیاری است. با دامنه یا IP عمومی، ابزار می‌تواند گواهی معتبر بگیرد تا لینک موقت بدون هشدار مرورگر باز شود.
 2. **VPN port:** Enter بزن.
 3. **Install this server?** روی **Install now** Enter بزن.
 
@@ -75,8 +75,9 @@ curl -fsSL https://github.com/MohZeh/Darban-OVPN/releases/latest/download/get.sh
 1. **Create your first client now?** Enter بزن.
 2. **Client name:** با Enter نام `client1` انتخاب می‌شود، یا نامی مثل `ali-phone` بنویس.
 3. **How will the client get this profile?** برای **Temporary link** Enter بزن.
-4. **Lock the private key with a password?** برای بدون رمز Enter بزن. اینکه رمز کی به کار می‌آید در [رمز روی کلید](sharing.md#a-password-on-the-key) آمده است.
-5. **How long should the link work?** برای یک ساعت Enter بزن.
+4. **Get a free Let's Encrypt certificate?** فقط روی آدرس عمومی می‌آید. اگر می‌توانی پورت TCP 80 را چند لحظه در فایروال ارائه‌دهنده باز کنی، **Yes, get a certificate** را انتخاب کن: لینک بدون هشدار مرورگر باز می‌شود و اپ می‌تواند مستقیم از آن وارد کند. وگرنه Enter بزن. تا گواهی نگرفته‌ای، این پرسش با هر لینک دوباره می‌آید. [هشدار مرورگر](sharing.md#browser-warning) را ببین.
+5. **Lock the private key with a password?** برای بدون رمز Enter بزن. اینکه رمز کی به کار می‌آید در [رمز روی کلید](sharing.md#a-password-on-the-key) آمده است.
+6. **How long should the link work?** برای یک ساعت Enter بزن.
 
 **باید ببینی:** لینکی که با `https://` شروع می‌شود و پورت TCP آن.
 
@@ -101,12 +102,12 @@ curl -fsSL https://github.com/MohZeh/Darban-OVPN/releases/latest/download/get.sh
 </div>
 
 ```text
-✓ client1 is connected from 198.51.100.7. The VPN works.
+✓ client1 is connected from 198.51.100.7. The server and your provider's firewall let the VPN through.
 ```
 
 <div dir="rtl">
 
-این نشان می‌دهد کل مسیر کار می‌کند، از جمله فایروال ارائه‌دهنده.
+این نشان می‌دهد دستگاه از راه فایروال ارائه‌دهنده به سرور رسیده است. اینترنت روی دستگاه را نشان نمی‌دهد: روی همان دستگاه [بررسی اتصال](connect-devices.md#check-it-works) را انجام بده.
 
 **اگر ندیدی:** بعد از چند دقیقه با Enter انتظار را تمام کن و [کلاینت وصل نمی‌شود](troubleshooting.md#cannot-connect) را ببین.
 
