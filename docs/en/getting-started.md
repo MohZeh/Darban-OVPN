@@ -40,7 +40,7 @@ curl -fsSL https://github.com/MohZeh/Darban-OVPN/releases/latest/download/get.sh
 
 Each question shows a suggestion. **Press Enter to accept it.**
 
-1. **Server address:** press Enter. A domain name is optional, and it lets temporary links open without a browser warning.
+1. **Server address:** press Enter. A domain name is optional. With a domain name or a public IP address, the tool can get a trusted certificate, so temporary links open without a browser warning.
 2. **VPN port:** press Enter.
 3. **Install this server?** Press Enter on **Install now**.
 
@@ -65,8 +65,9 @@ A client is one person or device. The tool asks right after the install:
 1. **Create your first client now?** Press Enter.
 2. **Client name:** press Enter to use `client1`, or type a name such as `ali-phone`.
 3. **How will the client get this profile?** Press Enter for **Temporary link**.
-4. **Lock the private key with a password?** Press Enter for no password. See [A password on the key](sharing.md#a-password-on-the-key) for when one helps.
-5. **How long should the link work?** Press Enter for one hour.
+4. **Get a free Let's Encrypt certificate?** This comes only on a public address. Answer **Yes, get a certificate** if you can open TCP port 80 in your provider's firewall for a moment: the link then opens without a browser warning, and the app can import straight from it. Otherwise press Enter. Until you have one, the question comes back with each link. See [The browser warning](sharing.md#the-browser-warning).
+5. **Lock the private key with a password?** Press Enter for no password. See [A password on the key](sharing.md#a-password-on-the-key) for when one helps.
+6. **How long should the link work?** Press Enter for one hour.
 
 **You should see:** a link that starts with `https://`, and the TCP port it uses.
 
@@ -89,10 +90,10 @@ The person who receives the link follows [Connect a device](connect-devices.md).
 The tool waits and shows:
 
 ```text
-✓ client1 is connected from 198.51.100.7. The VPN works.
+✓ client1 is connected from 198.51.100.7. The server and your provider's firewall let the VPN through.
 ```
 
-This proves the whole path works, including your provider's firewall.
+This shows that the device reached the server through your provider's firewall. It does not show the internet on the device: on the device, follow [Check that it works](connect-devices.md#check-that-it-works).
 
 **If not:** after a few minutes, press Enter to stop waiting, and see [Troubleshooting](troubleshooting.md#a-client-cannot-connect).
 

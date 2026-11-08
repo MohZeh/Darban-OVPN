@@ -28,7 +28,7 @@ curl -fsSL https://github.com/MohZeh/Darban-OVPN/releases/latest/download/get.sh
 
 Press Enter to accept the suggested address and port, and Enter again to install. The tool then offers to create your first client, shares it, and tells you when it connects.
 
-**[Follow the step-by-step guide](docs/en/getting-started.md)**, from a new server to your first connected user. While only pre-releases exist, use the address of a version from the [Releases](https://github.com/MohZeh/Darban-OVPN/releases) page: replace `latest/download` with `download/vX.Y.Z-rc.N`.
+**[Follow the step-by-step guide](docs/en/getting-started.md)**, from a new server to your first connected user. While only pre-releases exist, use the address of a version from the [Releases](https://github.com/MohZeh/Darban-OVPN/releases) page: replace `latest/download` with `download/` and the version, for example `download/v1.0.0-beta.1`.
 
 ## Why Darban
 

@@ -25,7 +25,7 @@ The goal for Darban was a tool that one person can use safely on a small VPS, wi
 - A used, expired and unknown link all return the same answer.
 - The service runs only while a link exists.
 
-**The trade-off.** A self-signed certificate is the only automatic option for a bare IP address, which means a browser warning. This is stated plainly to the admin rather than hidden, and a hostname gets a trusted certificate.
+**The trade-off.** A bare IP address used to mean a self-signed certificate and a browser warning. Let's Encrypt now issues short-lived certificates for public IP addresses, so the tool offers a trusted certificate for an IP address or a hostname. It asks first, because this installs certbot and needs TCP port 80 for a moment. A self-signed certificate stays the fallback: it encrypts the link but does not prove whose server it is, so the tool says so, suggests a password on the key, and shows the fingerprint.
 
 ## Decision 2: treat the CRL as something that can silently go wrong
 

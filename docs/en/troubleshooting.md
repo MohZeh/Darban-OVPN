@@ -39,7 +39,7 @@ sudo journalctl -u darban-links.service -n 30 --no-pager
 
 ## The browser warns about the link
 
-This is expected without a domain name. The link is still encrypted. To avoid the warning, use a domain name. See [The browser warning](sharing.md#the-browser-warning).
+The server has no trusted certificate for the link. The link is still encrypted, but the browser cannot confirm whose server it is. To avoid the warning, accept the Let's Encrypt certificate the tool offers with the next link; it works for a domain name or a public IP address. See [The browser warning](sharing.md#the-browser-warning).
 
 ## The install did not finish
 

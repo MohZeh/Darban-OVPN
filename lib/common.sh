@@ -82,7 +82,10 @@ darban_conf_net() {
     awk '$1=="server" && $3=="255.255.255.0" {print $2; exit}' "${1:-$DARBAN_SERVER_CONF}" 2>/dev/null
 }
 # The live rules, not the file: a flushed chain or a changed rule must not pass.
-darban_live_nat_ok() { nft list chain ip darban postrouting 2>/dev/null | grep -Fq "ip saddr $1/24 "; }
+darban_live_nat_ok() { nft list chain ip darban postrouting 2>/dev/null | grep -F "ip saddr $1/24 oifname " | grep -Fq ' masquerade'; }
+# The interface a NAT rule sends VPN traffic out through, from a file or from standard input.
+darban_nat_iface() { awk '{for (i=1; i<NF; i++) if ($i=="oifname") {gsub(/"/, "", $(i+1)); print $(i+1); exit}}' "$@"; }
+darban_default_iface() { ip -4 route show default 2>/dev/null | awk '{for (i=1; i<NF; i++) if ($i=="dev") {print $(i+1); exit}}'; }
 darban_live_isolation_ok() {
     local rules
     rules=$(nft list chain ip darban forward 2>/dev/null) || return 1

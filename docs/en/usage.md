@@ -45,7 +45,7 @@ For example, after a new phone or a changed server address:
 1. Press `3` **Revoke client (permanent)**, and choose the client.
 2. Press `2` to move to the revoke option, then Enter.
 
-The old profile stops working everywhere, and the current connection of that client ends. Other users are not affected. This cannot be undone, but you can later create a new client with the same name.
+The old profile stops working everywhere, and the current connection of that client ends. Other users are not affected. On a server this tool did not set up, ending one connection may not be possible: the tool then says so and asks whether to restart OpenVPN, which drops everyone for a few seconds. If you answer No, the open connection can last up to an hour. This cannot be undone, but you can later create a new client with the same name.
 
 ## Cancel a link that was not used
 
@@ -82,14 +82,14 @@ Open **8 Maintenance & diagnostics**, then `1` **Diagnostics**, or run:
 sudo darban status
 ```
 
-The exit status is `0` when everything is fine and `1` when there is a problem, so scripts can use it too. If something is wrong, see [Troubleshooting](troubleshooting.md).
+The exit status is `1` when a check found a problem, and `0` otherwise, so scripts can use it too. Warnings do not change it. The checks run on the server, so they cannot see your provider's firewall. If something is wrong, see [Troubleshooting](troubleshooting.md).
 
 ## Remove the tool
 
 Open **9 Setup**:
 
 - `5` **Uninstall this tool only:** OpenVPN keeps running.
-- `6` **Remove everything:** the tool, OpenVPN, and every client. Every profile stops working for good.
+- `6` **Remove everything:** the tool, OpenVPN, and every client. Every profile stops working, unless you restore the backup.
 
 See [what each one removes](advanced.md#what-removal-does).
 

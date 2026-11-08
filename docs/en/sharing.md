@@ -38,7 +38,7 @@ If you log in with a user other than `root`, that user gets a private copy of th
 
 ## A password on the key
 
-Usually no password is needed, and Enter means **No password**. A password is for when the link has no trusted certificate and the file could be taken on the way.
+Usually no password is needed, and Enter means **No password**. A password helps most when the link has no trusted certificate: the browser then cannot tell the real server from one placed in between. A password sent by another route keeps the file useless to anyone who only has the link.
 
 Answer **Yes, make a password**, and the tool suggests a short random password in three groups, such as `k7m-3xt-9vw`, easy to type on a phone. Press Enter to use it, or type your own of at least 9 characters. It cannot be shown again later. Send it by another route than the link, for example by SMS or a call, so one leak is not enough. The app asks for it when connecting.
 
@@ -50,12 +50,12 @@ Profiles keep the address they were made with. Send them again from menu `4`.
 
 ## The browser warning
 
-The tool offers a free certificate from Let's Encrypt, for a domain name or for a public IP address. It needs TCP port 80 open in your provider's firewall for a moment.
+The tool offers a free certificate from Let's Encrypt, for a domain name or for a public IP address. It needs TCP port 80 open in your provider's firewall for a moment, when the certificate is requested and at each renewal. Until the link has a trusted certificate, the question comes back each time you share by link, and Enter still means No.
 
-- **Domain name:** the certificate comes from Ubuntu's `certbot` package.
-- **IP address:** Let's Encrypt gives a six-day certificate, and a new one is requested when a link needs it. This needs `certbot` 5.3 or newer, which Ubuntu does not have yet, so the tool installs it from the Certbot project as a snap. A server without snap is not offered one.
+- **Domain name:** the certificate comes from Ubuntu's `certbot` package, and certbot renews it by itself. If a renewal fails, for example because port 80 is closed, the tool asks again when a link needs a new one.
+- **IP address:** Let's Encrypt gives a six-day certificate, and a new one is requested when a link needs it. This needs `certbot` 5.3 or newer, which Ubuntu does not have yet, so the tool uses a certbot that is new enough, or installs it from the Certbot project as a snap. A server with neither is not offered one.
 
-If a new certificate cannot be had while the current trusted one still works, the current one stays, and the tool says when it ends. Otherwise, if you decline, or the request fails, the tool makes its own certificate. The link still works and is encrypted, but the browser shows a warning, and direct import into the app may not work. The tool shows a note to send with the link, and the certificate fingerprint.
+If a new certificate cannot be had while the current trusted one still works, the current one stays, and the tool says when it ends. Otherwise, if you decline, or the request fails, the tool makes its own certificate. The link still works and is encrypted, but the browser shows a warning, and direct import into the app may not work. The tool shows a note to send with the link, and the certificate fingerprint. The note asks the person to go past the warning only for this link, which came straight from you.
 
 ## How links are protected
 

@@ -1196,9 +1196,11 @@ test_temporary_link_end_to_end() {
     start_links_stub
     out=$(menu '4\nalice\n1\n1\n1\n0\n')
     has 'the link is shown' "https://127.0.0.1:$LINK_TEST_PORT/l/" "$out"
-    has 'it says how long it works' '1 hour, one person, one time' "$out"
+    has 'it says how long it works' '1 hour, one use' "$out"
     has 'it warns about the firewall' "TCP $LINK_TEST_PORT must be open" "$out"
     has 'it warns about the browser warning' 'no trusted certificate' "$out"
+    has 'the note limits going past the warning to this link' 'Never do this for other sites' "$out"
+    lacks 'and does not call the warning normal' 'That is expected' "$out"
     url=$(grep -oE 'https://[^ ]+/l/[0-9a-f]{64}' <<<"$out")
     base=${url%/l/*}
     ok_if 'no copy stays in the download folder' test ! -e "$E/clients/alice.ovpn"
@@ -1324,7 +1326,7 @@ test_share_qr_and_link_port() {
 }
 
 test_link_certificate_for_a_hostname() {
-    local out
+    local out before
     start_links_stub
     echo vpn.example.com > "$E/cfg/domain"
     out=$(menu '4\nalice\n1\n1\n1\n1\n0\n')
@@ -1333,9 +1335,25 @@ test_link_certificate_for_a_hostname() {
     has 'the link uses the hostname' "https://vpn.example.com:$LINK_TEST_PORT/l/" "$out"
     openssl x509 -in "$E/cfg/link-cert.pem" -noout -checkhost vpn.example.com | grep -q 'does match'; rc_is 'the certificate fits the hostname' 0 "$?"
     menu '5\n1\n0\n' >/dev/null
-    out=$(menu '4\nalice\n1\n1\n1\n0\n')
-    lacks 'a usable certificate is not asked about again' "Let's Encrypt" "$out"
+    before=$(sha256sum < "$E/cfg/link-cert.pem")
+    out=$(menu '4\nalice\n1\n1\n1\n1\n0\n')
+    has 'a self-signed certificate is offered a trusted one again' "Let's Encrypt" "$out"
+    [[ $(sha256sum < "$E/cfg/link-cert.pem") == "$before" ]]; rc_is 'declining keeps the current self-signed certificate' 0 "$?"
+    has 'and the link is made' "https://vpn.example.com:$LINK_TEST_PORT/l/" "$out"
     menu '5\n1\n0\n' >/dev/null
+
+    # A trusted certificate valid for weeks is not asked about again.
+    mkdir -p "$E/le"
+    openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes -keyout "$E/le/privkey.pem" -out "$E/le/fullchain.pem" \
+        -days 30 -subj /CN=vpn.example.com -addext subjectAltName=DNS:vpn.example.com >/dev/null 2>&1
+    mv "$E/cfg/link-cert.pem" "$E/cfg/link-cert.self"; mv "$E/cfg/link-key.pem" "$E/cfg/link-key.self"
+    ln -s "$E/le/fullchain.pem" "$E/cfg/link-cert.pem"; ln -s "$E/le/privkey.pem" "$E/cfg/link-key.pem"
+    out=$(menu '4\nalice\n1\n1\n1\n0\n')
+    lacks 'a usable trusted certificate is not asked about again' "Let's Encrypt" "$out"
+    has 'and the link is made with it' "https://vpn.example.com:$LINK_TEST_PORT/l/" "$out"
+    menu '5\n1\n0\n' >/dev/null
+    rm -f "$E/cfg/link-cert.pem" "$E/cfg/link-key.pem"
+    mv "$E/cfg/link-cert.self" "$E/cfg/link-cert.pem"; mv "$E/cfg/link-key.self" "$E/cfg/link-key.pem"
 
     rm -f "$E/cfg/link-cert.pem" "$E/cfg/link-key.pem"
     printf '#!/usr/bin/env bash\nif [[ $1 == --version ]]; then echo "certbot 2.9.0"; exit 0; fi\necho "certbot $*" >> "$STUB_LOG"; exit 1\n' > "$E/bin/certbot"
@@ -1889,9 +1907,30 @@ STUB
     darban_nat_rules 10.8.0.0 eth0 > "$E/cfg/nat.nft"
     printf '\t\tip saddr 10.8.0.0/24 oifname "eth0" masquerade\n' > "$E/live-post"
     printf '\t\tip saddr 10.8.0.0/24 ip daddr 10.8.0.0/24 drop\n\t\tip saddr 10.8.0.0/24 ip daddr 169.254.0.0/16 drop\n' > "$E/live-forward"
+    # The interfaces this server has, and the one of its default route.
+    cat > "$E/bin/ip" <<'STUB'
+#!/usr/bin/env bash
+case "$*" in
+    '-4 route show default') echo "default via 192.0.2.1 dev ${FAKE_ROUTE_IFACE:-eth0} proto dhcp" ;;
+    'link show dev '*) [[ " ${FAKE_IFACES:-eth0} " == *" $4 "* ]] ;;
+esac
+STUB
+    chmod +x "$E/bin/ip"
     out=$(mgr status)
     has 'both live rules pass' 'VPN clients are kept apart' "$out"
     has 'the live NAT passes' 'NAT for the VPN network 10.8.0.0/24 present' "$out"
+    printf '		ip saddr 10.8.0.0/24 oifname "eth0" accept
+' > "$E/live-post"
+    has 'a rule without masquerade does not pass' 'NAT does not match the VPN network 10.8.0.0/24' "$(mgr status)"
+    printf '		ip saddr 10.8.0.0/24 oifname "eth0" masquerade
+' > "$E/live-post"
+    out=$(FAKE_IFACES=ens3 FAKE_ROUTE_IFACE=ens3 mgr status)
+    has 'an interface that is gone is reported' 'out through eth0, which this server no longer has' "$out"
+    lacks 'and NAT is not called present' 'NAT for the VPN network 10.8.0.0/24 present' "$out"
+    has 'the installer is the fix' '--version v' "$out"
+    out=$(FAKE_IFACES='eth0 ens3' FAKE_ROUTE_IFACE=ens3 mgr status)
+    has 'another default route is a warning' 'but the default route uses ens3' "$out"
+    has 'with the exact change' 's/oifname "eth0"/oifname "ens3"/' "$out"
     : > "$E/live-forward"
     out=$(mgr status)
     lacks 'an empty chain does not pass' 'VPN clients are kept apart' "$out"
@@ -1979,6 +2018,36 @@ EOF
     if grep -q 'ENCRYPTED PRIVATE KEY' "$E/clients/client1.ovpn"; then result 0 'the key stays open without a password'; else result 1 'the key stays open without a password'; fi
     if (( rc != 0 )); then printf '%s\n' "$out" | tail -n 25 | cut -c1-150 | sed 's/^/    | /'; fi
     ok_if 'the client exists' test -s "$PKI/issued/client1.crt"
+    has 'it says what the connection shows' "your provider's firewall let the VPN through" "$out"
+    has 'and how to check the internet' 'open a website on that device' "$out"
+    lacks 'without claiming the internet works' 'The VPN works' "$out"
+}
+
+test_first_client_on_a_public_ip_in_a_real_terminal() {
+    # On a public IP the certificate question comes before the password one, as the guide says; Enter is No.
+    local script=$E/script out rc
+    start_links_stub
+    mgmt_stub
+    echo 203.0.113.9 > "$E/cfg/domain"
+    printf '#!/usr/bin/env bash\nif [[ $1 == --version ]]; then echo "certbot 5.9.0"; exit 0; fi\necho "certbot $*" >> "$STUB_LOG"; exit 0\n' > "$E/bin/certbot"
+    chmod +x "$E/bin/certbot"
+    printf 'TITLE\tOpenVPN\nCLIENT_LIST\tclient1\t198.51.100.7:1\t10.8.0.2\t\t1\t1\t2026-11-07 10:00:00\nEND\n' > "$E/mgmt-reply"
+    cat > "$script" <<'EOF'
+Enter: Create a client => \r
+Client name [client1] => \r
+Enter: Temporary link => \r
+Enter: No, use a self-signed certificate => \r
+Enter: No password => \r
+Enter: 1 hour => \r
+client1 is connected from 198.51.100.7 => \r
+Choose [0-9] => 0\r
+EOF
+    out=$(NO_COLOR=1 python3 "$HERE/pty-drive.py" --timeout 30 "$script" -- bash "$E/manager.sh" welcome 2>&1); rc=$?
+    rc_is 'a public IP also takes only Enter' 0 "$rc"
+    has 'it offers a trusted certificate first' "Get a free Let's Encrypt certificate?" "$out"
+    has 'it ends with a link on that IP' 'https://203.0.113.9:' "$out"
+    if grep -q '^certbot certonly' "$STUB_LOG" 2>/dev/null; then result 0 'Enter gets no certificate'; else result 1 'Enter gets no certificate'; fi
+    if (( rc != 0 )); then printf '%s\n' "$out" | tail -n 25 | cut -c1-150 | sed 's/^/    | /'; fi
 }
 
 test_setup_in_a_real_terminal() {

@@ -119,7 +119,16 @@ fi
 NAT_FILE=/etc/darban/nat.nft
 if [[ -f $NAT_FILE ]]; then
     vpn_net=$(darban_conf_net)
-    nat_iface=$(awk '{for (i=1; i<NF; i++) if ($i=="oifname") {gsub(/"/, "", $(i+1)); print $(i+1); exit}}' "$NAT_FILE")
+    nat_iface=$(darban_nat_iface "$NAT_FILE")
+    # An interface that is gone, for example renamed by a new image, leaves clients without internet: NAT then
+    # follows the default route. One that still exists is kept, because it may be chosen on purpose.
+    if [[ -n $nat_iface ]] && ! ip link show dev "$nat_iface" >/dev/null 2>&1; then
+        route_iface=$(darban_default_iface)
+        if [[ $route_iface =~ ^[A-Za-z0-9_.@-]+$ ]]; then
+            echo "NAT used $nat_iface, which this server no longer has; it now uses $route_iface, the interface of the default route."
+            nat_iface=$route_iface
+        fi
+    fi
     if valid_ipv4 "${vpn_net:-}" && [[ $nat_iface =~ ^[A-Za-z0-9_.@-]+$ ]]; then
         darban_nat_rules "$vpn_net" "$nat_iface" > "$NAT_FILE.new"
         chmod 600 "$NAT_FILE.new"

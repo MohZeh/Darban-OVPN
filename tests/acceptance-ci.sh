@@ -296,6 +296,18 @@ grep -q "ip saddr $net/24 oifname" /etc/darban/nat.nft
 darban status >/dev/null
 echo 'PASS: NAT for another network is reported, and the installer puts it right.'
 
+# An outgoing interface that is gone, as a new image can rename it, is found and put right.
+sed -i 's/oifname "[^"]*"/oifname "gone0"/' /etc/darban/nat.nft
+systemctl restart darban-nat.service
+if darban status >"$LOG/iface.log" 2>&1; then echo 'FAIL: status reported NAT through a missing interface as healthy.'; exit 1; fi
+grep -q 'out through gone0, which this server no longer has' "$LOG/iface.log"
+bash setup/install.sh | tee "$LOG/iface-install.log"
+grep -q 'NAT used gone0' "$LOG/iface-install.log"
+route_iface=$(ip -4 route show default | awk '{for (i=1; i<NF; i++) if ($i=="dev") {print $(i+1); exit}}')
+grep -q "oifname \"$route_iface\" masquerade" /etc/darban/nat.nft
+darban status >/dev/null
+echo 'PASS: NAT through a missing interface is reported, and the installer moves it to the default route.'
+
 # A real update and the way back. The new version is this one under another number.
 current=$(darban version)
 next=$(mktemp -d)

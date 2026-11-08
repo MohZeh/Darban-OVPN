@@ -1015,7 +1015,12 @@ make_self_signed_cert() {
 ensure_link_cert() {
     local host=$1
     local ends
-    if link_cert_usable "$host"; then return 0; fi
+    if link_cert_usable "$host"; then
+        # A self-signed certificate is no reason to stop offering a trusted one: the question returns, No by
+        # default, and a No keeps the current certificate.
+        link_cert_is_trusted || get_trusted_cert "$host" || true
+        return 0
+    fi
     if get_trusted_cert "$host"; then return 0; fi
     # A trusted certificate that still works is kept, so open links do not change to a self-signed one.
     if link_cert_is_trusted && link_cert_usable "$host" 0; then
@@ -1090,7 +1095,7 @@ share_by_link() {
     url+=/l/$token
     ok "Temporary link for \"$name\""
     hr
-    kv Valid "$label, one person, one time"
+    kv Valid "$label, one use"
     kv Cancel 'menu 5'
     say
     printf '%s\n' "$url" || true
@@ -1102,8 +1107,8 @@ share_by_link() {
         info "Certificate fingerprint: $(openssl x509 -in "$LINK_CERT" -noout -fingerprint -sha256 | sed 's/^.*=//')"
         say
         say 'Send this note with the link:'
-        say 'Your browser may warn that this connection is not private. That is expected for this link. Choose Advanced, then Continue.'
-        say 'ممکن است مرورگر هشدار بدهد که این اتصال خصوصی نیست. برای این لینک طبیعی است. Advanced و بعد Continue را بزن.'
+        say 'Your browser will warn that this connection is not private, because this server has no trusted certificate. Only for this link, which came to you straight from me: choose Advanced, then Continue. Never do this for other sites.'
+        say 'مرورگر هشدار می‌دهد که این اتصال خصوصی نیست، چون این سرور گواهی معتبر ندارد. فقط برای همین لینک که مستقیم از من به دستت رسیده، Advanced و بعد Continue را بزن. این کار را برای سایت‌های دیگر نکن.'
         if [[ -n $PROFILE_PASSWORD ]]; then
             say 'The file is locked. Its password comes to you separately.'
             say 'فایل قفل است و رمز آن جداگانه به دستت می‌رسد.'
@@ -1239,13 +1244,15 @@ wait_for_connection() {
     (( UI_TTY )) && mgmt_available || return 1
     port=$(server_port 2>/dev/null || printf '?')
     say
-    info "Waiting for $name to connect, to prove the VPN works. Press Enter to stop waiting."
+    info "Waiting for $name to connect. Press Enter to stop waiting."
     for (( attempt = 0; attempt < 200; attempt++ )); do
         rows=$(connected_rows 2>/dev/null) || rows=''
         row=$(awk -F '\t' -v n="$name" '$1==n {print; exit}' <<<"$rows")
         if [[ -n $row ]]; then
             IFS=$'\t' read -r _ address _ <<<"$row"
-            ok "$name is connected from $(safe_text "$address"). The VPN works."
+            ok "$name is connected from $(safe_text "$address"). The server and your provider's firewall let the VPN through."
+            # The server sees the connection, not the device's internet or DNS: only the device can show those.
+            info 'To check the internet too, open a website on that device.'
             pause
             return 0
         fi
@@ -2068,7 +2075,7 @@ check_expiry() {
 }
 network_rules_health() {
     # What the kernel runs now is checked, not what a file says: a flushed chain or an old network must not pass.
-    local net nat=$CONFIG_DIR/nat.nft fix
+    local net nat=$CONFIG_DIR/nat.nft fix reinstall live_iface route_iface
     if ! nft list table ip darban >/dev/null 2>&1; then
         if nft list table ip mzx_openvpn >/dev/null 2>&1; then check ok 'NAT table for the VPN present'; return 0; fi
         if [[ -f $nat ]]; then
@@ -2084,15 +2091,25 @@ network_rules_health() {
         return 0
     fi
     # A file that is already right only needs loading; otherwise the installer writes it again.
+    reinstall="curl -fsSL https://github.com/$DARBAN_REPO/releases/download/v$DARBAN_VERSION/get.sh | sudo bash -s -- --version v$DARBAN_VERSION"
     if [[ -f $nat ]] && grep -Fq "ip saddr $net/24 ip daddr 169.254.0.0/16 drop" "$nat" && grep -Fq "ip saddr $net/24 oifname" "$nat"; then
         fix='sudo systemctl restart darban-nat.service'
     else
-        fix="curl -fsSL https://github.com/$DARBAN_REPO/releases/download/v$DARBAN_VERSION/get.sh | sudo bash -s -- --version v$DARBAN_VERSION"
+        fix=$reinstall
     fi
-    if darban_live_nat_ok "$net"; then
-        check ok "NAT for the VPN network $net/24 present"
-    else
+    if ! darban_live_nat_ok "$net"; then
         check bad "NAT does not match the VPN network $net/24 of server.conf, so clients have no internet $S_ARROW $fix"
+    else
+        # The rule can be right for the network and still send traffic out through the wrong interface.
+        live_iface=$(nft list chain ip darban postrouting 2>/dev/null | grep -F "ip saddr $net/24 oifname " | darban_nat_iface)
+        route_iface=$(darban_default_iface)
+        if [[ -n $live_iface ]] && ! ip link show dev "$live_iface" >/dev/null 2>&1; then
+            check bad "NAT sends VPN traffic out through $(safe_text "$live_iface"), which this server no longer has, so clients have no internet $S_ARROW $reinstall"
+        elif [[ $live_iface =~ ^[A-Za-z0-9_.@-]+$ && $route_iface =~ ^[A-Za-z0-9_.@-]+$ && $live_iface != "$route_iface" ]]; then
+            check warn "NAT sends VPN traffic out through $(safe_text "$live_iface"), but the default route uses $(safe_text "$route_iface"). If that is not on purpose $S_ARROW sudo sed -i 's/oifname \"$live_iface\"/oifname \"$route_iface\"/' $nat && sudo systemctl restart darban-nat.service"
+        else
+            check ok "NAT for the VPN network $net/24 present"
+        fi
     fi
     if darban_live_isolation_ok "$net"; then
         check ok 'VPN clients are kept apart, and away from the cloud metadata service'

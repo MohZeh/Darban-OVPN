@@ -6,7 +6,9 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ### Changed
 - Enter means no password on the key. A password, when chosen, is much slower to guess from a stolen file.
-- A trusted certificate for an IP address comes only from the Certbot snap; a server without snap is not offered one.
+- A trusted certificate for an IP address comes from a certbot that is new enough, or from the Certbot snap; a server with neither is not offered one.
+- While the link certificate is self-signed, each share by link offers a trusted certificate again. Enter still means No.
+- Messages and guides say only what is shown: a connected client proves the server and the provider's firewall, not the internet on the device; the note for a self-signed link asks to go past the warning only for that link.
 
 ### Fixed
 - Diagnostics check the rules that really run: both rules that keep clients apart, NAT for the current VPN network, and an ALLOW rule in `ufw`.
@@ -14,6 +16,8 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 - Repairing an install that stopped half way no longer fails on files that were never copied.
 - A trusted link certificate that still works stays when a new one cannot be had.
 - Remove everything never deletes the profile folder as a whole, and removing or revoking a profile also deletes the copy made for a non-root download user.
+- The Advanced menu no longer prints every shell variable.
+- Diagnostics report NAT that sends traffic out through an interface the server no longer has, or through another one than the default route, and a NAT rule without masquerade. An update moves NAT from a missing interface to the one of the default route.
 
 ## [1.0.0-beta.1] - 2026-11-07
 

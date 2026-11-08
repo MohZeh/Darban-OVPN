@@ -489,7 +489,7 @@ confirm_install() {
         kv Address "$HOST"
         kv Port "$PORT/UDP"
         say
-        say ' Nothing has changed yet.'
+        say ' Nothing is installed yet.'
         say
         choose_one 'Install this server?' 'Install now' 'Show details' 'Cancel' || return 1
         case $CHOSEN in

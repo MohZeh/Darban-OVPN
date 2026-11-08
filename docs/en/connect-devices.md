@@ -6,7 +6,7 @@ For the person who received a link or a `.ovpn` file. The app is **OpenVPN Conne
 
 ## Get the profile
 
-1. Open the link you received. If the browser warns that the connection is not private, and the sender told you to expect it, choose **Advanced** and then **Continue**.
+1. Open the link you received. If the browser warns that the connection is not private, go on only if the sender told you to expect it for this link: choose **Advanced** and then **Continue**. Otherwise stop, and ask the sender.
 2. Press **Get my profile**. The link works only once, so do this on the device you want to connect.
 3. On the next page, press **Download .ovpn**. This page works for 10 minutes.
 
@@ -24,7 +24,7 @@ The file holds a private key. Do not share or publish it.
 ## iPhone and iPad
 
 1. Install [OpenVPN Connect from the App Store](https://apps.apple.com/app/openvpn-connect/id590379981).
-2. After downloading the file, open it from the **Files** app and share it to **OpenVPN**. If that option is missing, save the file to iCloud Drive or Dropbox first.
+2. After downloading the file, open it from the **Files** app and share it to **OpenVPN**. If that option is missing, save it in **Files › On My iPhone** first, and share it from there. Avoid cloud storage: the file holds your private key.
 3. Confirm the import, and press **Connect**.
 
 ## Windows and macOS
@@ -35,7 +35,7 @@ The file holds a private key. Do not share or publish it.
 
 ## Linux
 
-Install the client and start it with the file:
+On Ubuntu or Debian, install the client and start it with the file. Write the real name of your file instead of `client1.ovpn`. Other distributions have the same `openvpn` package in their own package manager.
 
 ```bash
 sudo apt install -y openvpn
