@@ -4,6 +4,10 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## [Unreleased]
 
+## [1.0.0-rc.2] - 2026-11-08
+
+Release candidate for `v1.0.0`, for testing on a server that is not in use. It replaces `v1.0.0-rc.1`, whose documented install command stopped at the first question.
+
 ### Changed
 - The install command is now `sudo bash -c 'curl -fsSL .../get.sh | bash'`, with options after `bash -s --`. The README, the guides and the hints in the tool use it.
 
