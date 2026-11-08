@@ -65,7 +65,7 @@ A client is one person or device. The tool asks right after the install:
 1. **Create your first client now?** Press Enter.
 2. **Client name:** press Enter to use `client1`, or type a name such as `ali-phone`.
 3. **How will the client get this profile?** Press Enter for **Temporary link**.
-4. **Lock the private key with a password?** Without a domain name the suggestion is yes. Press Enter, and Enter again for the short password it suggests, such as `k7m-3xt-9vw`.
+4. **Lock the private key with a password?** Press Enter for no password. See [A password on the key](sharing.md#a-password-on-the-key) for when one helps.
 5. **How long should the link work?** Press Enter for one hour.
 
 **You should see:** a link that starts with `https://`, and the TCP port it uses.
@@ -78,7 +78,7 @@ Open that TCP port in your provider's firewall too, as in step 5. The tool shows
 
 Send the link in any messenger. A link preview does not use it up. It works once, for the person who presses the button on the page.
 
-If the server has no trusted certificate, the tool also shows a short note. Send it with the link, because the browser shows a security warning for this link. Send the password another way, for example by SMS or a call.
+If the server has no trusted certificate, the tool also shows a short note. Send it with the link, because the browser shows a security warning for this link. If you chose a password, send it another way, for example by SMS or a call.
 
 ## Step 8: Connect the device
 

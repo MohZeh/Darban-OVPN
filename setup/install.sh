@@ -62,10 +62,14 @@ rm -f -- "$LIB/.installed"
 if [[ -e /usr/local/sbin/darban && -e $LIB/common.sh ]]; then
     backup_dir="/var/backups/darban/$(date -u +%Y%m%dT%H%M%S)"
     install -d -o root -g root -m 700 /var/backups/darban "$backup_dir" "$backup_dir/sbin" "$backup_dir/lib" "$backup_dir/units"
-    cp -a -- /usr/local/sbin/darban /usr/local/sbin/darban-crl-maintain "$backup_dir/sbin/"
+    # An install that stopped half way may have left only some of these, and the repair must still go on.
+    for file in /usr/local/sbin/darban /usr/local/sbin/darban-crl-maintain; do
+        if [[ -e $file ]]; then cp -a -- "$file" "$backup_dir/sbin/"; fi
+    done
     cp -a -- "$LIB/." "$backup_dir/lib/"
-    cp -a -- /etc/systemd/system/darban-crl.service /etc/systemd/system/darban-crl.timer "$backup_dir/units/"
-    if [[ -e /etc/systemd/system/darban-links.service ]]; then cp -a -- /etc/systemd/system/darban-links.service "$backup_dir/units/"; fi
+    for file in /etc/systemd/system/darban-crl.service /etc/systemd/system/darban-crl.timer /etc/systemd/system/darban-links.service; do
+        if [[ -e $file ]]; then cp -a -- "$file" "$backup_dir/units/"; fi
+    done
     # The newest three are enough.
     find /var/backups/darban -mindepth 1 -maxdepth 1 -type d -print | sort | head -n -3 | xargs -r rm -rf --
 fi
@@ -109,19 +113,27 @@ if ! /usr/local/sbin/darban-crl-maintain --check >/dev/null || ! systemctl start
     fi
     echo 'WARNING: the CRL check did not pass; see: sudo darban status.' >&2
 fi
-# Installs made before clients were kept apart get that rule now.
+# The NAT file is written again from server.conf, so an install from before clients were kept apart gets
+# that rule, and a network change that stopped half way is put right. Without success the install is not
+# marked complete, so running the same command again tries once more.
 NAT_FILE=/etc/darban/nat.nft
-if [[ -f $NAT_FILE ]] && ! grep -q 'chain forward' "$NAT_FILE"; then
-    vpn_net=$(awk '{for (i=1; i<NF; i++) if ($i=="saddr") {print $(i+1); exit}}' "$NAT_FILE")
-    if [[ $vpn_net =~ ^[0-9.]+/24$ ]]; then
-        cp -a -- "$NAT_FILE" "$NAT_FILE.before-isolation"
-        { head -n -1 "$NAT_FILE"; printf '    # Clients cannot reach each other, or the cloud provider'"'"'s metadata service, through this server.\n    chain forward {\n        type filter hook forward priority filter; policy accept;\n        ip saddr %s ip daddr %s drop\n        ip saddr %s ip daddr 169.254.0.0/16 drop\n    }\n}\n' "$vpn_net" "$vpn_net" "$vpn_net"; } > "$NAT_FILE.new"
-        if nft -c -f "$NAT_FILE.new" && mv -f -- "$NAT_FILE.new" "$NAT_FILE" && nft -f "$NAT_FILE"; then
-            rm -f -- "$NAT_FILE.before-isolation"
-            echo 'VPN clients are now kept apart from each other.'
+if [[ -f $NAT_FILE ]]; then
+    vpn_net=$(darban_conf_net)
+    nat_iface=$(awk '{for (i=1; i<NF; i++) if ($i=="oifname") {gsub(/"/, "", $(i+1)); print $(i+1); exit}}' "$NAT_FILE")
+    if valid_ipv4 "${vpn_net:-}" && [[ $nat_iface =~ ^[A-Za-z0-9_.@-]+$ ]]; then
+        darban_nat_rules "$vpn_net" "$nat_iface" > "$NAT_FILE.new"
+        chmod 600 "$NAT_FILE.new"
+        if cmp -s -- "$NAT_FILE.new" "$NAT_FILE" && darban_live_nat_ok "$vpn_net" && darban_live_isolation_ok "$vpn_net"; then
+            rm -f -- "$NAT_FILE.new"
+        elif nft -c -f "$NAT_FILE.new" && cp -a -- "$NAT_FILE" "$NAT_FILE.before" && mv -f -- "$NAT_FILE.new" "$NAT_FILE" \
+            && nft -f "$NAT_FILE" && darban_live_nat_ok "$vpn_net" && darban_live_isolation_ok "$vpn_net"; then
+            rm -f -- "$NAT_FILE.before"
+            echo 'The NAT rules are up to date, and VPN clients are kept apart from each other.'
         else
-            mv -f -- "$NAT_FILE.before-isolation" "$NAT_FILE"; rm -f -- "$NAT_FILE.new"
-            echo 'WARNING: could not add the rule that keeps VPN clients apart; see: sudo darban status.' >&2
+            if [[ -f $NAT_FILE.before ]]; then mv -f -- "$NAT_FILE.before" "$NAT_FILE"; nft -f "$NAT_FILE" || true; fi
+            rm -f -- "$NAT_FILE.new"
+            echo 'INSTALL INCOMPLETE: could not load the NAT rules that keep VPN clients apart. Run the same command again; if it fails again, see: sudo darban status' >&2
+            exit 1
         fi
     fi
 fi

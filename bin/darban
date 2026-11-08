@@ -463,7 +463,9 @@ EOF
     openssl x509 -in "$DARBAN_PKI/issued/$name.crt" -outform PEM || return 1
     printf '</cert>\n<key>\n' || return 1
     if [[ -n $PROFILE_PASSWORD ]]; then
-        openssl pkey -in "$DARBAN_PKI/private/$name.key" -aes256 -passout stdin <<<"$PROFILE_PASSWORD" || return 1
+        # PBKDF2 with 600000 rounds: the password is short, so guessing it from a stolen file must be slow.
+        openssl pkcs8 -topk8 -in "$DARBAN_PKI/private/$name.key" -v2 aes-256-cbc -v2prf hmacWithSHA256 -iter 600000 \
+            -passout stdin <<<"$PROFILE_PASSWORD" || return 1
     else
         cat -- "$DARBAN_PKI/private/$name.key" || return 1
     fi
@@ -801,12 +803,12 @@ share_client() {
     fi
     SHARED=1
     say
-    # The link's certificate is settled first, because it decides which password answer is suggested.
+    # The link's certificate is settled first, because a link without a trusted one gets a word about the password.
     if (( method == 1 || method == 2 )); then
         prepare_link || return 1
-        if link_cert_is_trusted; then choose_profile_password 1; else choose_profile_password 2; fi
+        if link_cert_is_trusted; then choose_profile_password; else choose_profile_password untrusted; fi
     else
-        choose_profile_password 1
+        choose_profile_password
     fi
     if [[ -n $PROFILE_PASSWORD ]]; then
         ca_lock || return 1
@@ -826,21 +828,26 @@ share_client() {
     fi
 }
 make_password() {
-    # Three groups of three: easy to type on a phone, and no characters that look alike.
-    local alphabet=abcdefghjkmnpqrstuvwxyz23456789 raw out='' i
-    raw=$(openssl rand -hex 9) || return 1
-    for (( i = 0; i < 9; i++ )); do
-        out+=${alphabet:$(( 16#${raw:i*2:2} % ${#alphabet} )):1}
-        if (( i == 2 || i == 5 )); then out+=-; fi
+    # Three groups of three: easy to type on a phone, and no characters that look alike. Bytes from 248 up are
+    # skipped, so every one of the 31 characters is equally likely.
+    local alphabet=abcdefghjkmnpqrstuvwxyz23456789 raw='' out='' i=0 count=0 byte
+    while (( count < 9 )); do
+        if (( i * 2 >= ${#raw} )); then raw=$(openssl rand -hex 32) || return 1; i=0; fi
+        byte=$(( 16#${raw:i*2:2} )); i=$(( i + 1 ))
+        (( byte < 248 )) || continue
+        out+=${alphabet:$(( byte % ${#alphabet} )):1}
+        count=$(( count + 1 ))
+        if (( count == 3 || count == 6 )); then out+=-; fi
     done
     printf '%s\n' "$out"
 }
 choose_profile_password() {
-    # choose_profile_password [1|2]: the answer Enter gives. A link without a trusted certificate starts on Yes.
-    local default=${1:-1} suggested
+    # choose_profile_password [untrusted]: Enter means no password. A link without a trusted certificate gets
+    # a word about it, and the choice stays with the person.
+    local suggested
     PROFILE_PASSWORD=''
-    if (( default == 2 )); then info 'This link has no trusted certificate, so locking the key is suggested.'; fi
-    confirm_choice 'Lock the private key with a password?' 'No password' 'Yes, make a password' normal '' "$default" || return 0
+    if [[ ${1:-} == untrusted ]]; then info 'This link has no trusted certificate. A password on the key protects the profile if someone else gets the file.'; fi
+    confirm_choice 'Lock the private key with a password?' 'No password' 'Yes, make a password' normal '' 1 || return 0
     suggested=$(make_password) || { fail 'Could not create a password.'; return 1; }
     PROFILE_PASSWORD=$suggested
     (( UI_TTY )) || return 0
@@ -869,6 +876,24 @@ prepare_download_copy() {
         warn "Could not make a copy for $DOWNLOAD_SSH_USER, which cannot read $file."
     fi
 }
+home_copy_of() {
+    # home_copy_of <name>: the private copy made for a non-root download user, when it is still this client's.
+    # Only a file that holds this client's certificate counts, so nothing else in that home is touched.
+    local name=$1 home copy want got
+    [[ $DOWNLOAD_SSH_USER != root ]] || return 1
+    home=$(getent passwd "$DOWNLOAD_SSH_USER" 2>/dev/null | cut -d: -f6) || return 1
+    copy=$home/$name.ovpn
+    [[ -n $home && -f $copy && ! -L $copy ]] || return 1
+    want=$(openssl x509 -in "$DARBAN_PKI/issued/$name.crt" -noout -fingerprint -sha256 2>/dev/null) || return 1
+    got=$(sed -n '/^<cert>$/,/^<\/cert>$/p' "$copy" | sed '1d;$d' | openssl x509 -noout -fingerprint -sha256 2>/dev/null) || return 1
+    [[ -n $want && $want == "$got" ]] || return 1
+    printf '%s\n' "$copy"
+}
+delete_home_copy() {
+    # delete_home_copy <path>: path from home_copy_of, found before anything changed.
+    [[ -n $1 ]] || return 0
+    if rm -f -- "$1"; then ok "Copy for $DOWNLOAD_SSH_USER deleted: $1"; audit "profile deleted from server: $1"; else warn "Could not delete the copy for $DOWNLOAD_SSH_USER: $1"; fi
+}
 share_by_download() {
     local name=$1 only
     choose_one 'Where will you download it?' 'Windows (PowerShell)' 'macOS or Linux' 'WinSCP or FileZilla (SFTP)' || CHOSEN=1
@@ -895,24 +920,24 @@ choose_link_port() {
 }
 host_is_ip() { [[ $1 =~ ^[0-9.]+$ ]]; }
 link_cert_usable() {
-    # Valid longer than the longest link (24 hours), and for the address clients will open.
-    local host=$1 check
+    # link_cert_usable <host> [seconds]: valid that much longer, by default longer than the longest link
+    # (24 hours), and for the address clients will open.
+    local host=$1 seconds=${2:-90000} check
     [[ -s $LINK_CERT && -s $LINK_KEY ]] || return 1
-    openssl x509 -in "$LINK_CERT" -noout -checkend 90000 >/dev/null 2>&1 || return 1
+    openssl x509 -in "$LINK_CERT" -noout -checkend "$seconds" >/dev/null 2>&1 || return 1
     if host_is_ip "$host"; then check=-checkip; else check=-checkhost; fi
     openssl x509 -in "$LINK_CERT" -noout "$check" "$host" 2>/dev/null | grep -q 'does match'
 }
 link_cert_is_trusted() { [[ -L $LINK_CERT ]]; }
 CERT_NAME=darban-ovpn-links
-CERTBOT_VENV=/opt/darban-certbot
-CERTBOT_PIP_VERSION=5.9.0
 # Let's Encrypt issues IP address certificates from Certbot 5.3 on; a hostname works with any version.
 CERTBOT_IP_MIN=5.3
+have_snap() { command -v snap >/dev/null; }
 version_at_least() { [[ $(printf '%s\n%s\n' "$2" "$1" | sort -V | head -n 1) == "$2" ]]; }
 find_certbot() {
     # find_certbot <minimum version>: prints a certbot that is new enough, if there is one.
     local candidate version
-    for candidate in /snap/bin/certbot "$CERTBOT_VENV/bin/certbot" "$(command -v certbot 2>/dev/null || true)"; do
+    for candidate in /snap/bin/certbot "$(command -v certbot 2>/dev/null || true)"; do
         [[ -n $candidate && -x $candidate ]] || continue
         version=$("$candidate" --version 2>/dev/null | awk '{print $2; exit}') || continue
         if [[ $version =~ ^[0-9]+(\.[0-9]+)*$ ]] && version_at_least "$version" "$1"; then printf '%s\n' "$candidate"; return 0; fi
@@ -926,28 +951,17 @@ record_added() {
 }
 install_certbot() {
     # install_certbot <minimum version>: Ubuntu's own package when it is new enough; otherwise the Certbot
-    # project's snap, or, without snapd, a pinned copy from the Python Package Index.
+    # project's snap. There is no third way: get_trusted_cert does not offer one without snap.
     local need=$1
     apt-get -o DPkg::Lock::Timeout=120 -qq update >/dev/null || true
     if [[ $need == 0 ]]; then
         info "Installing certbot from Ubuntu${S_ELL}"
         apt-get -o DPkg::Lock::Timeout=120 -y -q --no-install-recommends install certbot >/dev/null || return 1
         record_added 'package certbot'
-    elif command -v snap >/dev/null; then
+    else
         info "Installing certbot from the Certbot project (snap)${S_ELL}"
         snap install --classic certbot >/dev/null || return 1
         record_added 'snap certbot'
-    else
-        info "Installing certbot $CERTBOT_PIP_VERSION from the Python Package Index into $CERTBOT_VENV${S_ELL}"
-        if ! dpkg-query -W -f='${Status}' python3-venv 2>/dev/null | grep -q 'install ok installed'; then
-            apt-get -o DPkg::Lock::Timeout=120 -y -q --no-install-recommends install python3-venv >/dev/null || return 1
-            record_added 'package python3-venv'
-        fi
-        record_added "certbot_venv $CERTBOT_VENV"
-        if ! python3 -m venv "$CERTBOT_VENV" || ! "$CERTBOT_VENV/bin/pip" install -q "certbot==$CERTBOT_PIP_VERSION" >/dev/null; then
-            rm -rf -- "$CERTBOT_VENV"
-            return 1
-        fi
     fi
 }
 get_trusted_cert() {
@@ -960,6 +974,10 @@ get_trusted_cert() {
         target=(--preferred-profile shortlived --ip-address "$host")
     else
         target=(-d "$host")
+    fi
+    if [[ $need != 0 ]] && ! find_certbot "$need" >/dev/null && ! have_snap; then
+        info "A trusted certificate for an IP address needs certbot $CERTBOT_IP_MIN or newer. Ubuntu does not ship it yet, and this server has no snap to get it from the Certbot project."
+        return 1
     fi
     say
     info "A trusted certificate for $host avoids a browser warning, and is needed for the app to import from the link."
@@ -996,8 +1014,15 @@ make_self_signed_cert() {
 }
 ensure_link_cert() {
     local host=$1
+    local ends
     if link_cert_usable "$host"; then return 0; fi
     if get_trusted_cert "$host"; then return 0; fi
+    # A trusted certificate that still works is kept, so open links do not change to a self-signed one.
+    if link_cert_is_trusted && link_cert_usable "$host" 0; then
+        ends=$(openssl x509 -in "$LINK_CERT" -noout -enddate 2>/dev/null | cut -d= -f2)
+        warn "The current trusted certificate stays. It ends ${ends:-soon}; a link that lasts longer stops opening then."
+        return 0
+    fi
     make_self_signed_cert "$host"
 }
 start_link_service() {
@@ -1142,16 +1167,19 @@ active_links() {
     done
 }
 delete_export() {
-    local path
+    local path home_copy
     pick_client 'Delete the server-side .ovpn copy of which client?' can_delete_export || return 0
     path=$OUT_DIR/$PICKED.ovpn
+    home_copy=$(home_copy_of "$PICKED") || home_copy=''
     info 'The certificate stays valid and the profile can be re-exported later.'
     info 'Copies already downloaded to devices are not affected.'
+    if [[ -n $home_copy ]]; then info "The copy made for $DOWNLOAD_SSH_USER is deleted too: $home_copy"; fi
     confirm_choice "Delete $path?" 'No, keep it' 'Delete the server copy' danger || { cancelled; return 0; }
     ca_lock || return 1
     rm -f -- "$path"
     audit "profile deleted from server: $path"
     ok "Deleted: $path"
+    delete_home_copy "$home_copy"
 }
 run_easyrsa() {
     # Easy-RSA's own notices (e.g. "now run gen-crl") contradict the automated flow and bury the
@@ -1350,7 +1378,7 @@ repair_crl() {
     if (( publish )); then ok 'The CRL is repaired.'; else ok 'The unfinished revocation is complete.'; fi
 }
 revoke_client() {
-    local name state client_serial db_serial path pending unknown rc=0
+    local name state client_serial db_serial path pending unknown home_copy rc=0
     pending=$(revocation_pending_names | join_lines) || pending=''
     if [[ -n $pending ]]; then
         urgent "Revoked but NOT blocked yet: $(safe_text "$pending"). Finish this first: Maintenance $S_CRUMB 2, or: sudo darban repair-crl"
@@ -1378,6 +1406,8 @@ revoke_client() {
     [[ $(darban_norm_serial "$client_serial") == "$(darban_norm_serial "$db_serial")" ]] || {
         warn 'Client certificate serial does not match the CA index. No changes made.'; return 1;
     }
+    # Found now, while the certificate is still in issued/.
+    home_copy=$(home_copy_of "$name") || home_copy=''
     say
     printf '%sRevoking %s is PERMANENT:%s\n' "$C_BOLD" "$name" "$C_RESET"
     bullet 'every copy of its .ovpn profile stops working for new connections'
@@ -1400,6 +1430,7 @@ revoke_client() {
     if path=$(profile_path "$name"); then
         if rm -f -- "$path"; then ok "Server copy deleted: $path"; else warn 'Could not delete the server copy; the revocation still succeeded.'; fi
     fi
+    delete_home_copy "$home_copy"
     ca_unlock
     disconnect_revoked "$name"
     say
@@ -2035,6 +2066,40 @@ check_expiry() {
     elif (( $(days_until "$2") <= EXPIRY_WARN_DAYS )); then check warn "$1 valid until $(describe_expiry "$2") $S_ARROW renew soon (not automated)"
     else check ok "$1 valid until $(describe_expiry "$2")"; fi
 }
+network_rules_health() {
+    # What the kernel runs now is checked, not what a file says: a flushed chain or an old network must not pass.
+    local net nat=$CONFIG_DIR/nat.nft fix
+    if ! nft list table ip darban >/dev/null 2>&1; then
+        if nft list table ip mzx_openvpn >/dev/null 2>&1; then check ok 'NAT table for the VPN present'; return 0; fi
+        if [[ -f $nat ]]; then
+            check bad "The NAT rules of this tool are not loaded $S_ARROW sudo systemctl restart darban-nat.service"
+        else
+            check info 'NAT table of this tool not found; NAT may be managed elsewhere'
+        fi
+        return 0
+    fi
+    net=$(darban_conf_net)
+    if ! valid_ipv4 "${net:-}"; then
+        check info 'NAT table present; the VPN network in server.conf is not a single /24, so it was not compared'
+        return 0
+    fi
+    # A file that is already right only needs loading; otherwise the installer writes it again.
+    if [[ -f $nat ]] && grep -Fq "ip saddr $net/24 ip daddr 169.254.0.0/16 drop" "$nat" && grep -Fq "ip saddr $net/24 oifname" "$nat"; then
+        fix='sudo systemctl restart darban-nat.service'
+    else
+        fix="curl -fsSL https://github.com/$DARBAN_REPO/releases/download/v$DARBAN_VERSION/get.sh | sudo bash -s -- --version v$DARBAN_VERSION"
+    fi
+    if darban_live_nat_ok "$net"; then
+        check ok "NAT for the VPN network $net/24 present"
+    else
+        check bad "NAT does not match the VPN network $net/24 of server.conf, so clients have no internet $S_ARROW $fix"
+    fi
+    if darban_live_isolation_ok "$net"; then
+        check ok 'VPN clients are kept apart, and away from the cloud metadata service'
+    else
+        check bad "VPN clients may reach each other, or the cloud metadata service $S_ARROW $fix"
+    fi
+}
 health() {
     local version state enabled dco port e crl_err host resolved next last value issue exports pending
     if [[ -n $SERVER_PROBLEM ]]; then
@@ -2102,22 +2167,16 @@ health() {
     esac
     # ufw can be turned on long after the setup, and then it quietly blocks the VPN.
     if [[ -n ${port:-} ]] && command -v ufw >/dev/null && value=$(ufw status 2>/dev/null) && [[ $value == *'Status: active'* ]]; then
-        if ! grep -Eq "^$port(/udp)?[[:space:]]" <<<"$value"; then
+        # Only an ALLOW rule counts: a DENY rule for the same port, or tun0 named in another rule, is not one.
+        if ! grep -Eq "^$port(/udp)?[[:space:]]+ALLOW[[:space:]]" <<<"$value"; then
             check bad "ufw is active and blocks UDP $port $S_ARROW sudo ufw allow $port/udp"
-        elif ! grep -q 'tun0' <<<"$value"; then
+        elif ! grep -Eq '[[:space:]]ALLOW FWD[[:space:]].*[[:space:]]on tun0([[:space:]]|$)' <<<"$value"; then
             check bad "ufw is active and blocks forwarding from the VPN $S_ARROW sudo ufw route allow in on tun0 out on $(ip -4 route show default 2>/dev/null | awk '{for (i=1; i<NF; i++) if ($i=="dev") {print $(i+1); exit}}')"
         else
             check ok 'ufw allows the VPN'
         fi
     fi
-    if nft list table ip darban >/dev/null 2>&1; then
-        if nft list chain ip darban forward >/dev/null 2>&1; then
-            check ok 'VPN clients are kept apart, and away from the cloud metadata service'
-        else
-            check warn "VPN clients can reach each other $S_ARROW run the install command again to add the rule"
-        fi
-    fi
-    if nft list table ip darban >/dev/null 2>&1 || nft list table ip mzx_openvpn >/dev/null 2>&1; then check ok 'NAT table for the VPN present'; else check info 'NAT table of this tool not found; NAT may be managed elsewhere'; fi
+    network_rules_health
 
     group 'Profiles & downloads'
     host=$(domain)

@@ -104,9 +104,7 @@ mapfile -t certificates < <(awk '$1=="certbot_cert" && $2 ~ /^[A-Za-z0-9._-]+$/ 
 mapfile -t apt_added < <(awk '$1=="apt_added" {print $2}' "$MARKER")
 mapfile -t apt_saved < <(awk '$1=="apt_saved" {print $2}' "$MARKER")
 certbot_venv=$(awk '$1=="certbot_venv" {print $2}' "$MARKER")
-out_dir_existed=0
-if grep -qx out_dir_existed "$MARKER"; then out_dir_existed=1; fi
-# The client names, read before the CA goes, for a profile folder that held other files too.
+# The client names, read before the CA goes: only their profiles leave the profile folder.
 mapfile -t client_names < <(awk -F '\t' 'NF>=6 && $6 ~ /\/CN=/ {cn=$6; sub(/^.*\/CN=/,"",cn); sub(/\/.*/,"",cn); print cn}' "$PKI/index.txt" 2>/dev/null | sort -u)
 
 echo 'Stopping OpenVPN and NAT...'
@@ -131,7 +129,8 @@ for name in "${certificates[@]}"; do
     done
 done
 if grep -qx 'snap certbot' "$MARKER" && command -v snap >/dev/null; then try snap remove certbot; fi
-if [[ $certbot_venv == /opt/* ]]; then try rm -rf -- "$certbot_venv"; fi
+# Only v1.0.0-beta.1 made this folder, and only under this exact name.
+if [[ $certbot_venv == /opt/darban-certbot ]]; then try rm -rf -- "$certbot_venv"; fi
 
 echo 'Removing packages this setup added...'
 purge_exact "${added_packages[@]}"
@@ -159,13 +158,13 @@ try rm -f -- "$SERVER_DIR"/server.conf "$SERVER_DIR"/server.conf.darban-*backup.
 if [[ -d $SERVER_DIR ]] && ! rmdir -- "$SERVER_DIR" 2>/dev/null; then
     KEPT_FILES=$SERVER_DIR
 fi
-if (( out_dir_existed )); then
-    # The folder held other files before the setup, so only this tool's profiles leave it.
-    for name in "${client_names[@]}"; do
-        if [[ $name =~ ^[A-Za-z0-9][A-Za-z0-9._@+-]*$ ]]; then try rm -f -- "$OUT_DIR/$name.ovpn"; fi
-    done
-else
-    try rm -rf -- "$OUT_DIR"
+# Never the whole folder: a file someone else put there, before or after the setup, stays.
+for name in "${client_names[@]}"; do
+    if [[ $name =~ ^[A-Za-z0-9][A-Za-z0-9._@+-]*$ ]]; then try rm -f -- "$OUT_DIR/$name.ovpn"; fi
+done
+try rm -f -- "$OUT_DIR"/.profile.*
+if [[ -d $OUT_DIR ]] && ! rmdir -- "$OUT_DIR" 2>/dev/null; then
+    KEPT_FILES+="${KEPT_FILES:+ and in }$OUT_DIR"
 fi
 try rm -rf -- "$PKI"
 

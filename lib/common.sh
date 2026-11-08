@@ -56,6 +56,38 @@ ip_to_int() {
 }
 is_private_ip() { [[ $1 =~ ^(10\.|127\.|192\.168\.|172\.(1[6-9]|2[0-9]|3[01])\.|100\.(6[4-9]|[7-9][0-9]|1[01][0-9]|12[0-7])\.) ]]; }
 valid_subnet() { valid_ipv4 "$1" && [[ $1 == *.0 ]] && is_private_ip "$1" && [[ $1 != 127.* && $1 != 100.* ]]; }
+
+# ---------- the tool's own nftables table ----------
+# darban_nat_rules NET IFACE: NAT for the VPN, and clients kept apart. Loaded with nft -f in one transaction.
+darban_nat_rules() {
+    cat <<EOF
+table ip darban
+delete table ip darban
+table ip darban {
+    chain postrouting {
+        type nat hook postrouting priority srcnat;
+        ip saddr $1/24 oifname "$2" masquerade
+    }
+    # Clients cannot reach each other, or the cloud provider's metadata service, through this server.
+    chain forward {
+        type filter hook forward priority filter; policy accept;
+        ip saddr $1/24 ip daddr $1/24 drop
+        ip saddr $1/24 ip daddr 169.254.0.0/16 drop
+    }
+}
+EOF
+}
+# The VPN network of server.conf, as A.B.C.0, when it is a single /24.
+darban_conf_net() {
+    awk '$1=="server" && $3=="255.255.255.0" {print $2; exit}' "${1:-$DARBAN_SERVER_CONF}" 2>/dev/null
+}
+# The live rules, not the file: a flushed chain or a changed rule must not pass.
+darban_live_nat_ok() { nft list chain ip darban postrouting 2>/dev/null | grep -Fq "ip saddr $1/24 "; }
+darban_live_isolation_ok() {
+    local rules
+    rules=$(nft list chain ip darban forward 2>/dev/null) || return 1
+    grep -Fq "ip saddr $1/24 ip daddr $1/24 drop" <<<"$rules" && grep -Fq "ip saddr $1/24 ip daddr 169.254.0.0/16 drop" <<<"$rules"
+}
 subnet_conflict() {
     # Prints the first route overlapping this /24: clients could not reach it through the VPN.
     local start route addr bits other_size other_start

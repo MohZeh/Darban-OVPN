@@ -38,9 +38,11 @@ If you log in with a user other than `root`, that user gets a private copy of th
 
 ## A password on the key
 
-Any way can lock the key with a password. Answer **Yes, make a password**. The tool suggests a short random password in three groups, such as `k7m-3xt-9vw`, easy to type on a phone. Press Enter to use it, or type your own of at least 9 characters. It is shown **only once**. Send it by another route than the link, for example by SMS or a call, so one leak is not enough. The app asks for it when connecting.
+Usually no password is needed, and Enter means **No password**. A password is for when the link has no trusted certificate and the file could be taken on the way.
 
-When a link has no trusted certificate, the suggested answer is **Yes**: even if someone took the file on the way, it is useless without the password.
+Answer **Yes, make a password**, and the tool suggests a short random password in three groups, such as `k7m-3xt-9vw`, easy to type on a phone. Press Enter to use it, or type your own of at least 9 characters. It cannot be shown again later. Send it by another route than the link, for example by SMS or a call, so one leak is not enough. The app asks for it when connecting.
+
+The key is locked so that each guess takes a long time, which makes a short password hard to guess from a stolen file. It is not impossible: if a link was used by someone else, revoke the client anyway.
 
 ## After changing the address or port
 
@@ -51,9 +53,9 @@ Profiles keep the address they were made with. Send them again from menu `4`.
 The tool offers a free certificate from Let's Encrypt, for a domain name or for a public IP address. It needs TCP port 80 open in your provider's firewall for a moment.
 
 - **Domain name:** the certificate comes from Ubuntu's `certbot` package.
-- **IP address:** Let's Encrypt gives a six-day certificate, and a new one is requested when a link needs it. This needs `certbot` 5.3 or newer, which Ubuntu does not have yet, so the tool installs it from the Certbot project as a snap, or, without snap, a fixed version from the Python Package Index.
+- **IP address:** Let's Encrypt gives a six-day certificate, and a new one is requested when a link needs it. This needs `certbot` 5.3 or newer, which Ubuntu does not have yet, so the tool installs it from the Certbot project as a snap. A server without snap is not offered one.
 
-If you decline, or the request fails, the tool makes its own certificate. The link still works and is encrypted, but the browser shows a warning, and direct import into the app may not work. The tool shows a note to send with the link, and the certificate fingerprint.
+If a new certificate cannot be had while the current trusted one still works, the current one stays, and the tool says when it ends. Otherwise, if you decline, or the request fails, the tool makes its own certificate. The link still works and is encrypted, but the browser shows a warning, and direct import into the app may not work. The tool shows a note to send with the link, and the certificate fingerprint.
 
 ## How links are protected
 
