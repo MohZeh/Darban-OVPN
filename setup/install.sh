@@ -144,6 +144,9 @@ if [[ -f $NAT_FILE ]]; then
             echo 'INSTALL INCOMPLETE: could not load the NAT rules that keep VPN clients apart. Run the same command again; if it fails again, see: sudo darban status' >&2
             exit 1
         fi
+    else
+        # A file edited by hand is left as it is, so an update never blocks; but it is not passed over in silence.
+        echo "NOTE: the NAT rules were not checked, because server.conf has no single /24 VPN network or $NAT_FILE names no outgoing interface. See: sudo darban status" >&2
     fi
 fi
 printf '%s\n' "$VERSION" > "$LIB/.installed"

@@ -1381,6 +1381,22 @@ alice
 0
 ')
     has 'a trusted certificate that still works stays' 'The current trusted certificate stays' "$out"
+    menu '5
+1
+0
+' >/dev/null
+    out=$(menu '4
+alice
+1
+2
+1
+3
+1
+0
+')
+    has 'a link longer than the certificate is refused' 'The link certificate ends before 24 hours are over' "$out"
+    has 'and a shorter one is made' "https://vpn.example.com:$LINK_TEST_PORT/l/" "$out"
+    has 'for the time chosen after it' '1 hour, one use' "$out"
     ok_if 'it is not replaced by a self-signed one' test -L "$E/cfg/link-cert.pem"
     has 'and the link is made' "https://vpn.example.com:$LINK_TEST_PORT/l/" "$out"
     stop_links_stub
@@ -1942,6 +1958,7 @@ STUB
     out=$(mgr status)
     lacks 'rules for another network do not pass' 'VPN clients are kept apart' "$out"
     has 'NAT for another network is reported' 'NAT does not match the VPN network 10.8.0.0/24' "$out"
+    has 'and what it costs, true for a split tunnel too' 'cannot reach the internet through the VPN' "$out"
     darban_nat_rules 10.9.0.0 eth0 > "$E/cfg/nat.nft"
     has 'a file for another network needs the installer' '--version v' "$(mgr status)"
     rm -f "$E/live-post" "$E/live-forward"
@@ -2064,6 +2081,8 @@ EOF
     rc_is 'the real terminal path takes only Enter' 0 "$rc"
     if (( rc != 0 )); then printf '%s\n' "$out" | tail -n 25 | cut -c1-150 | sed 's/^/    | /'; fi
     grep -qx setup_complete "$E/cfg/.server-setup-started"; rc_is 'the setup finished' 0 "$?"
+    has 'the address step names a trusted certificate, not a domain, as what avoids the warning' 'the tool can get a trusted certificate' "$out"
+    has 'the last check says nothing is installed yet' 'Nothing is installed yet' "$out"
 }
 
 test_download_uses_a_copy_the_user_can_read() {

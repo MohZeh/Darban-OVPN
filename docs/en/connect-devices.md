@@ -35,7 +35,7 @@ The file holds a private key. Do not share or publish it.
 
 ## Linux
 
-On Ubuntu or Debian, install the client and start it with the file. Write the real name of your file instead of `client1.ovpn`. Other distributions have the same `openvpn` package in their own package manager.
+On Ubuntu or Debian, install the client and start it with the file. Run the second command in the folder that holds the file, for example after `cd ~/Downloads`, and write the real name of your file instead of `client1.ovpn`. Other distributions have the same `openvpn` package in their own package manager.
 
 ```bash
 sudo apt install -y openvpn

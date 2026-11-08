@@ -1062,12 +1062,22 @@ prepare_link() {
 share_by_link() {
     local name=$1 want_qr=$2 host minutes label token key now expires url temp
     host=$(domain)
-    choose_one 'How long should the link work?' '1 hour' '15 minutes' '24 hours' || CHOSEN=1
-    case $CHOSEN in
-        2) minutes=15 label='15 minutes' ;;
-        3) minutes=1440 label='24 hours' ;;
-        *) minutes=60 label='1 hour' ;;
-    esac
+    while :; do
+        choose_one 'How long should the link work?' '1 hour' '15 minutes' '24 hours' || CHOSEN=0
+        case $CHOSEN in
+            2) minutes=15 label='15 minutes' ;;
+            3) minutes=1440 label='24 hours' ;;
+            *) minutes=60 label='1 hour' ;;
+        esac
+        # A link must not outlive its certificate. That can only happen with a trusted one that could not be renewed.
+        if link_cert_usable "$host" $(( minutes * 60 )); then break; fi
+        if ! link_cert_usable "$host" 900; then
+            fail 'The link certificate ends in less than 15 minutes, so no link was made. Open TCP 80 in your provider firewall, and share again for a new certificate.'
+            return 1
+        fi
+        warn "The link certificate ends before $label are over. Choose a shorter time."
+        if (( CHOSEN == 0 )); then minutes=15 label='15 minutes'; break; fi
+    done
     ca_lock || return 1
     # The answers above took time: this client may have been revoked since.
     client_valid "$name" || { warn "\"$name\" no longer has a valid certificate, so no link was made."; return 1; }
@@ -2098,13 +2108,13 @@ network_rules_health() {
         fix=$reinstall
     fi
     if ! darban_live_nat_ok "$net"; then
-        check bad "NAT does not match the VPN network $net/24 of server.conf, so clients have no internet $S_ARROW $fix"
+        check bad "NAT does not match the VPN network $net/24 of server.conf, so clients cannot reach the internet through the VPN $S_ARROW $fix"
     else
         # The rule can be right for the network and still send traffic out through the wrong interface.
         live_iface=$(nft list chain ip darban postrouting 2>/dev/null | grep -F "ip saddr $net/24 oifname " | darban_nat_iface)
         route_iface=$(darban_default_iface)
         if [[ -n $live_iface ]] && ! ip link show dev "$live_iface" >/dev/null 2>&1; then
-            check bad "NAT sends VPN traffic out through $(safe_text "$live_iface"), which this server no longer has, so clients have no internet $S_ARROW $reinstall"
+            check bad "NAT sends VPN traffic out through $(safe_text "$live_iface"), which this server no longer has, so clients cannot reach the internet through the VPN $S_ARROW $reinstall"
         elif [[ $live_iface =~ ^[A-Za-z0-9_.@-]+$ && $route_iface =~ ^[A-Za-z0-9_.@-]+$ && $live_iface != "$route_iface" ]]; then
             check warn "NAT sends VPN traffic out through $(safe_text "$live_iface"), but the default route uses $(safe_text "$route_iface"). If that is not on purpose $S_ARROW sudo sed -i 's/oifname \"$live_iface\"/oifname \"$route_iface\"/' $nat && sudo systemctl restart darban-nat.service"
         else
