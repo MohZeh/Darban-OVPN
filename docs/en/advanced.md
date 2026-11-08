@@ -9,7 +9,7 @@ You do not need this page for normal use.
 Download it, read it, then run it:
 
 ```bash
-curl -fsSL https://github.com/MohZeh/Darban-OVPN/releases/download/v1.0.0-rc.1/get.sh -o get.sh
+curl -fsSL https://github.com/MohZeh/Darban-OVPN/releases/download/v1.0.0-rc.2/get.sh -o get.sh
 ```
 
 ```bash
@@ -25,19 +25,19 @@ The one-line command runs `curl` inside `sudo` on purpose. In the form `curl ...
 Use the address of that release. It installs its own version:
 
 ```bash
-sudo bash -c 'curl -fsSL https://github.com/MohZeh/Darban-OVPN/releases/download/v1.0.0-rc.1/get.sh | bash'
+sudo bash -c 'curl -fsSL https://github.com/MohZeh/Darban-OVPN/releases/download/v1.0.0-rc.2/get.sh | bash'
 ```
 
 To go back to an older version on an installed server, name it:
 
 ```bash
-sudo bash -c 'curl -fsSL https://github.com/MohZeh/Darban-OVPN/releases/download/v1.0.0-rc.1/get.sh | bash -s -- --version v1.0.0-beta.1'
+sudo bash -c 'curl -fsSL https://github.com/MohZeh/Darban-OVPN/releases/download/v1.0.0-rc.2/get.sh | bash -s -- --version v1.0.0-rc.1'
 ```
 
 ## Install without questions
 
 ```bash
-sudo bash -c 'curl -fsSL https://github.com/MohZeh/Darban-OVPN/releases/download/v1.0.0-rc.1/get.sh | bash -s -- --yes --host vpn.example.com --port 1194'
+sudo bash -c 'curl -fsSL https://github.com/MohZeh/Darban-OVPN/releases/download/v1.0.0-rc.2/get.sh | bash -s -- --yes --host vpn.example.com --port 1194'
 ```
 
 | Option | Meaning |
