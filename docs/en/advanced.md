@@ -9,7 +9,7 @@ You do not need this page for normal use.
 Download it, read it, then run it:
 
 ```bash
-curl -fsSL https://github.com/MohZeh/Darban-OVPN/releases/latest/download/get.sh -o get.sh
+curl -fsSL https://github.com/MohZeh/Darban-OVPN/releases/download/v1.0.0-rc.1/get.sh -o get.sh
 ```
 
 ```bash
@@ -29,13 +29,13 @@ curl -fsSL https://github.com/MohZeh/Darban-OVPN/releases/download/v1.0.0-rc.1/g
 To go back to an older version on an installed server, name it:
 
 ```bash
-curl -fsSL https://github.com/MohZeh/Darban-OVPN/releases/latest/download/get.sh | sudo bash -s -- --version v1.0.0-rc.1
+curl -fsSL https://github.com/MohZeh/Darban-OVPN/releases/download/v1.0.0-rc.1/get.sh | sudo bash -s -- --version v1.0.0-beta.1
 ```
 
 ## Install without questions
 
 ```bash
-curl -fsSL https://github.com/MohZeh/Darban-OVPN/releases/latest/download/get.sh | sudo bash -s -- --yes --host vpn.example.com --port 1194
+curl -fsSL https://github.com/MohZeh/Darban-OVPN/releases/download/v1.0.0-rc.1/get.sh | sudo bash -s -- --yes --host vpn.example.com --port 1194
 ```
 
 | Option | Meaning |

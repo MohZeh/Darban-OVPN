@@ -12,19 +12,19 @@
 
 ## نصب یا به‌روزرسانی
 
-روی **یک VPS تازهٔ Ubuntu 24.04 یا 26.04** و با اتصال مستقیم SSH. همین دستور نصب موجود را هم به‌روز می‌کند:
+روی **یک VPS تازهٔ Ubuntu 24.04 یا 26.04** و با اتصال مستقیم SSH. همین دستور نصب موجود را هم به‌روز می‌کند. تا انتشار `v1.0.0`، نسخهٔ کاندید را نصب می‌کند:
 
 </div>
 
 ```bash
-curl -fsSL https://github.com/MohZeh/Darban-OVPN/releases/latest/download/get.sh | sudo bash
+curl -fsSL https://github.com/MohZeh/Darban-OVPN/releases/download/v1.0.0-rc.1/get.sh | sudo bash
 ```
 
 <div dir="rtl">
 
 با Enter آدرس و پورت پیشنهادی را قبول کن و با یک Enter دیگر نصب را شروع کن. بعد از آن، ابزار پیشنهاد می‌دهد اولین کلاینت را بسازی، آن را به اشتراک می‌گذارد و وقتی وصل شد خبر می‌دهد.
 
-**[راهنمای قدم‌به‌قدم را دنبال کن](docs/fa/getting-started.md)**، از سرور تازه تا اولین کاربر متصل. تا زمانی که فقط نسخهٔ پیش از انتشار وجود دارد، آدرس یک نسخه را از صفحهٔ [Releases](https://github.com/MohZeh/Darban-OVPN/releases) بردار: به‌جای `latest/download` بنویس `download/` و بعد نام نسخه، مثلاً `download/v1.0.0-beta.1`.
+**[راهنمای قدم‌به‌قدم را دنبال کن](docs/fa/getting-started.md)**، از سرور تازه تا اولین کاربر متصل. نسخهٔ کاندید برای آزمون است: آن را روی سروری امتحان کن که در حال استفاده نیست.
 
 ## چرا دربان
 
