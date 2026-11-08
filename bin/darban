@@ -2286,7 +2286,7 @@ draw_advanced() {
     ciphers=$(conf_value data-ciphers)
     keepalive=$(conf_value keepalive)
     verb=$(conf_value verb)
-    download=not set
+    download='not set'
     if [[ -n $DOWNLOAD_SSH_HOST ]]; then download=$DOWNLOAD_SSH_USER@$DOWNLOAD_SSH_HOST:$DOWNLOAD_SSH_PORT; fi
     days=${CLIENT_CERT_DAYS:-Easy-RSA default}
     clear_screen

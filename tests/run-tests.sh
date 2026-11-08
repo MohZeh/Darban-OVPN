@@ -1909,6 +1909,14 @@ STUB
     has 'rules that are not loaded are reported' 'The NAT rules of this tool are not loaded' "$(mgr status)"
 }
 
+test_advanced_menu_prints_only_itself() {
+    # An unquoted 'download=not set' ran the set builtin, which printed every shell variable.
+    local out
+    out=$(menu '7\n3\n0\n0\n0\n')
+    has 'the Advanced menu opens' 'Download access' "$out"
+    lacks 'and prints no shell variables' 'BASH_VERSION=' "$out"
+}
+
 test_next_steps_after_a_new_setup() {
     local out rc
     prepare_blank_server
