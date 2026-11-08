@@ -2,6 +2,19 @@
 
 All notable changes are recorded here. The format follows [Keep a Changelog](https://keepachangelog.com/) and versions follow [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Changed
+- Enter means no password on the key. A password, when chosen, is much slower to guess from a stolen file.
+- A trusted certificate for an IP address comes only from the Certbot snap; a server without snap is not offered one.
+
+### Fixed
+- Diagnostics check the rules that really run: both rules that keep clients apart, NAT for the current VPN network, and an ALLOW rule in `ufw`.
+- An update repairs NAT left on another network, and a failed NAT rule leaves the install marked unfinished, so the same command tries again.
+- Repairing an install that stopped half way no longer fails on files that were never copied.
+- A trusted link certificate that still works stays when a new one cannot be had.
+- Remove everything never deletes the profile folder as a whole, and removing or revoking a profile also deletes the copy made for a non-root download user.
+
 ## [1.0.0-beta.1] - 2026-11-07
 
 First pre-release, for testing only.

@@ -429,22 +429,7 @@ configure_network() {
     chmod 644 "$SYSCTL_FILE"
     sysctl -q -p "$SYSCTL_FILE"
     # One table of its own: nothing else in the host's firewall is touched.
-    cat >"$CONFIG_DIR/nat.nft" <<EOF
-table ip darban
-delete table ip darban
-table ip darban {
-    chain postrouting {
-        type nat hook postrouting priority srcnat;
-        ip saddr $VPN_NET/24 oifname "$IFACE" masquerade
-    }
-    # Clients cannot reach each other, or the cloud provider's metadata service, through this server.
-    chain forward {
-        type filter hook forward priority filter; policy accept;
-        ip saddr $VPN_NET/24 ip daddr $VPN_NET/24 drop
-        ip saddr $VPN_NET/24 ip daddr 169.254.0.0/16 drop
-    }
-}
-EOF
+    darban_nat_rules "$VPN_NET" "$IFACE" >"$CONFIG_DIR/nat.nft"
     chmod 600 "$CONFIG_DIR/nat.nft"
     cat >"$NAT_UNIT" <<EOF
 [Unit]

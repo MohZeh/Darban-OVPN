@@ -220,12 +220,27 @@ first_ip=$(grep -oE 'net_addr_v4_add: [0-9.]+' "$LOG/f.log" | awk '{print $2}' |
 metadata() { ip netns exec "$NS" curl -s -o /dev/null -w '%{http_code}' --max-time 5 -H Metadata:true 'http://169.254.169.254/metadata/instance?api-version=2021-02-01' || true; }
 nft delete chain ip darban forward
 reach=no; if ip netns exec "$NS-b" ping -c 2 -W 2 "$first_ip" >/dev/null 2>&1; then reach=yes; fi
-echo "Without the rule: one client reaches another: $reach; metadata service answers: $(metadata)"
+code=$(metadata)
+echo "Without the rule: one client reaches another: $reach; metadata service answers: $code"
+# The check after the rule proves something only if the path is really open without it.
+if [[ $reach != yes ]]; then echo 'FAIL: without the rule one client could not reach another, so the test would prove nothing.'; exit 1; fi
+metadata_here=1
+if [[ $code == 000 ]]; then metadata_here=0; echo 'NOTE: no metadata service answers on this runner, so only client-to-client is judged.'; fi
+if darban status >"$LOG/no-rule.log" 2>&1; then echo 'FAIL: status reported missing isolation as healthy.'; exit 1; fi
+grep -q 'VPN clients may reach each other' "$LOG/no-rule.log"
 systemctl restart darban-nat.service
-nft list chain ip darban forward >/dev/null
+darban status >"$LOG/rule.log" 2>&1
+grep -q 'VPN clients are kept apart' "$LOG/rule.log"
 if ip netns exec "$NS-b" ping -c 2 -W 2 "$first_ip" >/dev/null 2>&1; then echo 'FAIL: one client reaches another.'; exit 1; fi
-if [[ $(metadata) == 200 ]]; then echo 'FAIL: a client reaches the cloud metadata service.'; exit 1; fi
-echo 'PASS: clients are kept apart, and away from the cloud metadata service.'
+# Any HTTP answer, 401 or 404 included, means the service was reached.
+if (( metadata_here )) && [[ $(metadata) != 000 ]]; then echo 'FAIL: a client reaches the cloud metadata service.'; exit 1; fi
+# An empty chain must not pass as protection.
+nft flush chain ip darban forward
+if darban status >"$LOG/flushed.log" 2>&1; then echo 'FAIL: status reported an empty chain as healthy.'; exit 1; fi
+grep -q 'VPN clients may reach each other' "$LOG/flushed.log"
+systemctl restart darban-nat.service
+darban status >/dev/null
+echo 'PASS: clients are kept apart, and away from the cloud metadata service, and status sees when they are not.'
 kill "$(cat "$LOG/ns-b.pid")" 2>/dev/null || true
 kill "$(cat "$LOG/ns.pid")" 2>/dev/null || true
 sleep 1
@@ -266,7 +281,20 @@ if nft list chain ip darban forward >/dev/null 2>&1; then echo 'FAIL: the old la
 bash setup/install.sh
 nft list chain ip darban forward >/dev/null
 grep -q 'chain forward' /etc/darban/nat.nft
+darban status >"$LOG/updated.log" 2>&1
+grep -q 'VPN clients are kept apart' "$LOG/updated.log"
 echo 'PASS: an update adds the rule to an older install.'
+
+# NAT left on another network, as a network change cut off half way could leave it, is found and put right.
+net=$(awk '$1=="server" {print $2; exit}' /etc/openvpn/server/server.conf)
+sed -i "s#$net/24#10.123.0.0/24#g" /etc/darban/nat.nft
+systemctl restart darban-nat.service
+if darban status >"$LOG/mismatch.log" 2>&1; then echo 'FAIL: status reported NAT for another network as healthy.'; exit 1; fi
+grep -q "NAT does not match the VPN network $net/24" "$LOG/mismatch.log"
+bash setup/install.sh
+grep -q "ip saddr $net/24 oifname" /etc/darban/nat.nft
+darban status >/dev/null
+echo 'PASS: NAT for another network is reported, and the installer puts it right.'
 
 # A real update and the way back. The new version is this one under another number.
 current=$(darban version)
