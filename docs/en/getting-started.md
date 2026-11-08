@@ -27,14 +27,14 @@ ssh root@203.0.113.10
 ## Step 3: Run the install command
 
 ```bash
-curl -fsSL https://github.com/MohZeh/Darban-OVPN/releases/latest/download/get.sh | sudo bash
+curl -fsSL https://github.com/MohZeh/Darban-OVPN/releases/download/v1.0.0-rc.1/get.sh | sudo bash
 ```
 
 **You should see:** `Step 1 of 2: Server address`.
 
 **If not:**
 - `curl: command not found`: run `sudo apt update && sudo apt install -y curl`, then run the command again.
-- `No stable release is published yet`: use the address of a version from the [Releases](https://github.com/MohZeh/Darban-OVPN/releases) page. In the command, replace `latest/download` with `download/` and the version, for example `download/v1.0.0-beta.1`.
+- `curl: (22)` and `404`: that version is not published. Take the command of a version from the [Releases](https://github.com/MohZeh/Darban-OVPN/releases) page.
 
 ## Step 4: Answer the questions
 

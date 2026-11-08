@@ -4,6 +4,10 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## [Unreleased]
 
+## [1.0.0-rc.1] - 2026-11-08
+
+Release candidate for `v1.0.0`, for testing on a server that is not in use.
+
 ### Changed
 - Enter means no password on the key. A password, when chosen, is much slower to guess from a stolen file.
 - A trusted certificate for an IP address comes from a certbot that is new enough, or from the Certbot snap; a server with neither is not offered one.

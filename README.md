@@ -20,15 +20,15 @@ Darban (دربان, "gatekeeper") installs a current OpenVPN server and then han
 
 ## Install or update
 
-On a **fresh Ubuntu 24.04 or 26.04 VPS**, connected through direct SSH. The same command also updates an existing installation:
+On a **fresh Ubuntu 24.04 or 26.04 VPS**, connected through direct SSH. The same command also updates an existing installation. Until `v1.0.0` is out, it installs the release candidate:
 
 ```bash
-curl -fsSL https://github.com/MohZeh/Darban-OVPN/releases/latest/download/get.sh | sudo bash
+curl -fsSL https://github.com/MohZeh/Darban-OVPN/releases/download/v1.0.0-rc.1/get.sh | sudo bash
 ```
 
 Press Enter to accept the suggested address and port, and Enter again to install. The tool then offers to create your first client, shares it, and tells you when it connects.
 
-**[Follow the step-by-step guide](docs/en/getting-started.md)**, from a new server to your first connected user. While only pre-releases exist, use the address of a version from the [Releases](https://github.com/MohZeh/Darban-OVPN/releases) page: replace `latest/download` with `download/` and the version, for example `download/v1.0.0-beta.1`.
+**[Follow the step-by-step guide](docs/en/getting-started.md)**, from a new server to your first connected user. A release candidate is for testing: try it on a server that is not in use.
 
 ## Why Darban
 

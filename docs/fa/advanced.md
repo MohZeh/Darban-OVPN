@@ -13,7 +13,7 @@
 </div>
 
 ```bash
-curl -fsSL https://github.com/MohZeh/Darban-OVPN/releases/latest/download/get.sh -o get.sh
+curl -fsSL https://github.com/MohZeh/Darban-OVPN/releases/download/v1.0.0-rc.1/get.sh -o get.sh
 ```
 
 ```bash
@@ -41,7 +41,7 @@ curl -fsSL https://github.com/MohZeh/Darban-OVPN/releases/download/v1.0.0-rc.1/g
 </div>
 
 ```bash
-curl -fsSL https://github.com/MohZeh/Darban-OVPN/releases/latest/download/get.sh | sudo bash -s -- --version v1.0.0-rc.1
+curl -fsSL https://github.com/MohZeh/Darban-OVPN/releases/download/v1.0.0-rc.1/get.sh | sudo bash -s -- --version v1.0.0-beta.1
 ```
 
 <div dir="rtl">
@@ -51,7 +51,7 @@ curl -fsSL https://github.com/MohZeh/Darban-OVPN/releases/latest/download/get.sh
 </div>
 
 ```bash
-curl -fsSL https://github.com/MohZeh/Darban-OVPN/releases/latest/download/get.sh | sudo bash -s -- --yes --host vpn.example.com --port 1194
+curl -fsSL https://github.com/MohZeh/Darban-OVPN/releases/download/v1.0.0-rc.1/get.sh | sudo bash -s -- --yes --host vpn.example.com --port 1194
 ```
 
 <div dir="rtl">
