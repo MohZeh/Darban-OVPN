@@ -4,6 +4,21 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## [Unreleased]
 
+### Changed
+- A temporary link works until its client connects for the first time, or for at most 24 hours, 1 hour or 15 minutes; Enter means 24 hours. Until then the page and the file can be opened again, and menu `5` shows whether the file was downloaded.
+- The link page is in Persian when the device's language is Persian, and in English otherwise. It no longer has a button that opens OpenVPN Connect directly, which opened the app on Android without importing the profile; the downloaded file is opened instead.
+- The note to send with a link is shown in English only, because a terminal shows Persian backwards. The Persian note is in the sharing guide.
+- A new server suggests a random free UDP port from 1024 to 1999 instead of 1194.
+- A suggested key password is 9 characters in one piece, without dashes.
+- Profiles carry the client's name for OpenVPN Connect to show, instead of the server address.
+- The Setup menu lists About first, then the update entries, and the two removals last.
+- The end of a new install, leaving the menu, the README and the guides say how to open the menu again: `sudo darban`.
+
+### Fixed
+- Websites open through the VPN on networks that drop split packets, such as many mobile and home networks; before, only apps that send small packets worked. TCP is limited to segments that fit in one tunnel packet, an update adds the rule to an existing install, and diagnostics check it.
+- The port for links, and port 80 for a certificate, count a program that listens only on the public address, and the remembered link port is checked again for each link, with the name of the program that took it.
+- Check for updates no longer shows curl's 404 line while no stable release exists; it says the installed version is the newest offered.
+
 ## [1.0.0-rc.2] - 2026-11-08
 
 Release candidate for `v1.0.0`, for testing on a server that is not in use. It replaces `v1.0.0-rc.1`, whose documented install command stopped at the first question.

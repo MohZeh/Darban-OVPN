@@ -7,10 +7,10 @@ For the person who received a link or a `.ovpn` file. The app is **OpenVPN Conne
 ## Get the profile
 
 1. Open the link you received. If the browser warns that the connection is not private, go on only if the sender told you to expect it for this link: choose **Advanced** and then **Continue**. Otherwise stop, and ask the sender.
-2. Press **Get my profile**. The link works only once, so do this on the device you want to connect.
-3. On the next page, press **Download .ovpn**. This page works for 10 minutes.
+2. Do this on the device you want to connect. Press **Download profile**.
+3. Open the downloaded file. On most phones it opens in OpenVPN Connect; the steps for each device are below.
 
-The page also has an **OpenVPN Connect** button that tries to open the app directly. If it does not work, use the download button.
+The link works until this device connects to the VPN for the first time. Until then you can open it and download the file again. The page is in Persian when your device's language is Persian, and in English otherwise.
 
 The file holds a private key. Do not share or publish it.
 
@@ -55,7 +55,13 @@ While connected, open [api.ipify.org](https://api.ipify.org). It should show the
 
 ## If the profile has a password
 
-If the administrator locked the key, the app asks for a password. The administrator sends it separately from the link.
+If the administrator locked the key, the app asks for a password. The administrator sends it separately from the link. Type it exactly as you received it: it has no spaces or dashes.
+
+So that the app asks only once, turn on **Save private key password** when you import the profile, or later in the profile's settings.
+
+## The name of the profile
+
+The app shows the profile under the client's name. If it shows the server address instead, you can rename the profile in its settings.
 
 ## If screens look different
 

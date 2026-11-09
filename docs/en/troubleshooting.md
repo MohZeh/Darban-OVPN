@@ -24,13 +24,14 @@ sudo darban status
 |---|---|
 | Docker or another program set the FORWARD policy to DROP | Allow traffic from `tun0` in that firewall. With `ufw`, see the line in `sudo darban status` |
 | Forwarding or NAT is off | `sudo darban status` shows it under **Network** |
+| Apps work, but websites do not open | Large packets are split on the way, and the network drops the pieces. An install from before `v1.0.0-rc.3` lacks the rule that prevents it: run the install command again. `sudo darban status` then shows `TCP through the VPN fits in one packet` |
 
 ## The link does not open
 
 | Possible cause | What to do |
 |---|---|
 | Its TCP port is closed in your provider's firewall | Open the port the tool showed with the link |
-| The link expired or was used | Create a new one from menu `4` |
+| The link expired, was cancelled, or the device already connected | Create a new one from menu `4` |
 | The service did not start | Run the command below |
 
 ```bash
@@ -79,7 +80,7 @@ The daily blocklist check or another session holds the lock. Try again in a minu
 
 ## Update says there is nothing to update to
 
-No stable release has been published yet. See the [Releases](https://github.com/MohZeh/Darban-OVPN/releases) page.
+No stable release has been published yet, so the version you have is the newest one offered. Test versions are never offered as updates. See the [Releases](https://github.com/MohZeh/Darban-OVPN/releases) page.
 
 ## Reporting a problem
 

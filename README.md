@@ -28,12 +28,18 @@ sudo bash -c 'curl -fsSL https://github.com/MohZeh/Darban-OVPN/releases/download
 
 Press Enter to accept the suggested address and port, and Enter again to install. The tool then offers to create your first client, shares it, and tells you when it connects.
 
+**To open the menu later**, connect to the server over SSH and type the command below. The VPN keeps running when you leave the menu.
+
+```bash
+sudo darban
+```
+
 **[Follow the step-by-step guide](docs/en/getting-started.md)**, from a new server to your first connected user. A release candidate is for testing: try it on a server that is not in use.
 
 ## Why Darban
 
 - **A server in minutes.** Enter accepts a working default at every step, and you see your first client connect.
-- **Profiles that travel safely.** A link works once and expires, and a messenger's preview cannot use it up.
+- **Profiles that travel safely.** A link stops working once the device connects, or when its time is up, and a messenger's preview cannot use it up.
 - **Revocation you can trust.** The revocation list is checked against the CA, and a client that is not really blocked is named until it is.
 
 ## Features
@@ -45,7 +51,7 @@ Press Enter to accept the suggested address and port, and Enter again to install
 - See who is connected, and end one client's session without touching the others
 
 **Sharing**
-- One-time links valid for 15 minutes, 1 hour or 24 hours, and QR codes
+- Temporary links that stop at the first connection, valid for at most 24 hours, 1 hour or 15 minutes, and QR codes
 - A free trusted certificate for links, for a domain name or a public IP address
 - Optional short password on the private key, for links without a trusted certificate
 - `scp` and `sftp` commands for your own operating system
@@ -69,7 +75,7 @@ Green is management, blue is profile delivery and orange is VPN traffic. The too
 
 ## Security model
 
-- A profile holds a private key, so links work once and expire. There are no permanent links. A short password on the key can be added for a link without a trusted certificate, and sent another way.
+- A profile holds a private key, so a link stops working at the first connection, and expires. There are no permanent links. A short password on the key can be added for a link without a trusted certificate, and sent another way.
 - Clients cannot reach each other, or the cloud provider's metadata service, through the server.
 - Only a hash of each link token stays on the server, and tokens never reach the logs.
 - The CA key has no passphrase, because the daily CRL renewal must run unattended. **Anyone who gains root on the server can issue certificates**, so protect the server and keep an encrypted backup elsewhere.
@@ -82,7 +88,6 @@ Report vulnerabilities as described in [SECURITY.md](SECURITY.md).
 - Only Ubuntu 24.04 and 26.04 are supported for server setup, with one OpenVPN server, `udp4`, and the layout described in [Advanced](docs/en/advanced.md#a-server-that-already-runs-openvpn).
 - Only IPv4 goes through the VPN. A client with its own IPv6 connection uses it directly for IPv6.
 - Client, server and CA certificates are not renewed automatically; only the CRL is.
-- Direct import into OpenVPN Connect from a link is still being tested. The download button always works.
 
 ## Project status
 

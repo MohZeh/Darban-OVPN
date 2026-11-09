@@ -80,6 +80,8 @@ exit 0
 STUB
 cat > "$E/bin/ss" <<'STUB'
 #!/usr/bin/env bash
+# TCP questions go to the real ss: the link service of a test really listens, and must be seen as itself.
+for arg in "$@"; do [[ $arg =~ ^-[A-Za-z]*t ]] && exec /usr/bin/ss "$@"; done
 last=${*: -1}; want=${last##*:}; cur=$(awk '$1=="port"{print $2}' "$SERVER_CONF")
 [[ $want == "$cur" ]] && echo "UNCONN 0 0 0.0.0.0:$want 0.0.0.0:*"
 exit 0

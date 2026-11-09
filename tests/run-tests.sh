@@ -550,19 +550,19 @@ test_update_from_the_menu() {
     fake_release
     # The installed copy of get.sh, as setup/install.sh places it.
     cp "$E/get.sh" "$E/lib/get.sh"
-    out=$(menu '9\n1\n1\n0\n0\n')
+    out=$(menu '9\n2\n1\n0\n0\n')
     has 'the new version is offered' 'Install v9.9.9' "$out"
     has 'option 1 keeps this version' 'Cancelled; nothing changed' "$out"
     ok_if 'nothing was installed' test ! -e "$MARKER"
 
     echo "$(cat "$REPO/VERSION")" > "$RELEASE/VERSION"
-    out=$(menu '9\n1\n0\n0\n')
+    out=$(menu '9\n2\n0\n0\n')
     has 'same version: nothing to do' 'This is the latest version' "$out"
     echo 0.0.1 > "$RELEASE/VERSION"
-    out=$(menu '9\n1\n0\n0\n')
+    out=$(menu '9\n2\n0\n0\n')
     has 'an older release is never offered' 'This is the latest version' "$out"
     echo 'not a version' > "$RELEASE/VERSION"
-    out=$(menu '9\n1\n0\n0\n')
+    out=$(menu '9\n2\n0\n0\n')
     has 'a bad version file is refused' 'does not state a valid version' "$out"
     out=$(CURL_FAIL=1 CURL_RC=6 bash "$E/manager.sh" update </dev/null 2>&1)
     has 'no network is reported' 'Could not reach GitHub' "$out"
@@ -1175,7 +1175,7 @@ if [[ " \$* " == *" restart darban-links.service "* ]]; then
     echo "systemctl \$*" >> "\$STUB_LOG"
     if [[ -s "$LINKS_PIDFILE" ]]; then kill "\$(cat "$LINKS_PIDFILE")" 2>/dev/null; sleep 0.3; fi
     source "$E/cfg/links.env"
-    python3 -I "$REPO/lib/linkd.py" --dir "$E/links" --cert "$E/cfg/link-cert.pem" --key "$E/cfg/link-key.pem" --host "\$LINK_HOST" --port "\$LINK_PORT" --interval 0.2 --idle-exit 1 >>"$E/links.log" 2>&1 </dev/null &
+    python3 -I "$REPO/lib/linkd.py" --dir "$E/links" --cert "$E/cfg/link-cert.pem" --key "$E/cfg/link-key.pem" --host "\$LINK_HOST" --port "\$LINK_PORT" --server-conf "$SERVER_CONF" --interval 0.2 --idle-exit 1 >>"$E/links.log" 2>&1 </dev/null &
     echo \$! > "$LINKS_PIDFILE"
     exit 0
 fi
@@ -1192,49 +1192,103 @@ web() { /usr/bin/curl -ks --max-time 10 "$@"; }
 new_link() { menu "4\n${1:-alice}\n1\n1\n${2:-1}\n0\n" | grep -oE 'https://[^ ]+/l/[0-9a-f]{64}'; }
 
 test_temporary_link_end_to_end() {
-    local url base second out code head
+    local url base out head code
     start_links_stub
     out=$(menu '4\nalice\n1\n1\n1\n0\n')
     has 'the link is shown' "https://127.0.0.1:$LINK_TEST_PORT/l/" "$out"
-    has 'it says how long it works' '1 hour, one use' "$out"
+    has 'it says how long it works' 'until alice first connects, at most 24 hours' "$out"
+    has 'it says the first connection ends it' 'The link stops working once alice connects for the first time' "$out"
     has 'it warns about the firewall' "TCP $LINK_TEST_PORT must be open" "$out"
     has 'it warns about the browser warning' 'no trusted certificate' "$out"
     has 'the note limits going past the warning to this link' 'Never do this for other sites' "$out"
     lacks 'and does not call the warning normal' 'That is expected' "$out"
+    lacks 'no Persian reaches the terminal, which would show it backwards' 'مرورگر' "$out"
     url=$(grep -oE 'https://[^ ]+/l/[0-9a-f]{64}' <<<"$out")
     base=${url%/l/*}
     ok_if 'no copy stays in the download folder' test ! -e "$E/clients/alice.ovpn"
     if find "$E/links" -type f | grep -q "${url##*/}"; then result 0 'the token itself is not stored'; else result 1 'the token itself is not stored'; fi
 
     for code in 1 2 3; do out=$(web "$url"); done
-    has 'opening shows the button' 'Get my profile' "$out"
+    has 'opening shows the download' "/l/${url##*/}/file" "$out"
     lacks 'opening does not reveal the profile' 'BEGIN' "$out"
+    lacks 'there is no button that opens the app directly' 'openvpn://' "$out"
     head=$(web -D - -o /dev/null "$url")
     has 'responses are not cached' 'no-store' "$head"
     has 'responses keep the address private' 'no-referrer' "$head"
 
-    has 'active links shows it unopened' 'not opened' "$(menu '5\n\n0\n')"
-    second=$(web -o /dev/null -w '%{redirect_url}' -X POST "$url")
-    has 'pressing the button moves on' '/c/' "$second"
-    [[ $(web -o /dev/null -w '%{http_code}' "$url") == 410 ]]; rc_is 'the link cannot be opened again' 0 "$?"
-    [[ $(web -o /dev/null -w '%{http_code}' -X POST "$url") == 410 ]]; rc_is 'the link cannot be claimed again' 0 "$?"
-    has 'active links shows it opened' 'opened' "$(menu '5\n\n0\n')"
-    out=$(web "$second")
-    has 'the page offers the app' "openvpn://import-profile/https://127.0.0.1:$LINK_TEST_PORT/c/" "$out"
-    head=$(web -D - -o "$E/got.ovpn" "$second/file")
+    has 'active links shows it not downloaded' 'not downloaded' "$(menu '5\n\n0\n')"
+    head=$(web -D - -o "$E/got.ovpn" "$url/file")
     has 'the file type is what OpenVPN clients expect' 'application/x-openvpn-profile' "$head"
     has 'it downloads under the client name' 'alice.ovpn' "$head"
     grep -q '<key>' "$E/got.ovpn"; rc_is 'the real profile arrives' 0 "$?"
-    web -o /dev/null "$second/file"; web -o /dev/null "$second/file"
-    [[ $(web -o /dev/null -w '%{http_code}' "$second/file") == 410 ]]; rc_is 'the file stops after its downloads' 0 "$?"
-    ok_if 'no profile copy is left' test -z "$(find "$E/links" -name '*.ovpn')"
+    grep -qx 'setenv FRIENDLY_NAME "alice"' "$E/got.ovpn"; rc_is 'the profile carries the client name for the app' 0 "$?"
+    out=$(menu '5\n\n0\n')
+    lacks 'active links shows it downloaded' 'not downloaded' "$out"
+    has 'and still lists it' 'alice' "$out"
+    web -o /dev/null "$url/file"; web -o /dev/null "$url/file"
+    [[ $(web -o /dev/null -w '%{http_code}' "$url/file") == 200 ]]; rc_is 'the file can be downloaded again until the first connection' 0 "$?"
+    [[ $(web -o /dev/null -w '%{http_code}' "$url") == 200 ]]; rc_is 'and the page opened again' 0 "$?"
+    [[ $(web -o /dev/null -w '%{http_code}' -X POST "$url") == 410 ]]; rc_is 'nothing is posted to a link' 0 "$?"
 
     [[ $(web -o /dev/null -w '%{http_code}' "$base/l/$(printf 'a%.0s' {1..64})") == 410 ]]; rc_is 'an unknown link looks the same as a used one' 0 "$?"
+    [[ $(web -o /dev/null -w '%{http_code}' "$base/c/${url##*/}") == 410 ]]; rc_is 'the old second address gives nothing' 0 "$?"
     [[ $(web -o /dev/null -w '%{http_code}' "$base/etc/passwd") == 410 ]]; rc_is 'other paths give nothing' 0 "$?"
     if grep -Eq '[0-9a-f]{64}' "$E/links.log"; then result 0 'no token reaches the log'; else result 1 'no token reaches the log'; fi
-    grep -q 'link used: alice' "$E/links.log"; rc_is 'use of the link is logged' 0 "$?"
+    grep -q 'profile downloaded: alice' "$E/links.log"; rc_is 'each download is logged' 0 "$?"
     grep -q 'temporary link created: alice' "$STUB_LOG"; rc_is 'creating the link is audited' 0 "$?"
     stop_links_stub
+}
+
+link_mgmt_server() {
+    # A management interface that really listens, for the link service: each connection gets $E/mgmt-status.
+    cat > "$E/mgmt-server.py" <<'PY'
+import os, socket, sys
+path, reply = sys.argv[1], sys.argv[2]
+if os.path.exists(path):
+    os.unlink(path)
+server = socket.socket(socket.AF_UNIX)
+server.bind(path)
+server.listen(4)
+while True:
+    conn, _ = server.accept()
+    with conn:
+        conn.settimeout(2)
+        try:
+            conn.recv(1024)
+            with open(reply, 'rb') as handle:
+                conn.sendall(b'>INFO:OpenVPN Management Interface\r\n' + handle.read())
+            conn.recv(1024)
+        except OSError:
+            pass
+PY
+    printf 'TITLE\tOpenVPN\nEND\n' > "$E/mgmt-status"
+    python3 -I "$E/mgmt-server.py" "$E/linkmgmt.sock" "$E/mgmt-status" >/dev/null 2>&1 </dev/null &
+    MGMT_PID=$!
+    sed -i '/^management /d' "$SERVER_CONF"
+    printf 'management %s unix\n' "$E/linkmgmt.sock" >> "$SERVER_CONF"
+}
+
+test_link_ends_at_the_first_connection() {
+    local url meta created attempt
+    link_mgmt_server
+    start_links_stub
+    url=$(new_link alice)
+    meta=$(ls "$E"/links/*.meta)
+    created=$(awk -F= '$1=="created" {print $2}' "$meta")
+    printf 'TITLE\tOpenVPN\nCLIENT_LIST\talice\t198.51.100.7:1\t10.8.0.2\t\t1\t1\tthen\t%s\tUNDEF\t0\t0\tAES-256-GCM\nCLIENT_LIST\tbob\t198.51.100.8:1\t10.8.0.3\t\t1\t1\tnow\t%s\tUNDEF\t1\t1\tAES-256-GCM\nEND\n' \
+        "$(( created - 100 ))" "$(( created + 5 ))" > "$E/mgmt-status"
+    sleep 1
+    [[ $(web -o /dev/null -w '%{http_code}' "$url") == 200 ]]; rc_is 'a session from before the link, or another client, does not end it' 0 "$?"
+    printf 'TITLE\tOpenVPN\nCLIENT_LIST\talice\t198.51.100.7:1\t10.8.0.2\t\t1\t1\tnow\t%s\tUNDEF\t0\t0\tAES-256-GCM\nEND\n' "$(( created + 1 ))" > "$E/mgmt-status"
+    for attempt in 1 2 3 4 5 6 7 8 9 10; do
+        [[ $(web -o /dev/null -w '%{http_code}' "$url") == 410 ]] && break
+        sleep 0.3
+    done
+    [[ $(web -o /dev/null -w '%{http_code}' "$url/file") == 410 ]]; rc_is 'the first connection ends the link' 0 "$?"
+    ok_if 'and leaves no copy of the profile' test -z "$(find "$E/links" -name '*.ovpn')"
+    grep -q 'link ended: alice connected' "$E/links.log"; rc_is 'the end is logged' 0 "$?"
+    stop_links_stub
+    kill "$MGMT_PID" 2>/dev/null
 }
 
 test_temporary_link_expiry_cancel_and_revoke() {
@@ -1244,7 +1298,7 @@ test_temporary_link_expiry_cancel_and_revoke() {
     meta=$(ls "$E"/links/*.meta)
     sed -i 's/^expires=.*/expires=1000/' "$meta"
     [[ $(web -o /dev/null -w '%{http_code}' "$url") == 410 ]]; rc_is 'an expired link is refused' 0 "$?"
-    [[ $(web -o /dev/null -w '%{http_code}' -X POST "$url") == 410 ]]; rc_is 'an expired link cannot be claimed' 0 "$?"
+    [[ $(web -o /dev/null -w '%{http_code}' "$url/file") == 410 ]]; rc_is 'and gives no file' 0 "$?"
     has 'active links drops an expired link' 'No active links' "$(menu '5\n0\n')"
 
     url=$(new_link alice 2)
@@ -1297,7 +1351,7 @@ test_share_password() {
     out=$(menu '4\nalice\n3\n2\n1\n0\n')
     has 'the password is shown once' 'shown only now' "$out"
     password=$(grep -A1 'shown only now' <<<"$out" | tail -n 1)
-    [[ $password =~ ^[a-km-np-z2-9]{3}-[a-km-np-z2-9]{3}-[a-km-np-z2-9]{3}$ ]]; rc_is 'the password is three short groups without look-alike characters' 0 "$?"
+    [[ $password =~ ^[a-km-np-z2-9]{9}$ ]]; rc_is 'the password is nine characters in one piece, without look-alike characters' 0 "$?"
     grep -q 'ENCRYPTED PRIVATE KEY' "$E/clients/alice.ovpn"; rc_is 'the key in the profile is locked' 0 "$?"
     if grep -q 'BEGIN PRIVATE KEY' "$E/clients/alice.ovpn"; then result 0 'no open key in the profile'; else result 1 'no open key in the profile'; fi
     sed -n '/<key>/,/<\/key>/p' "$E/clients/alice.ovpn" | sed '1d;$d' > "$E/locked.key"
@@ -1306,6 +1360,23 @@ test_share_password() {
     openssl pkey -in "$E/locked.key" -passin pass:wrong -noout 2>/dev/null; rc_not0 'a wrong password does not' "$?"
     grep -q 'BEGIN PRIVATE KEY' "$PKI/private/alice.key"; rc_is 'the key in the PKI stays usable' 0 "$?"
     if grep -rq "$password" "$E/stub.log"; then result 0 'the password is not logged'; else result 1 'the password is not logged'; fi
+}
+
+test_link_port_taken_by_another_program() {
+    local port out pid
+    port=$(( 40000 + RANDOM % 20000 ))
+    python3 -c 'import socket, sys, time
+s = socket.socket(); s.bind(("127.0.0.1", int(sys.argv[1]))); s.listen(); time.sleep(60)' "$port" &
+    pid=$!
+    sleep 0.5
+    echo 127.0.0.1 > "$E/cfg/domain"
+    printf 'LINK_PORT=%s\n' "$port" >> "$E/cfg/config"
+    out=$(menu '4\nalice\n1\n1\n1\n0\n')
+    has 'a link port another program took is named' "TCP $port, the port for links, is now used by python3" "$out"
+    lacks 'and no link is made' '/l/' "$out"
+    out=$(menu "7\n3\n9\n$port\n0\n0\n0\n")
+    has 'the setting refuses a port in use, and names the program' "TCP $port is already used by python3" "$out"
+    kill "$pid" 2>/dev/null
 }
 
 test_share_qr_and_link_port() {
@@ -1377,7 +1448,7 @@ alice
 1
 2
 1
-1
+2
 0
 ')
     has 'a trusted certificate that still works stays' 'The current trusted certificate stays' "$out"
@@ -1390,13 +1461,13 @@ alice
 1
 2
 1
-3
 1
+2
 0
 ')
     has 'a link longer than the certificate is refused' 'The link certificate ends before 24 hours are over' "$out"
     has 'and a shorter one is made' "https://vpn.example.com:$LINK_TEST_PORT/l/" "$out"
-    has 'for the time chosen after it' '1 hour, one use' "$out"
+    has 'for the time chosen after it' 'until alice first connects, at most 1 hour' "$out"
     ok_if 'it is not replaced by a self-signed one' test -L "$E/cfg/link-cert.pem"
     has 'and the link is made' "https://vpn.example.com:$LINK_TEST_PORT/l/" "$out"
     stop_links_stub
@@ -1412,7 +1483,7 @@ test_about_and_contact_are_shown() {
     has 'about shows the license' 'MIT' "$out"
     has 'about states independence' 'Not affiliated with OpenVPN Inc.' "$out"
     has 'help shows the contact' 'zehtabex@gmail.com' "$(bash "$E/manager.sh" help 2>&1 </dev/null)"
-    has 'the Setup menu has About' 'Not affiliated' "$(menu '9\n4\n0\n0\n')"
+    has 'the Setup menu has About' 'Not affiliated' "$(menu '9\n1\n0\n0\n')"
     [[ $(bash "$E/manager.sh" version 2>&1 </dev/null) =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[a-z]+\.[0-9]+)?$ ]]; rc_is 'version stays machine-readable' 0 "$?"
 }
 
@@ -1424,22 +1495,22 @@ test_update_knows_pre_releases() {
     printf 'Fixed things.\n\033[31mno escape\n' > "$RELEASE/RELEASE-NOTES.txt"
     set_installed_version 1.0.0-beta.1
     echo 1.0.0 > "$RELEASE/VERSION"
-    out=$(menu '9\n1\n1\n0\n0\n')
+    out=$(menu '9\n2\n1\n0\n0\n')
     has 'the final release is newer than its beta' 'Install v1.0.0' "$out"
     has 'its notes are shown' 'Fixed things.' "$out"
     if [[ $out == *$'\033'* ]]; then result 0 'escape codes in notes are removed'; else result 1 'escape codes in notes are removed'; fi
     echo 1.0.0-rc.1 > "$RELEASE/VERSION"
-    has 'an rc is newer than a beta' 'Install v1.0.0-rc.1' "$(menu '9\n1\n1\n0\n0\n')"
+    has 'an rc is newer than a beta' 'Install v1.0.0-rc.1' "$(menu '9\n2\n1\n0\n0\n')"
     echo 1.0.0-alpha.1 > "$RELEASE/VERSION"
-    has 'an alpha is older than a beta' 'This is the latest version' "$(menu '9\n1\n0\n0\n')"
+    has 'an alpha is older than a beta' 'This is the latest version' "$(menu '9\n2\n0\n0\n')"
     set_installed_version 1.0.0
     echo 1.0.0-rc.9 > "$RELEASE/VERSION"
-    has 'an rc is older than the final release' 'This is the latest version' "$(menu '9\n1\n0\n0\n')"
+    has 'an rc is older than the final release' 'This is the latest version' "$(menu '9\n2\n0\n0\n')"
     echo 1.0.1 > "$RELEASE/VERSION"
-    has 'a higher version is newer' 'Install v1.0.1' "$(menu '9\n1\n1\n0\n0\n')"
+    has 'a higher version is newer' 'Install v1.0.1' "$(menu '9\n2\n1\n0\n0\n')"
     echo 1.10.0 > "$RELEASE/VERSION"
     set_installed_version 1.9.0
-    has 'numbers compare as numbers' 'Install v1.10.0' "$(menu '9\n1\n1\n0\n0\n')"
+    has 'numbers compare as numbers' 'Install v1.10.0' "$(menu '9\n2\n1\n0\n0\n')"
 }
 
 test_update_notice_in_the_header() {
@@ -1455,7 +1526,7 @@ test_update_notice_in_the_header() {
     menu '0\n' >/dev/null
     for attempt in 1 2 3 4 5 6 7 8 9 10; do [[ -s $E/cfg/.latest-version ]] && break; sleep 0.3; done
     ok_if 'a background check stored the version' test -s "$E/cfg/.latest-version"
-    has 'the header announces it' 'Update available: v9.9.9' "$(menu '0\n')"
+    grep -Eq 'Update available: v9\.9\.9 .{1,3} Setup .{1,3} 2$' <<<"$(menu '0\n')"; rc_is 'the header announces it, with the Setup item to use' 0 "$?"
     ok_if 'nothing was installed by the notice' test ! -e "$MARKER"
     grep -c 'releases/latest/download/VERSION' "$STUB_LOG" > "$E/calls.before"
     menu '0\n' >/dev/null; sleep 0.5
@@ -1479,16 +1550,16 @@ test_update_notice_in_the_header() {
 test_restore_previous_version() {
     local out backup=$E/backups-tool/20260101T000000
     mkdir -p "$E/sbin" "$E/units"
-    has 'nothing stored is said plainly' 'No previous version is stored' "$(menu '9\n2\n0\n0\n')"
+    has 'nothing stored is said plainly' 'No previous version is stored' "$(menu '9\n4\n0\n0\n')"
     mkdir -p "$backup/sbin" "$backup/lib" "$backup/units"
     printf '#!/usr/bin/env bash\nDARBAN_VERSION=0.9.0\n' > "$backup/sbin/darban"
     echo 'old lib' > "$backup/lib/old-marker"
     echo 'old unit' > "$backup/units/darban-crl.timer"
-    out=$(menu '9\n2\n1\n0\n0\n')
+    out=$(menu '9\n4\n1\n0\n0\n')
     has 'it names the version' 'Go back to v0.9.0?' "$out"
     has 'option 1 keeps this version' 'Cancelled; nothing changed' "$out"
     ok_if 'nothing is restored on No' test ! -e "$E/sbin/darban"
-    out=$(menu '9\n2\n2\n')
+    out=$(menu '9\n4\n2\n')
     has 'it restores' 'Restored v0.9.0' "$out"
     ok_if 'the program is back' test -s "$E/sbin/darban"
     ok_if 'the library is back' test -s "$E/lib/old-marker"
@@ -1857,15 +1928,16 @@ test_remove_everything_keeps_files_it_did_not_create() {
 }
 
 test_setup_needs_only_enter() {
-    local out rc
+    local out rc port
     prepare_blank_server
     out=$(printf '\n\n\n' | bash "$E/setup/server-setup.sh" 2>&1); rc=$?
     rc_is 'Enter at every question installs' 0 "$rc"
     has 'each question says what Enter does' 'Press Enter to use 203.0.113.50' "$out"
     has 'and how to answer otherwise' 'Or type another IP or hostname, then press Enter' "$out"
-    has 'the port question too' 'Press Enter to use 1194' "$out"
+    has 'the port question too' 'A free port was picked at random' "$out"
     grep -qx '203.0.113.50' "$E/cfg/domain"; rc_is 'the detected address is used' 0 "$?"
-    grep -q '^port 1194$' "$E/server/server.conf"; rc_is 'the usual port is used' 0 "$?"
+    port=$(awk '$1=="port" {print $2}' "$E/server/server.conf")
+    [[ $port =~ ^[0-9]+$ ]] && (( port >= 1024 && port <= 1999 && port != 1194 )); rc_is 'a random port from 1024 to 1999 is used, not 1194' 0 "$?"
     grep -qx setup_complete "$E/cfg/.server-setup-started"; rc_is 'the setup finished' 0 "$?"
 }
 
@@ -1914,20 +1986,31 @@ test_setup_suggests_a_free_port() {
     local out
     prepare_blank_server
     printf '#!/usr/bin/env bash\nlast=${*: -1}; want=${last##*:}; for p in ${BUSY_PORTS:-}; do if [[ $p == "$want" ]]; then echo "UNCONN 0 0 0.0.0.0:$want 0.0.0.0:*"; fi; done\n' > "$E/bin/ss"
-    export BUSY_PORTS='1194 1195'
-    out=$(printf '\n1195\n70000\n\n3\n' | bash "$E/setup/server-setup.sh" 2>&1)
-    has 'a busy default says why it changed' 'Port 1194 is already in use, so 1196 is suggested' "$out"
-    has 'Enter takes the new default' 'Press Enter to use 1196' "$out"
-    has 'a busy answer gets a suggestion' 'Port 1195 is already in use. Suggested: 1196' "$out"
-    has 'an impossible answer gets one too' 'Enter a number from 1024 to 65535. Suggested: 1196' "$out"
-    has 'the summary shows the choice' '1196/UDP' "$out"
+    # shuf gives the ports of $E/shuf-seq one by one, so the random choice can be tested.
+    printf '#!/usr/bin/env bash\nIFS= read -r p < "%s" || exit 1; sed -i 1d "%s"; echo "$p"\n' "$E/shuf-seq" "$E/shuf-seq" > "$E/bin/shuf"
+    chmod +x "$E/bin/ss" "$E/bin/shuf"
+    export BUSY_PORTS='1500 1700'
+    printf '1194\n1500\n1600\n' > "$E/shuf-seq"
+    out=$(printf '\n1700\n70000\n\n3\n' | bash "$E/setup/server-setup.sh" 2>&1)
+    has 'the suggestion says why it is not 1194' 'A free port was picked at random' "$out"
+    has 'Enter takes a free random port, never 1194' 'Press Enter to use 1600' "$out"
+    has 'a busy answer gets a suggestion' 'Port 1700 is already in use. Suggested: 1600' "$out"
+    has 'an impossible answer gets one too' 'Enter a number from 1024 to 65535. Suggested: 1600' "$out"
+    has 'the summary shows the choice' '1600/UDP' "$out"
+    printf '1500\n1601\n' > "$E/shuf-seq"
     out=$(setup_run --yes)
-    grep -q '^port 1196$' "$E/server/server.conf"; rc_is 'the unattended setup takes a free port' 0 "$?"
+    grep -q '^port 1601$' "$E/server/server.conf"; rc_is 'the unattended setup takes a free random port' 0 "$?"
+    prepare_blank_server_again
+    : > "$E/shuf-seq"
+    export BUSY_PORTS='1024'
+    out=$(setup_run --yes)
+    grep -q '^port 1025$' "$E/server/server.conf"; rc_is 'without shuf, the first free port of the range' 0 "$?"
     unset BUSY_PORTS
+    rm -f "$E/bin/shuf"
 }
 
 test_setup_firewall_question() {
-    local out
+    local out port
     prepare_blank_server
     out=$(printf '\n\n3\n' | bash "$E/setup/server-setup.sh" 2>&1)
     lacks 'no ufw: no question' 'ufw is active' "$out"
@@ -1938,7 +2021,8 @@ test_setup_firewall_question() {
     : > "$STUB_LOG"
     out=$(printf '\n\n\n\n' | bash "$E/setup/server-setup.sh" 2>&1)
     has 'ufw on: it explains' 'ufw is active here' "$out"
-    grep -q 'ufw allow 1194/udp' "$STUB_LOG"; rc_is 'Enter adds the port rule' 0 "$?"
+    port=$(awk '$1=="port" {print $2}' "$E/server/server.conf")
+    grep -q "ufw allow $port/udp" "$STUB_LOG"; rc_is 'Enter adds the rule for the chosen port' 0 "$?"
     grep -q 'ufw route allow in on tun0 out on eth0' "$STUB_LOG"; rc_is 'Enter adds the forwarding rule' 0 "$?"
 }
 
@@ -1980,7 +2064,7 @@ STUB
     source "$REPO/lib/common.sh"
     darban_nat_rules 10.8.0.0 eth0 > "$E/cfg/nat.nft"
     printf '\t\tip saddr 10.8.0.0/24 oifname "eth0" masquerade\n' > "$E/live-post"
-    printf '\t\tip saddr 10.8.0.0/24 ip daddr 10.8.0.0/24 drop\n\t\tip saddr 10.8.0.0/24 ip daddr 169.254.0.0/16 drop\n' > "$E/live-forward"
+    printf '\t\tip saddr 10.8.0.0/24 ip daddr 10.8.0.0/24 drop\n\t\tip saddr 10.8.0.0/24 ip daddr 169.254.0.0/16 drop\n\t\tip saddr 10.8.0.0/24 tcp flags syn tcp option maxseg size > 1300 tcp option maxseg size set 1300\n\t\tip daddr 10.8.0.0/24 tcp flags syn tcp option maxseg size > 1300 tcp option maxseg size set 1300\n' > "$E/live-forward"
     # The interfaces this server has, and the one of its default route.
     cat > "$E/bin/ip" <<'STUB'
 #!/usr/bin/env bash
@@ -1992,6 +2076,12 @@ STUB
     chmod +x "$E/bin/ip"
     out=$(mgr status)
     has 'both live rules pass' 'VPN clients are kept apart' "$out"
+    has 'the TCP size rule passes' 'TCP through the VPN fits in one packet' "$out"
+    sed -i '/maxseg/d' "$E/live-forward"
+    out=$(mgr status)
+    has 'a missing TCP size rule is reported, with the installer as the fix' 'websites may not open on some networks' "$out"
+    has 'and the installer is named' '--version v' "$out"
+    lacks 'and it is not called fine' 'TCP through the VPN fits in one packet' "$out"
     has 'the live NAT passes' 'NAT for the VPN network 10.8.0.0/24 present' "$out"
     printf '		ip saddr 10.8.0.0/24 oifname "eth0" accept
 ' > "$E/live-post"
@@ -2080,7 +2170,7 @@ Enter: Create a client => \r
 Client name [client1] => \r
 Enter: Temporary link => \r
 Enter: No password => \r
-Enter: 1 hour => \r
+Enter: 24 hours => \r
 client1 is connected from 198.51.100.7 => \r
 Choose [0-9] => 0\r
 EOF
@@ -2113,7 +2203,7 @@ Client name [client1] => \r
 Enter: Temporary link => \r
 Enter: No, use a self-signed certificate => \r
 Enter: No password => \r
-Enter: 1 hour => \r
+Enter: 24 hours => \r
 client1 is connected from 198.51.100.7 => \r
 Choose [0-9] => 0\r
 EOF
@@ -2130,7 +2220,7 @@ test_setup_in_a_real_terminal() {
     prepare_blank_server
     cat > "$script" <<'EOF'
 Server address [203.0.113.50]:  => \r
-VPN port [1194]:  => \r
+VPN port [ => 1194\r
 Enter: Install now => \r
 [5/5] Starting OpenVPN
 OpenVPN is running on UDP 1194
@@ -2169,19 +2259,25 @@ test_download_uses_a_copy_the_user_can_read() {
 }
 
 test_link_page_guides_the_person_receiving_it() {
-    local url base second out
+    local url base out
     start_links_stub
     url=$(menu '4\nalice\n1\n1\n1\n0\n' | grep -oE 'https://[^ ]+/l/[0-9a-f]{64}')
     base=${url%/l/*}
-    second=$(web -o /dev/null -w '%{redirect_url}' -X POST "$url")
-    out=$(web -A 'Mozilla/5.0 (Linux; Android 14)' "$second")
+    out=$(web -A 'Mozilla/5.0 (Linux; Android 14)' -H 'Accept-Language: fa-IR,fa;q=0.9,en-US;q=0.8' "$url")
     has 'Android gets the store link' 'play.google.com/store/apps/details?id=net.openvpn.openvpn' "$out"
-    has 'the steps are in Persian' 'اپ OpenVPN Connect را نصب کن' "$out"
-    has 'and in English' 'Install the OpenVPN Connect app' "$out"
-    out=$(web -A 'Mozilla/5.0 (iPhone; CPU iPhone OS 18_0)' "$second")
+    has 'a Persian device gets the steps in Persian' 'اپ OpenVPN Connect را نصب کن' "$out"
+    has 'from right to left' 'dir="rtl"' "$out"
+    lacks 'and not in English as well' 'Install the OpenVPN Connect app' "$out"
+    out=$(web -A 'Mozilla/5.0 (iPhone; CPU iPhone OS 18_0)' -H 'Accept-Language: de-DE,de;q=0.9,fa;q=0.5' "$url")
     has 'iPhone gets the App Store link' 'apps.apple.com/app/openvpn-connect' "$out"
-    out=$(web -A 'Mozilla/5.0 (Windows NT 10.0)' "$second")
+    has 'another language first gets English' 'Install the OpenVPN Connect app' "$out"
+    lacks 'and no Persian' 'اپ OpenVPN Connect را نصب کن' "$out"
+    out=$(web -A 'Mozilla/5.0 (Windows NT 10.0)' "$url")
     has 'a computer gets the download page' 'openvpn.net/client/' "$out"
+    has 'no language means English' 'Press <b>Download profile</b>' "$out"
+    out=$(web -H 'Accept-Language: fa' "$base/l/$(printf 'b%.0s' {1..64})")
+    has 'a link that no longer works says so in Persian too' 'این لینک دیگر معتبر نیست' "$out"
+    stop_links_stub
 }
 
 test_first_client_suggests_a_name() {
@@ -2280,6 +2376,8 @@ test_setup_keeps_clients_apart() {
     setup_run --port 21194 --yes >/dev/null
     grep -q 'ip saddr 10.8.0.0/24 ip daddr 10.8.0.0/24 drop' "$E/cfg/nat.nft"; rc_is 'clients cannot reach each other' 0 "$?"
     grep -q 'ip saddr 10.8.0.0/24 ip daddr 169.254.0.0/16 drop' "$E/cfg/nat.nft"; rc_is 'or the cloud metadata service' 0 "$?"
+    grep -q 'ip saddr 10.8.0.0/24 tcp flags syn tcp option maxseg size > 1300 tcp option maxseg size set 1300' "$E/cfg/nat.nft"; rc_is 'TCP from clients fits in one tunnel packet' 0 "$?"
+    grep -q 'ip daddr 10.8.0.0/24 tcp flags syn tcp option maxseg size > 1300 tcp option maxseg size set 1300' "$E/cfg/nat.nft"; rc_is 'and TCP to them' 0 "$?"
 }
 
 test_setup_removal_leaves_what_was_there() {

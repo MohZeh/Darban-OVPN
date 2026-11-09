@@ -132,12 +132,12 @@ if [[ -f $NAT_FILE ]]; then
     if valid_ipv4 "${vpn_net:-}" && [[ $nat_iface =~ ^[A-Za-z0-9_.@-]+$ ]]; then
         darban_nat_rules "$vpn_net" "$nat_iface" > "$NAT_FILE.new"
         chmod 600 "$NAT_FILE.new"
-        if cmp -s -- "$NAT_FILE.new" "$NAT_FILE" && darban_live_nat_ok "$vpn_net" && darban_live_isolation_ok "$vpn_net"; then
+        if cmp -s -- "$NAT_FILE.new" "$NAT_FILE" && darban_live_nat_ok "$vpn_net" && darban_live_isolation_ok "$vpn_net" && darban_live_mss_ok "$vpn_net"; then
             rm -f -- "$NAT_FILE.new"
         elif nft -c -f "$NAT_FILE.new" && cp -a -- "$NAT_FILE" "$NAT_FILE.before" && mv -f -- "$NAT_FILE.new" "$NAT_FILE" \
-            && nft -f "$NAT_FILE" && darban_live_nat_ok "$vpn_net" && darban_live_isolation_ok "$vpn_net"; then
+            && nft -f "$NAT_FILE" && darban_live_nat_ok "$vpn_net" && darban_live_isolation_ok "$vpn_net" && darban_live_mss_ok "$vpn_net"; then
             rm -f -- "$NAT_FILE.before"
-            echo 'The NAT rules are up to date, and VPN clients are kept apart from each other.'
+            echo 'The NAT rules are up to date: VPN clients are kept apart from each other, and TCP fits in one tunnel packet.'
         else
             if [[ -f $NAT_FILE.before ]]; then mv -f -- "$NAT_FILE.before" "$NAT_FILE"; nft -f "$NAT_FILE" || true; fi
             rm -f -- "$NAT_FILE.new"

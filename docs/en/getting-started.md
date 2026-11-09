@@ -42,7 +42,7 @@ sudo bash -c 'curl -fsSL https://github.com/MohZeh/Darban-OVPN/releases/download
 Each question shows a suggestion. **Press Enter to accept it.**
 
 1. **Server address:** press Enter. A domain name is optional. With a domain name or a public IP address, the tool can get a trusted certificate, so temporary links open without a browser warning.
-2. **VPN port:** press Enter.
+2. **VPN port:** press Enter. The suggested port is a free one picked at random, so the server does not stand out on 1194, the usual OpenVPN port.
 3. **Install this server?** Press Enter on **Install now**.
 
 Nothing is installed before the third answer; until then the tool only refreshes the list of packages. To see the full plan first, press `2` and then Enter on **Show details**.
@@ -55,7 +55,7 @@ Nothing is installed before the third answer; until then the tool only refreshes
 
 Many providers have a firewall in their panel, often called **Firewall**, **Security Group** or **Network Rules**. This tool cannot see or change it.
 
-Add a rule that allows **incoming UDP on port 1194**, or on the port you chose.
+Add a rule that allows **incoming UDP on the VPN port**. The tool shows it as `Port` under `Your VPN server is ready`.
 
 **If your provider has no such firewall:** go to the next step.
 
@@ -66,9 +66,9 @@ A client is one person or device. The tool asks right after the install:
 1. **Create your first client now?** Press Enter.
 2. **Client name:** press Enter to use `client1`, or type a name such as `ali-phone`.
 3. **How will the client get this profile?** Press Enter for **Temporary link**.
-4. **Get a free Let's Encrypt certificate?** This comes only on a public address. Answer **Yes, get a certificate** if you can open TCP port 80 in your provider's firewall for a moment: the link then opens without a browser warning, and the app can import straight from it. Otherwise press Enter. Until you have one, the question comes back with each link. See [The browser warning](sharing.md#the-browser-warning).
+4. **Get a free Let's Encrypt certificate?** This comes only on a public address. Answer **Yes, get a certificate** if you can open TCP port 80 in your provider's firewall for a moment: the link then opens without a browser warning. Otherwise press Enter. Until you have one, the question comes back with each link. See [The browser warning](sharing.md#the-browser-warning).
 5. **Lock the private key with a password?** Press Enter for no password. See [A password on the key](sharing.md#a-password-on-the-key) for when one helps.
-6. **How long should the link work?** Press Enter for one hour.
+6. **At most, how long should the link work?** Press Enter for 24 hours. The link stops sooner, as soon as the device connects.
 
 **You should see:** a link that starts with `https://`, and the TCP port it uses.
 
@@ -78,7 +78,7 @@ Open that TCP port in your provider's firewall too, as in step 5. The tool shows
 
 ## Step 7: Send the link
 
-Send the link in any messenger. A link preview does not use it up. It works once, for the person who presses the button on the page.
+Send the link in any messenger. A link preview does not use it up. It works until the device connects for the first time, and until then the person can open it again.
 
 If the server has no trusted certificate, the tool also shows a short note. Send it with the link, because the browser shows a security warning for this link. If you chose a password, send it another way, for example by SMS or a call.
 
@@ -106,8 +106,17 @@ If the install added a kernel, the tool asks you to reboot once when convenient.
 sudo reboot
 ```
 
+## Open the menu later
+
+The VPN keeps running when you leave the menu or close SSH. To manage the server again, connect over SSH as in step 2, then type:
+
+```bash
+sudo darban
+```
+
+The menu opens. This is the only command you need to remember, and the tool shows it again each time you leave the menu.
+
 ## What next
 
-- Open the menu at any time with `sudo darban`.
 - Add or remove people: [Everyday tasks](usage.md).
 - More ways to send a profile: [Sharing a profile](sharing.md).
