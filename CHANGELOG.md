@@ -4,6 +4,9 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## [Unreleased]
 
+### Fixed
+- A new server on a public IP address finishes the setup again. In `v1.0.0-rc.3` the setup stopped without a word right after "OpenVPN ... installed": reading certbot's version from `apt-cache` ended early, `apt-cache` was killed by SIGPIPE, and `pipefail` turned that into a failure. The certbot step now reads to the end, and nothing that fails inside it can stop the setup.
+
 ## [1.0.0-rc.3] - 2026-11-09
 
 Release candidate for `v1.0.0`, for testing on a server that is not in use. It replaces `v1.0.0-rc.2`, with the fixes from its first test on a real server and from an audit of the code and the guides.
