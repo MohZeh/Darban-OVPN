@@ -4,6 +4,10 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## [Unreleased]
 
+## [1.0.0-rc.3] - 2026-11-09
+
+Release candidate for `v1.0.0`, for testing on a server that is not in use. It replaces `v1.0.0-rc.2`, with the fixes from its first test on a real server and from an audit of the code and the guides.
+
 ### Changed
 - A temporary link works for at most 24 hours, 1 hour or 15 minutes, and ends sooner once a connection with its profile is seen; Enter means 24 hours. Until then the page and the file can be opened again, and menu `5` shows whether the file was downloaded.
 - The Persian README, guides and link page are rewritten in plain, formal Persian, with the technical names kept as they are. They say only what is checked, and the English guides now carry the same additions: a split tunnel in the connection check, the self-signed certificate case, the TCP MSS term, and what not to send in a problem report.
