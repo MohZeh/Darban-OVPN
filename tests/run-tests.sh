@@ -1526,7 +1526,7 @@ test_update_notice_in_the_header() {
     menu '0\n' >/dev/null
     for attempt in 1 2 3 4 5 6 7 8 9 10; do [[ -s $E/cfg/.latest-version ]] && break; sleep 0.3; done
     ok_if 'a background check stored the version' test -s "$E/cfg/.latest-version"
-    has 'the header announces it' 'Update available: v9.9.9' "$(menu '0\n')"
+    grep -Eq 'Update available: v9\.9\.9 .{1,3} Setup .{1,3} 2$' <<<"$(menu '0\n')"; rc_is 'the header announces it, with the Setup item to use' 0 "$?"
     ok_if 'nothing was installed by the notice' test ! -e "$MARKER"
     grep -c 'releases/latest/download/VERSION' "$STUB_LOG" > "$E/calls.before"
     menu '0\n' >/dev/null; sleep 0.5

@@ -2290,7 +2290,7 @@ status_block() {
     kv Clients "$clients"
     # Alerts live in the header so clearing the screen can never hide them.
     {
-        if e=$(available_update) && [[ -n $e ]]; then printf '%s\n' "Update available: v$e $S_ARROW Setup $S_CRUMB 1"; fi
+        if e=$(available_update) && [[ -n $e ]]; then printf '%s\n' "Update available: v$e $S_ARROW Setup $S_CRUMB 2"; fi
         if [[ -n $pending ]]; then printf '%s\n' "Revoked but NOT blocked yet: $(safe_text "$pending") $S_ARROW Maintenance $S_CRUMB 2"; fi
         if [[ -n $leftovers ]]; then printf '%s\n' "Revocation unfinished, profile still on server: $(safe_text "$leftovers") $S_ARROW Maintenance $S_CRUMB 2"; fi
         if systemctl is-failed --quiet darban-crl.service 2>/dev/null; then printf '%s\n' "Last automatic CRL run FAILED $S_ARROW Maintenance $S_CRUMB 1"; fi
