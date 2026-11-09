@@ -2547,6 +2547,40 @@ test_ci_scope_skips_only_documentation() {
     has 'a manual run always runs the tests' 'code=true' "$(scope EVENT=workflow_dispatch)"
 }
 
+test_ci_skips_only_what_its_pull_request_tested() {
+    local dir=$WORK/tested origin=$WORK/tested-origin.git base pr squash other
+    tested() { (cd "$dir" && PATH="$dir/stub:$PATH" REPO=o/r REMOTE="$origin" "$@" bash "$REPO/scripts/ci-already-tested.sh" 2>&1); }
+    mkdir -p "$dir/stub" && git -C "$dir" init -q && git init -q --bare "$origin"
+    git -C "$dir" config user.email t@example.com; git -C "$dir" config user.name t
+    printf 'a\n' >"$dir/run.sh"; git -C "$dir" add run.sh && git -C "$dir" commit -qm base
+    base=$(git -C "$dir" rev-parse HEAD)
+    printf 'b\n' >>"$dir/run.sh"; git -C "$dir" commit -qam change
+    pr=$(git -C "$dir" rev-parse HEAD)
+    git -C "$dir" push -q "$origin" "$pr:refs/pull/7/head"
+    # A squash merge: a new commit on main with exactly the files of the pull request's last commit.
+    squash=$(git -C "$dir" commit-tree "$pr^{tree}" -p "$base" -m 'change (#7)')
+    printf 'c\n' >>"$dir/run.sh"; git -C "$dir" commit -qam more
+    other=$(git -C "$dir" commit-tree "HEAD^{tree}" -p "$base" -m 'other (#7)')
+    # gh answers from the environment: the merged pull request, its last commit, and its green runs.
+    cat >"$dir/stub/gh" <<'STUB'
+#!/usr/bin/env bash
+[[ -n ${GH_FAIL:-} ]] && exit 1
+case $2 in
+    */commits/*/pulls) printf '%s\n' ${PRS-7} ;;
+    */pulls/*) echo "$HEAD_SHA" ;;
+    */runs\?*) echo "${RUNS:-1}" ;;
+esac
+STUB
+    chmod +x "$dir/stub/gh"
+    has 'the exact files its pull request tested green skip the slow tests' 'tested=true' "$(tested SHA="$squash" HEAD_SHA="$pr")"
+    has 'and it says which pull request' 'Pull request #7 already tested' "$(tested SHA="$squash" HEAD_SHA="$pr")"
+    has 'other files run them' 'tested=false' "$(tested SHA="$other" HEAD_SHA="$pr")"
+    has 'no green run of the pull request runs them' 'tested=false' "$(tested SHA="$squash" HEAD_SHA="$pr" RUNS=0)"
+    has 'a pull request whose last commit is not the one GitHub names runs them' 'tested=false' "$(tested SHA="$squash" HEAD_SHA="$base")"
+    has 'a push without a pull request runs them' 'tested=false' "$(tested SHA="$squash" HEAD_SHA="$pr" PRS='')"
+    has 'an API that does not answer runs them' 'tested=false' "$(tested SHA="$squash" HEAD_SHA="$pr" GH_FAIL=1)"
+}
+
 test_repo_checks_find_problems() {
     local dir=$WORK/checks out rc
     check() { (cd "$dir" && git add -A . && python3 "$REPO/scripts/check-repo.py" 2>&1); }

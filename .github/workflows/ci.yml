@@ -22,8 +22,15 @@ jobs:
     name: Lint
     runs-on: ubuntu-24.04
     timeout-minutes: 5
+    # Read-only, to find the pull request of a push to main and whether its CI passed.
+    permissions:
+      contents: read
+      actions: read
+      pull-requests: read
     outputs:
-      code: ${{ steps.scope.outputs.code }}
+      # The slow tests are skipped for documentation only, and for a push to main whose exact files its
+      # pull request already tested green.
+      code: ${{ steps.tested.outputs.tested == 'true' && 'false' || steps.scope.outputs.code }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -36,6 +43,18 @@ jobs:
           BEFORE: ${{ github.event.before }}
           BASE: ${{ github.event.pull_request.base.sha }}
         run: bash scripts/ci-scope.sh | tee -a "$GITHUB_OUTPUT"
+      - name: Did the pull request already test these exact files?
+        id: tested
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          SHA: ${{ github.sha }}
+        run: |
+          bash scripts/ci-already-tested.sh | tee -a "$GITHUB_OUTPUT"
+          if grep -qx 'tested=true' "$GITHUB_OUTPUT"; then
+            echo 'The pull request of this commit already tested these exact files, and passed: the slow tests are not run again.' >> "$GITHUB_STEP_SUMMARY"
+          fi
       - name: ShellCheck, file modes and documentation
         run: |
           command -v shellcheck >/dev/null || { sudo apt-get update && sudo apt-get install -y shellcheck; }
