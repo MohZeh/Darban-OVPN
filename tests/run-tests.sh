@@ -2010,7 +2010,7 @@ test_setup_suggests_a_free_port() {
 }
 
 test_setup_firewall_question() {
-    local out
+    local out port
     prepare_blank_server
     out=$(printf '\n\n3\n' | bash "$E/setup/server-setup.sh" 2>&1)
     lacks 'no ufw: no question' 'ufw is active' "$out"
@@ -2021,7 +2021,8 @@ test_setup_firewall_question() {
     : > "$STUB_LOG"
     out=$(printf '\n\n\n\n' | bash "$E/setup/server-setup.sh" 2>&1)
     has 'ufw on: it explains' 'ufw is active here' "$out"
-    grep -q 'ufw allow 1194/udp' "$STUB_LOG"; rc_is 'Enter adds the port rule' 0 "$?"
+    port=$(awk '$1=="port" {print $2}' "$E/server/server.conf")
+    grep -q "ufw allow $port/udp" "$STUB_LOG"; rc_is 'Enter adds the rule for the chosen port' 0 "$?"
     grep -q 'ufw route allow in on tun0 out on eth0' "$STUB_LOG"; rc_is 'Enter adds the forwarding rule' 0 "$?"
 }
 
