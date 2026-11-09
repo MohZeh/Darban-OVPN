@@ -4,7 +4,7 @@
 
 ## Client
 
-One person or device allowed to connect. Each client has its own certificate.
+A connection profile with its own certificate, usually for one person or one device. Each client can be revoked on its own.
 
 ## Profile
 
@@ -12,15 +12,15 @@ The `.ovpn` file a device uses to connect. It holds a private key, so treat it l
 
 ## Revoke
 
-Permanently block a client. Its old profile stops working everywhere.
+Permanently cancel a client's certificate. Its profile stops working on every device. Revoking the certificate is not the same as ending a connection that is open at that moment; the tool ends that connection separately.
 
 ## Blocklist (CRL)
 
-The list of revoked clients that OpenVPN checks at each connection. CRL stands for Certificate Revocation List. The tool renews and checks it for you.
+The list of revoked certificates that OpenVPN checks at each connection. CRL stands for Certificate Revocation List, and the menu calls it Blocklist. The tool renews and checks it every day.
 
 ## CA
 
-Certificate Authority: the key on your server that issues certificates. Whoever has it can create clients, so keep it safe.
+Certificate Authority: what issues the server's certificate and the clients' certificates. Its private key stays on the server; whoever can read it can create clients, so access to it must stay limited.
 
 ## Server address
 
@@ -40,15 +40,19 @@ Two ways of sending data over a network, each with its own ports. This VPN uses 
 
 ## Full tunnel and split tunnel
 
-**Full tunnel** sends all of a client's IPv4 traffic through the server. **Split tunnel** sends only the traffic for the VPN network. Full tunnel is the default.
+**Full tunnel** sends all of a client's IPv4 traffic through the server. **Split tunnel** sends only the traffic for the VPN network, and the rest goes directly. Full tunnel is the default. In both, IPv6 traffic does not go through the VPN.
 
 ## NAT
 
 Lets clients reach the internet through the server's address.
 
+## TCP MSS
+
+The largest amount of data in one TCP segment. The tool limits it to 1300 in both directions for VPN traffic, so packets also arrive on networks that drop split packets. MSS is not MTU, the largest whole packet on a path.
+
 ## DCO
 
-Data Channel Offload: OpenVPN's traffic handled inside the kernel, which is faster. It needs the `ovpn` kernel module.
+Data Channel Offload: OpenVPN's traffic handled inside the kernel, which is faster where it is supported. It needs the `ovpn` kernel module.
 
 ## Temporary link
 

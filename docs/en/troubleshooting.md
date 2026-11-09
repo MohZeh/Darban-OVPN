@@ -40,7 +40,7 @@ sudo journalctl -u darban-links.service -n 30 --no-pager
 
 ## The browser warns about the link
 
-The server has no trusted certificate for the link. The link is still encrypted, but the browser cannot confirm whose server it is. To avoid the warning, accept the Let's Encrypt certificate the tool offers with the next link; it works for a domain name or a public IP address. See [The browser warning](sharing.md#the-browser-warning).
+The server has no trusted certificate for the link. The link is still encrypted, but the browser cannot confirm whose server it is. To avoid the warning, use a trusted certificate that is already on the server for the same address, or accept the Let's Encrypt certificate the tool offers with the next link; both work for a domain name or a public IP address. See [The browser warning](sharing.md#the-browser-warning).
 
 ## The install stops at the first question
 
@@ -84,7 +84,7 @@ No stable release has been published yet, so the version you have is the newest 
 
 ## Reporting a problem
 
-Send the error text and this output. **Never** send a private key or a `.ovpn` file.
+Send the error text and this output. **Never** send a private key, a `.ovpn` file, a temporary link or a key password, and replace the server's real IP address with `x.x.x.x` before sending.
 
 ```bash
 sudo journalctl -u openvpn-server@server -u darban-links -n 50 --no-pager

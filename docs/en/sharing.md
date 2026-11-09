@@ -64,7 +64,11 @@ A **Cloudflare Origin certificate** is not used, and the tool says so. Browsers 
 - **Domain name:** the certificate comes from Ubuntu's `certbot` package, and certbot renews it by itself. If a renewal fails, for example because port 80 is closed, the tool asks again when a link needs a new one.
 - **IP address:** Let's Encrypt gives a six-day certificate, and a new one is requested when a link needs it. This needs `certbot` 5.3 or newer, which Ubuntu does not have yet, so the tool uses a certbot that is new enough, or installs it from the Certbot project as a snap. A server with neither is not offered one.
 
-If a new certificate cannot be had while the current trusted one still works, the current one stays, and the tool says when it ends. Otherwise, if you choose No, or the request fails, the tool makes its own certificate. The link still works and is encrypted, but the browser shows a warning. The tool shows a note to send with the link, and the certificate fingerprint. The note asks the person to go past the warning only for this link, which came straight from you.
+If a new certificate cannot be had while the current trusted one still works, the current one stays, and the tool says when it ends. Otherwise, if you choose No, or the request fails, the tool makes a self-signed certificate. The link is still encrypted, but the browser cannot confirm that it reaches this server, so it warns. In that case:
+
+- The tool shows the certificate fingerprint. A person who knows how to view certificate details in the browser can compare it with a fingerprint you send another way.
+- Put a password on the key, and send it separately. If the person cannot receive the profile with confidence, use **My own computer** or a trusted certificate.
+- The tool shows a short note to send with the link. It asks the person to go past the warning only for this link, which came straight from you.
 
 The tool shows the note in English, because a terminal shows Persian backwards. In Persian, send this:
 
