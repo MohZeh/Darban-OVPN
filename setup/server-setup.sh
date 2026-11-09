@@ -359,7 +359,8 @@ install_packages() {
         *) die "Expected OpenVPN 2.7 or newer from the OpenVPN repository, but got ${version:-nothing}." ;;
     esac
     [[ -x $EASYRSA_BIN ]] || die "Easy-RSA is not at $EASYRSA_BIN."
-    install_certbot_for_links
+    # Called in a list, so nothing that fails inside it can stop the setup: certbot is only a convenience here.
+    install_certbot_for_links || warn 'certbot was not installed; the first link tries again.'
 }
 links_can_be_trusted() { [[ $HOST != localhost ]] && ! { valid_ipv4 "$HOST" && is_private_ip "$HOST"; }; }
 install_certbot_for_links() {
@@ -369,7 +370,9 @@ install_certbot_for_links() {
     links_can_be_trusted || return 0
     if valid_ipv4 "$HOST"; then
         if [[ -x /snap/bin/certbot ]]; then return 0; fi
-        candidate=$(apt-cache policy certbot 2>/dev/null | awk '$1=="Candidate:" {print $2; exit}')
+        # awk reads to the end: leaving early would kill apt-cache with SIGPIPE, which pipefail turns into
+        # a failure, and errexit into a setup that stops without a word.
+        candidate=$(apt-cache policy certbot 2>/dev/null | awk '$1=="Candidate:" && v == "" {v=$2} END {print v}') || candidate=''
         candidate=${candidate#*:}
         if [[ $candidate =~ ^[0-9.]+ && $(printf '%s\n5.3\n' "${BASH_REMATCH[0]}" | sort -V | head -n 1) == 5.3 ]]; then
             :

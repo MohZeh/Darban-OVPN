@@ -2429,6 +2429,7 @@ test_link_names_a_cloudflare_origin_certificate() {
 }
 
 test_setup_installs_certbot_for_links() {
+    local out rc
     prepare_blank_server
     : > "$STUB_LOG"
     setup_run --host vpn.example.com --port 21194 --yes >/dev/null
@@ -2436,7 +2437,12 @@ test_setup_installs_certbot_for_links() {
     grep -qx 'package certbot' "$E/cfg/.server-setup-started"; rc_is 'and it is recorded for removal' 0 "$?"
     prepare_blank_server_again
     : > "$STUB_LOG"
-    setup_run --host 203.0.113.9 --port 21194 --yes >/dev/null
+    # Like the real apt-cache, it goes on writing after the Candidate line. A reader that stops there kills it
+    # with SIGPIPE, and under pipefail the whole setup stopped right after "OpenVPN ... installed".
+    printf '#!/usr/bin/env bash\necho "apt-cache $*" >> "$STUB_LOG"\nprintf "certbot:\\n  Installed: (none)\\n  Candidate: 2.9.0-1\\n"\nsleep 0.3\nfor i in $(seq 300); do echo "     2.9.0-1 500 http://archive.ubuntu.com/ubuntu noble/universe amd64 Packages"; done\n' > "$E/bin/apt-cache"
+    out=$(setup_run --host 203.0.113.9 --port 21194 --yes); rc=$?
+    rc_is 'a public IP finishes the setup' 0 "$rc"
+    grep -qx setup_complete "$E/cfg/.server-setup-started"; rc_is 'and records it as complete' 0 "$?"
     grep -q 'snap install --classic certbot' "$STUB_LOG"; rc_is 'a public IP gets the Certbot snap, new enough for it' 0 "$?"
     grep -qx 'snap certbot' "$E/cfg/.server-setup-started"; rc_is 'also recorded' 0 "$?"
     prepare_blank_server_again
