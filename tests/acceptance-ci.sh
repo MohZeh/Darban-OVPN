@@ -248,7 +248,22 @@ if [[ ${without:-0} =~ ^[0-9]+$ ]] && (( ${without:-0} >= 10000 )); then
     echo 'NOTE: this runner did not lose large packets even without the rule, so only the result with it is judged.'
 fi
 darban status >"$LOG/mss.log" 2>&1
-grep -q 'TCP MSS for VPN traffic is limited to 1300 in both directions' "$LOG/mss.log"
+grep -q 'TCP MSS for VPN traffic is limited to 1280 in both directions' "$LOG/mss.log"
+# The same path to the server itself: a page on this server, opened from a device that is connected to it,
+# as a temporary link is. Those connections never pass the forward chain.
+vpn_net=$(awk '$1=="server" {print $2; exit}' /etc/openvpn/server/server.conf)
+server_vpn_ip=${vpn_net%.0}.1
+mkdir -p "$LOG/www" && head -c 300000 /dev/urandom > "$LOG/www/big"
+(cd "$LOG/www" && exec python3 -m http.server 18080 --bind "$server_vpn_ip") >/dev/null 2>&1 &
+www_pid=$!
+if (( USE_UFW )); then ufw allow in on tun0 to any port 18080 proto tcp >/dev/null; fi
+sleep 1
+local_size=$(ip netns exec "$NS" curl -4 -sS -o /dev/null --max-time 20 -w '%{size_download}' "http://$server_vpn_ip:18080/big" 2>/dev/null || true)
+echo "From a connected client to the server itself, on that path: ${local_size:-0} bytes arrived"
+kill "$www_pid" 2>/dev/null || true
+if (( USE_UFW )); then ufw delete allow in on tun0 to any port 18080 proto tcp >/dev/null; fi
+if [[ ${local_size:-0} != 300000 ]]; then echo 'FAIL: a connected client could not download from the server itself on a path with a smaller MTU.'; exit 1; fi
+echo 'PASS: a connected client downloads from the server itself on a path with a smaller MTU.'
 nft delete table ip darbantest
 ip netns exec "$NS" nft delete table ip darbantest
 ip link set dt0 mtu 1500

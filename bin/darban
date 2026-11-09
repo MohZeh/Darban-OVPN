@@ -1296,7 +1296,11 @@ share_by_link() {
     fi
     while :; do
         # Esc means no link at all: nothing is created, and the profile stays on the server.
-        choose_one 'At most, how long should the link work?' '24 hours' '1 hour' '15 minutes' || { cancelled; return 2; }
+        choose_one 'At most, how long should the link work?' '24 hours' '1 hour' '15 minutes' || {
+            cancelled
+            info "The client $name still exists. Share it later from menu 4, or revoke it from menu 3."
+            return 2
+        }
         case $CHOSEN in
             2) minutes=60 label='1 hour' ;;
             3) minutes=15 label='15 minutes' ;;
@@ -2367,7 +2371,7 @@ network_rules_health() {
         check bad "VPN clients may reach each other, or the cloud metadata service $S_ARROW $fix"
     fi
     if darban_live_mss_ok "$net"; then
-        check ok 'TCP MSS for VPN traffic is limited to 1300 in both directions'
+        check ok "TCP MSS for VPN traffic is limited to $DARBAN_MSS in both directions"
     else
         check warn "The TCP MSS rule for VPN traffic is missing or different; on some networks websites may not load $S_ARROW $reinstall"
     fi

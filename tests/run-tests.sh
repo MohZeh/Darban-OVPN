@@ -1337,6 +1337,7 @@ EOF
     out=$(NO_COLOR=1 python3 "$HERE/pty-drive.py" --timeout 30 "$script" -- bash "$E/manager.sh" 2>&1); rc=$?
     rc_is 'Esc on the time question returns to the menu' 0 "$rc"
     has 'it says nothing changed' 'Cancelled; nothing changed.' "$out"
+    has 'and that the client still exists' 'The client alice still exists. Share it later from menu 4' "$out"
     lacks 'no link is shown' '/l/' "$out"
     ok_if 'no link is stored' test -z "$(find "$E/links" -name '*.meta' 2>/dev/null)"
     if grep -q 'restart darban-links.service' "$STUB_LOG" 2>/dev/null; then result 0 'the link service is not started'; else result 1 'the link service is not started'; fi
@@ -2098,14 +2099,18 @@ case "$*" in
     'list table ip mzx_openvpn') exit 1 ;;
     'list chain ip darban postrouting') cat "$E/live-post" 2>/dev/null ;;
     'list chain ip darban forward') cat "$E/live-forward" 2>/dev/null ;;
+    'list chain ip darban input') cat "$E/live-input" 2>/dev/null ;;
+    'list chain ip darban output') cat "$E/live-output" 2>/dev/null ;;
     *) exit 0 ;;
 esac
 STUB
     chmod +x "$E/bin/nft"
     source "$REPO/lib/common.sh"
     darban_nat_rules 10.8.0.0 eth0 > "$E/cfg/nat.nft"
+    printf '\t\tip saddr 10.8.0.0/24 tcp flags syn tcp option maxseg size > 1280 tcp option maxseg size set 1280\n' > "$E/live-input"
+    printf '\t\tip daddr 10.8.0.0/24 tcp flags syn tcp option maxseg size > 1280 tcp option maxseg size set 1280\n' > "$E/live-output"
     printf '\t\tip saddr 10.8.0.0/24 oifname "eth0" masquerade\n' > "$E/live-post"
-    printf '\t\tip saddr 10.8.0.0/24 ip daddr 10.8.0.0/24 drop\n\t\tip saddr 10.8.0.0/24 ip daddr 169.254.0.0/16 drop\n\t\tip saddr 10.8.0.0/24 tcp flags syn tcp option maxseg size > 1300 tcp option maxseg size set 1300\n\t\tip daddr 10.8.0.0/24 tcp flags syn tcp option maxseg size > 1300 tcp option maxseg size set 1300\n' > "$E/live-forward"
+    printf '\t\tip saddr 10.8.0.0/24 ip daddr 10.8.0.0/24 drop\n\t\tip saddr 10.8.0.0/24 ip daddr 169.254.0.0/16 drop\n\t\tip saddr 10.8.0.0/24 tcp flags syn tcp option maxseg size > 1280 tcp option maxseg size set 1280\n\t\tip daddr 10.8.0.0/24 tcp flags syn tcp option maxseg size > 1280 tcp option maxseg size set 1280\n' > "$E/live-forward"
     # The interfaces this server has, and the one of its default route.
     cat > "$E/bin/ip" <<'STUB'
 #!/usr/bin/env bash
@@ -2117,12 +2122,15 @@ STUB
     chmod +x "$E/bin/ip"
     out=$(mgr status)
     has 'both live rules pass' 'VPN clients are kept apart' "$out"
-    has 'the TCP size rule passes' 'TCP MSS for VPN traffic is limited to 1300 in both directions' "$out"
+    has 'the TCP size rule passes' 'TCP MSS for VPN traffic is limited to 1280 in both directions' "$out"
+    : > "$E/live-input"
+    has 'a missing rule for connections to the server itself is reported' 'The TCP MSS rule for VPN traffic is missing or different' "$(mgr status)"
+    printf '\t\tip saddr 10.8.0.0/24 tcp flags syn tcp option maxseg size > 1280 tcp option maxseg size set 1280\n' > "$E/live-input"
     sed -i '/maxseg/d' "$E/live-forward"
     out=$(mgr status)
     has 'a missing TCP size rule is reported, with the installer as the fix' 'The TCP MSS rule for VPN traffic is missing or different' "$out"
     has 'and the installer is named' '--version v' "$out"
-    lacks 'and it is not called fine' 'TCP MSS for VPN traffic is limited to 1300 in both directions' "$out"
+    lacks 'and it is not called fine' 'TCP MSS for VPN traffic is limited to 1280 in both directions' "$out"
     has 'the live NAT passes' 'NAT for the VPN network 10.8.0.0/24 present' "$out"
     printf '		ip saddr 10.8.0.0/24 oifname "eth0" accept
 ' > "$E/live-post"
@@ -2518,8 +2526,10 @@ test_setup_keeps_clients_apart() {
     setup_run --port 21194 --yes >/dev/null
     grep -q 'ip saddr 10.8.0.0/24 ip daddr 10.8.0.0/24 drop' "$E/cfg/nat.nft"; rc_is 'clients cannot reach each other' 0 "$?"
     grep -q 'ip saddr 10.8.0.0/24 ip daddr 169.254.0.0/16 drop' "$E/cfg/nat.nft"; rc_is 'or the cloud metadata service' 0 "$?"
-    grep -q 'ip saddr 10.8.0.0/24 tcp flags syn tcp option maxseg size > 1300 tcp option maxseg size set 1300' "$E/cfg/nat.nft"; rc_is 'TCP from clients fits in one tunnel packet' 0 "$?"
-    grep -q 'ip daddr 10.8.0.0/24 tcp flags syn tcp option maxseg size > 1300 tcp option maxseg size set 1300' "$E/cfg/nat.nft"; rc_is 'and TCP to them' 0 "$?"
+    grep -q 'ip saddr 10.8.0.0/24 tcp flags syn tcp option maxseg size > 1280 tcp option maxseg size set 1280' "$E/cfg/nat.nft"; rc_is 'TCP from clients fits in one tunnel packet' 0 "$?"
+    grep -q 'ip daddr 10.8.0.0/24 tcp flags syn tcp option maxseg size > 1280 tcp option maxseg size set 1280' "$E/cfg/nat.nft"; rc_is 'and TCP to them' 0 "$?"
+    sed -n '/chain input/,/}/p' "$E/cfg/nat.nft" | grep -q 'ip saddr 10.8.0.0/24 tcp flags syn'; rc_is 'and TCP from clients to the server itself' 0 "$?"
+    sed -n '/chain output/,/}/p' "$E/cfg/nat.nft" | grep -q 'ip daddr 10.8.0.0/24 tcp flags syn'; rc_is 'and from the server itself to clients' 0 "$?"
 }
 
 test_setup_removal_leaves_what_was_there() {
