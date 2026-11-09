@@ -66,7 +66,7 @@ A client is one person or device. The tool asks right after the install:
 1. **Create your first client now?** Press Enter.
 2. **Client name:** press Enter to use `client1`, or type a name such as `ali-phone`.
 3. **How will the client get this profile?** Press Enter for **Temporary link**.
-4. **Get a free Let's Encrypt certificate?** This comes only on a public address. Answer **Yes, get a certificate** if you can open TCP port 80 in your provider's firewall for a moment: the link then opens without a browser warning. Otherwise press Enter. Until you have one, the question comes back with each link. See [The browser warning](sharing.md#the-browser-warning).
+4. **Get a free Let's Encrypt certificate?** This comes only on a public address. Open TCP port 80 in your provider's firewall for a moment, then press Enter for **Yes, get a certificate**: the link then opens without a browser warning. If this server already has a trusted certificate for its address, the tool offers that one first; press Enter to use it. Until you have one, the question comes back with each link. See [The browser warning](sharing.md#the-browser-warning).
 5. **Lock the private key with a password?** Press Enter for no password. See [A password on the key](sharing.md#a-password-on-the-key) for when one helps.
 6. **At most, how long should the link work?** Press Enter for 24 hours. The link stops sooner, as soon as the device connects.
 

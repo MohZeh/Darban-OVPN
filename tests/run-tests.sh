@@ -627,6 +627,7 @@ if [[ " $* " == *" -s "* ]]; then
       *" purge "*) on=0; for a; do if (( on )); then echo "Remv $a"; fi; [[ $a == purge ]] && on=1; done; if [[ -n ${REMV_EXTRA:-} ]]; then echo "Remv $REMV_EXTRA"; fi ;;
       *" autoremove "*) for a in ${AUTOREMOVE:-}; do echo "Remv $a"; done ;;
       *" install openvpn "*) for a in openvpn easy-rsa socat nftables liblzo2-2; do echo "Inst $a"; done; if [[ -n ${APT_UPGRADE:-} ]]; then echo "Inst dep-$APT_UPGRADE [1.0] (2.0 Ubuntu [amd64])"; fi ;;
+      *" install certbot "*) echo 'Inst certbot'; echo 'Inst python3-certbot' ;;
       *) printf '%s\n' ${APT_PLAN:-Inst linux-image-virtual-hwe-24.04 Inst linux-modules-7.0.0-42-generic} | awk 'NR%2==1 {a=$0; next} {print a, $0}'; if [[ -n ${APT_UPGRADE:-} ]]; then echo "Inst $APT_UPGRADE [1.0] (2.0 Ubuntu [amd64])"; fi ;;
     esac
 fi
@@ -640,6 +641,9 @@ for p in ${INSTALLED_PKGS:-}; do if [[ $p == "$name" ]]; then printf 'install ok
 exit 1
 STUB
     printf '#!/usr/bin/env bash\necho amd64\n' > "$E/bin/dpkg"
+    # certbot for links: Ubuntu's is older than 5.3, so an IP address takes the snap.
+    printf '#!/usr/bin/env bash\necho "apt-cache $*" >> "$STUB_LOG"\nif [[ $1 == policy ]]; then echo "  Candidate: ${FAKE_CERTBOT_CANDIDATE:-2.9.0-1}"; fi\n' > "$E/bin/apt-cache"
+    printf '#!/usr/bin/env bash\necho "snap $*" >> "$STUB_LOG"\nexit ${FAKE_SNAP_RC:-0}\n' > "$E/bin/snap"
     cat > "$E/bin/openvpn" <<'STUB'
 #!/usr/bin/env bash
 if [[ $1 == --version ]]; then echo "OpenVPN ${FAKE_OPENVPN_VERSION:-2.7.8} x86_64-pc-linux-gnu"; exit 0; fi
@@ -1400,14 +1404,14 @@ test_link_certificate_for_a_hostname() {
     local out before
     start_links_stub
     echo vpn.example.com > "$E/cfg/domain"
-    out=$(menu '4\nalice\n1\n1\n1\n1\n0\n')
+    out=$(menu '4\nalice\n1\n2\n1\n1\n0\n')
     has 'a hostname offers a trusted certificate' "Let's Encrypt" "$out"
     has 'declining falls back to a self-signed certificate' 'no trusted certificate' "$out"
     has 'the link uses the hostname' "https://vpn.example.com:$LINK_TEST_PORT/l/" "$out"
     openssl x509 -in "$E/cfg/link-cert.pem" -noout -checkhost vpn.example.com | grep -q 'does match'; rc_is 'the certificate fits the hostname' 0 "$?"
     menu '5\n1\n0\n' >/dev/null
     before=$(sha256sum < "$E/cfg/link-cert.pem")
-    out=$(menu '4\nalice\n1\n1\n1\n1\n0\n')
+    out=$(menu '4\nalice\n1\n2\n1\n1\n0\n')
     has 'a self-signed certificate is offered a trusted one again' "Let's Encrypt" "$out"
     [[ $(sha256sum < "$E/cfg/link-cert.pem") == "$before" ]]; rc_is 'declining keeps the current self-signed certificate' 0 "$?"
     has 'and the link is made' "https://vpn.example.com:$LINK_TEST_PORT/l/" "$out"
@@ -1429,7 +1433,7 @@ test_link_certificate_for_a_hostname() {
     rm -f "$E/cfg/link-cert.pem" "$E/cfg/link-key.pem"
     printf '#!/usr/bin/env bash\nif [[ $1 == --version ]]; then echo "certbot 2.9.0"; exit 0; fi\necho "certbot $*" >> "$STUB_LOG"; exit 1\n' > "$E/bin/certbot"
     chmod +x "$E/bin/certbot"
-    out=$(menu '4\nalice\n1\n2\n1\n1\n0\n')
+    out=$(menu '4\nalice\n1\n1\n1\n1\n0\n')
     has 'a failed request explains itself' 'certbot could not get a certificate' "$out"
     has 'and still gives a working link' "https://vpn.example.com:$LINK_TEST_PORT/l/" "$out"
     grep -q 'certbot certonly --standalone' "$STUB_LOG"; rc_is 'certbot was asked' 0 "$?"
@@ -1446,7 +1450,7 @@ test_link_certificate_for_a_hostname() {
     out=$(menu '4
 alice
 1
-2
+1
 1
 2
 0
@@ -1459,7 +1463,7 @@ alice
     out=$(menu '4
 alice
 1
-2
+1
 1
 1
 2
@@ -2201,7 +2205,7 @@ test_first_client_on_a_public_ip_in_a_real_terminal() {
 Enter: Create a client => \r
 Client name [client1] => \r
 Enter: Temporary link => \r
-Enter: No, use a self-signed certificate => \r
+Enter: Yes, get a certificate => 2\r
 Enter: No password => \r
 Enter: 24 hours => \r
 client1 is connected from 198.51.100.7 => \r
@@ -2210,8 +2214,9 @@ EOF
     out=$(NO_COLOR=1 python3 "$HERE/pty-drive.py" --timeout 30 "$script" -- bash "$E/manager.sh" welcome 2>&1); rc=$?
     rc_is 'a public IP also takes only Enter' 0 "$rc"
     has 'it offers a trusted certificate first' "Get a free Let's Encrypt certificate?" "$out"
+    has 'and Enter would take it' 'Enter: Yes, get a certificate' "$out"
     has 'it ends with a link on that IP' 'https://203.0.113.9:' "$out"
-    if grep -q '^certbot certonly' "$STUB_LOG" 2>/dev/null; then result 0 'Enter gets no certificate'; else result 1 'Enter gets no certificate'; fi
+    if grep -q '^certbot certonly' "$STUB_LOG" 2>/dev/null; then result 0 'choosing No gets no certificate'; else result 1 'choosing No gets no certificate'; fi
     if (( rc != 0 )); then printf '%s\n' "$out" | tail -n 25 | cut -c1-150 | sed 's/^/    | /'; fi
 }
 
@@ -2294,7 +2299,7 @@ test_link_certificate_for_a_public_ip() {
     : > "$E/cfg/.server-setup-started"
     printf '#!/usr/bin/env bash\nif [[ $1 == --version ]]; then echo "certbot 5.9.0"; exit 0; fi\necho "certbot $*" >> "$STUB_LOG"; exit 1\n' > "$E/bin/certbot"
     chmod +x "$E/bin/certbot"
-    out=$(menu '4\nalice\n1\n2\n1\n1\n0\n')
+    out=$(menu '4\nalice\n1\n1\n1\n1\n0\n')
     has 'a public IP is offered a trusted certificate' 'For an IP address it lasts six days' "$out"
     grep -q -- '--preferred-profile shortlived --ip-address 203.0.113.9' "$STUB_LOG"; rc_is 'certbot asks for a six-day IP certificate' 0 "$?"
     grep -q -- '--cert-name darban-ovpn-links' "$STUB_LOG"; rc_is 'under a name of its own' 0 "$?"
@@ -2304,12 +2309,94 @@ test_link_certificate_for_a_public_ip() {
     menu '5\n1\n0\n' >/dev/null
     rm -f "$E/cfg/link-cert.pem" "$E/cfg/link-key.pem"
     printf '#!/usr/bin/env bash\nif [[ $1 == --version ]]; then echo "certbot 5.9.0"; exit 0; fi\necho "certbot $*" >> "$STUB_LOG"; exit 0\n' > "$E/bin/certbot"
-    menu '4\nalice\n1\n2\n1\n1\n0\n' >/dev/null
+    menu '4\nalice\n1\n1\n1\n1\n0\n' >/dev/null
     grep -qx 'certbot_cert darban-ovpn-links' "$E/cfg/.server-setup-started"; rc_is 'a certificate it got is recorded' 0 "$?"
     echo 10.0.0.9 > "$E/cfg/domain"
     rm -f "$E/cfg/link-cert.pem" "$E/cfg/link-key.pem"
     lacks 'a private IP is not offered one' "Let's Encrypt" "$(menu '4\nalice\n1\n1\n1\n0\n')"
     stop_links_stub
+}
+
+make_test_ca() {
+    # A certificate authority of its own, trusted as the system's, and a certificate from it for $1 in $2/$3.
+    local host=$1 dir=$2 leaf=$3 key=$4
+    if [[ ! -s $E/test-ca.pem ]]; then
+        openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes -keyout "$E/test-ca.key" -out "$E/test-ca.pem" \
+            -days 60 -subj /CN=Darban-Test-Root >/dev/null 2>&1
+        cp "$E/test-ca.pem" "$E/system-ca.pem"
+    fi
+    mkdir -p "$dir"
+    openssl req -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes -keyout "$dir/$key" -out "$E/leaf.csr" -subj "/CN=$host" >/dev/null 2>&1
+    printf 'subjectAltName=DNS:%s\n' "$host" > "$E/leaf.ext"
+    openssl x509 -req -in "$E/leaf.csr" -CA "$E/test-ca.pem" -CAkey "$E/test-ca.key" -CAcreateserial -days 30 \
+        -extfile "$E/leaf.ext" -out "$dir/$leaf" >/dev/null 2>&1
+}
+
+test_link_uses_a_certificate_already_on_the_server() {
+    local out
+    start_links_stub
+    echo vpn.example.com > "$E/cfg/domain"
+    make_test_ca vpn.example.com "$E/panel-cert/vpn.example.com" fullchain.pem privkey.pem
+    out=$(menu '4\nalice\n1\n1\n1\n1\n0\n')
+    has 'a trusted certificate already here is offered first' 'This server already has a trusted certificate for vpn.example.com' "$out"
+    has 'and the link is made with it' "https://vpn.example.com:$LINK_TEST_PORT/l/" "$out"
+    cmp -s "$E/cfg/link-cert.pem" "$E/panel-cert/vpn.example.com/fullchain.pem"; rc_is 'the link service gets a copy it can read' 0 "$?"
+    ok_if 'and a link certificate is no longer self-signed' test -s "$E/cfg/link-cert.source"
+    lacks 'no browser warning note' 'Send this note with the link' "$out"
+    has 'Settings names where it came from' 'trusted' "$(menu '7\n0\n0\n')"
+    menu '5\n1\n0\n' >/dev/null
+
+    # Renewed where it lives: the next link takes the new one, without a question.
+    make_test_ca vpn.example.com "$E/panel-cert/vpn.example.com" fullchain.pem privkey.pem
+    out=$(menu '4\nalice\n1\n1\n1\n0\n')
+    has 'a renewal there reaches the links' 'links use the new one' "$out"
+    cmp -s "$E/cfg/link-cert.pem" "$E/panel-cert/vpn.example.com/fullchain.pem"; rc_is 'the new one is copied' 0 "$?"
+    menu '5\n1\n0\n' >/dev/null
+
+    # A file chosen by hand: a key that does not belong is refused.
+    make_test_ca vpn.example.com "$E/other" cert.pem cert.key
+    out=$(menu "7\n4\n2\n$E/other/cert.pem\n$E/panel-cert/vpn.example.com/privkey.pem\n0\n0\n")
+    has 'a key from another certificate is refused' 'does not belong to that certificate' "$out"
+    out=$(menu "7\n4\n2\n$E/other/cert.pem\n\n0\n0\n")
+    has 'the key next to it is suggested and used' 'Links use the trusted certificate from' "$out"
+    cmp -s "$E/cfg/link-cert.pem" "$E/other/cert.pem"; rc_is 'the chosen file is used' 0 "$?"
+    stop_links_stub
+}
+
+test_link_names_a_cloudflare_origin_certificate() {
+    local out
+    start_links_stub
+    echo other.example.com > "$E/cfg/domain"
+    mkdir -p "$E/acme/other.example.com_ecc"
+    openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes -keyout "$E/acme/other.example.com_ecc/other.example.com.key" \
+        -out "$E/acme/other.example.com_ecc/fullchain.cer" -days 300 \
+        -subj '/O=CloudFlare, Inc./OU=CloudFlare Origin SSL Certificate Authority/CN=CloudFlare Origin Certificate' \
+        -addext subjectAltName=DNS:other.example.com >/dev/null 2>&1
+    out=$(menu '4\nalice\n1\n2\n1\n1\n0\n')
+    has 'a Cloudflare Origin certificate is named, with the reason it is not used' 'is a Cloudflare Origin certificate' "$out"
+    has "and Let's Encrypt is offered instead" "Get a free Let's Encrypt certificate?" "$out"
+    if [[ -s $E/cfg/link-cert.source ]]; then result 0 'it is not used'; else result 1 'it is not used'; fi
+    stop_links_stub
+}
+
+test_setup_installs_certbot_for_links() {
+    prepare_blank_server
+    : > "$STUB_LOG"
+    setup_run --host vpn.example.com --port 21194 --yes >/dev/null
+    grep -q -- '-y -q --no-install-recommends install certbot' "$STUB_LOG"; rc_is 'a hostname gets Ubuntu certbot during setup' 0 "$?"
+    grep -qx 'package certbot' "$E/cfg/.server-setup-started"; rc_is 'and it is recorded for removal' 0 "$?"
+    prepare_blank_server_again
+    : > "$STUB_LOG"
+    setup_run --host 203.0.113.9 --port 21194 --yes >/dev/null
+    grep -q 'snap install --classic certbot' "$STUB_LOG"; rc_is 'a public IP gets the Certbot snap, new enough for it' 0 "$?"
+    grep -qx 'snap certbot' "$E/cfg/.server-setup-started"; rc_is 'also recorded' 0 "$?"
+    prepare_blank_server_again
+    FAKE_SNAP_RC=1 setup_run --host 203.0.113.9 --port 21194 --yes >/dev/null
+    grep -qx setup_complete "$E/cfg/.server-setup-started"; rc_is 'a failed certbot install does not stop the setup' 0 "$?"
+    prepare_blank_server_again
+    : > "$STUB_LOG"
+    setup_run --host 192.168.1.10 --port 21194 --yes >/dev/null
+    if grep -q 'certbot' "$STUB_LOG"; then result 0 'a private address gets no certbot'; else result 1 'a private address gets no certbot'; fi
 }
 
 test_old_certbot_is_not_used_for_an_ip() {
@@ -2319,7 +2406,7 @@ test_old_certbot_is_not_used_for_an_ip() {
     printf '#!/usr/bin/env bash\nif [[ $1 == --version ]]; then echo "certbot 4.0.0"; exit 0; fi\necho "certbot $*" >> "$STUB_LOG"; exit 0\n' > "$E/bin/certbot"
     printf '#!/usr/bin/env bash\necho "snap $*" >> "$STUB_LOG"; exit 1\n' > "$E/bin/snap"
     chmod +x "$E/bin/certbot" "$E/bin/snap"
-    out=$(menu '4\nalice\n1\n2\n1\n1\n0\n')
+    out=$(menu '4\nalice\n1\n1\n1\n1\n0\n')
     if grep -q '^certbot certonly' "$STUB_LOG"; then result 0 'certbot 4.0 is never asked for an IP'; else result 1 'certbot 4.0 is never asked for an IP'; fi
     grep -q 'snap install --classic certbot' "$STUB_LOG"; rc_is 'the Certbot snap is tried instead' 0 "$?"
     has 'a failed install falls back to a working link' "https://203.0.113.9:$LINK_TEST_PORT/l/" "$out"

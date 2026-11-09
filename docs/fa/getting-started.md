@@ -77,7 +77,7 @@ sudo bash -c 'curl -fsSL https://github.com/MohZeh/Darban-OVPN/releases/download
 1. **Create your first client now?** Enter بزن.
 2. **Client name:** با Enter نام `client1` انتخاب می‌شود، یا نامی مثل `ali-phone` بنویس.
 3. **How will the client get this profile?** برای **Temporary link** Enter بزن.
-4. **Get a free Let's Encrypt certificate?** فقط روی آدرس عمومی می‌آید. اگر می‌توانی پورت TCP 80 را چند لحظه در فایروال ارائه‌دهنده باز کنی، **Yes, get a certificate** را انتخاب کن: لینک بدون هشدار مرورگر باز می‌شود. وگرنه Enter بزن. تا گواهی نگرفته‌ای، این پرسش با هر لینک دوباره می‌آید. [هشدار مرورگر](sharing.md#browser-warning) را ببین.
+4. **Get a free Let's Encrypt certificate?** فقط روی آدرس عمومی می‌آید. پورت TCP 80 را چند لحظه در فایروال ارائه‌دهنده باز کن و برای **Yes, get a certificate** Enter بزن: لینک بدون هشدار مرورگر باز می‌شود. اگر این سرور از قبل برای آدرسش گواهی معتبر داشته باشد، ابزار اول همان را پیشنهاد می‌دهد؛ برای استفاده از آن Enter بزن. تا گواهی نگرفته‌ای، این پرسش با هر لینک دوباره می‌آید. [هشدار مرورگر](sharing.md#browser-warning) را ببین.
 5. **Lock the private key with a password?** برای بدون رمز Enter بزن. اینکه رمز کی به کار می‌آید در [رمز روی کلید](sharing.md#a-password-on-the-key) آمده است.
 6. **At most, how long should the link work?** برای ۲۴ ساعت Enter بزن. لینک زودتر تمام می‌شود، همین که دستگاه وصل شود.
 

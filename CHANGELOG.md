@@ -13,6 +13,8 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 - Profiles carry the client's name for OpenVPN Connect to show, instead of the server address.
 - The Setup menu lists About first, then the update entries, and the two removals last.
 - The end of a new install, leaving the menu, the README and the guides say how to open the menu again: `sudo darban`.
+- Links take a trusted certificate already on the server for the same address, from certbot, a panel such as 3x-ui, or acme.sh, and copy it again after a renewal there. **Settings › Link certificate** also takes a certificate file by its path. A Cloudflare Origin certificate is named and not used, because browsers trust it only through Cloudflare's proxy.
+- The Let's Encrypt question lists Yes first, and Enter means Yes. The setup installs certbot on a public address, so the first link does not wait for it.
 
 ### Fixed
 - Websites open through the VPN on networks that drop split packets, such as many mobile and home networks; before, only apps that send small packets worked. TCP is limited to segments that fit in one tunnel packet, an update adds the rule to an existing install, and diagnostics check it.
