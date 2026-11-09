@@ -77,7 +77,7 @@ setup_args=()
 if [[ $VERSION_ID == 24.04 ]]; then setup_args+=(--install-kernel); fi
 {
     printf 'Server address => 127.0.0.1\\r\n'
-    printf 'VPN port [1194] => \\r\n'
+    printf 'VPN port [ => 1194\\r\n'
     if (( USE_UFW )); then printf 'Enter: Add the two rules => \\r\n'; fi
     printf 'Enter: Install now => \\r\n'
     printf '[5/5] Starting OpenVPN\n'
@@ -223,6 +223,37 @@ if modinfo -k "$(uname -r)" ovpn >/dev/null 2>&1; then
     ip -d link show tun0 | grep -qw ovpn
     echo 'PASS: the server uses the in-kernel ovpn module (DCO).'
 fi
+# A path with a smaller MTU that drops IP fragments, as many mobile and home networks do: without the TCP
+# size rule a website does not load through the VPN, with it it does. Fragments are dropped before the
+# kernel would put them together again.
+website() { ip netns exec "$NS" curl -4 -sS -o /dev/null --max-time 20 -w '%{size_download}' https://www.google.com/ 2>/dev/null || true; }
+ip link set dt0 mtu 1400
+ip netns exec "$NS" ip link set dt1 mtu 1400
+nft add table ip darbantest
+nft add chain ip darbantest pre '{ type filter hook prerouting priority -500; }'
+nft add rule ip darbantest pre iifname dt0 ip frag-off '&' 0x3fff != 0 drop
+ip netns exec "$NS" nft add table ip darbantest
+ip netns exec "$NS" nft add chain ip darbantest pre '{ type filter hook prerouting priority -500; }'
+ip netns exec "$NS" nft add rule ip darbantest pre iifname dt1 ip frag-off '&' 0x3fff != 0 drop
+for handle in $(nft -a list chain ip darban forward | awk '/maxseg/ {print $NF}'); do nft delete rule ip darban forward handle "$handle"; done
+without=$(website)
+echo "Without the TCP size rule, on a 1400-byte path that drops fragments: ${without:-0} bytes of a website arrived"
+darban status >"$LOG/no-mss.log" 2>&1 || true
+grep -q 'websites may not open on some networks' "$LOG/no-mss.log"
+systemctl restart darban-nat.service
+with=$(website)
+echo "With the rule: ${with:-0} bytes arrived"
+if [[ ! ${with:-0} =~ ^[0-9]+$ ]] || (( ${with:-0} < 10000 )); then echo 'FAIL: a website did not load through the VPN on a path with a smaller MTU.'; exit 1; fi
+if [[ ${without:-0} =~ ^[0-9]+$ ]] && (( ${without:-0} >= 10000 )); then
+    echo 'NOTE: this runner did not lose large packets even without the rule, so only the result with it is judged.'
+fi
+darban status >"$LOG/mss.log" 2>&1
+grep -q 'TCP through the VPN fits in one packet' "$LOG/mss.log"
+nft delete table ip darbantest
+ip netns exec "$NS" nft delete table ip darbantest
+ip link set dt0 mtu 1500
+ip netns exec "$NS" ip link set dt1 mtu 1500
+echo 'PASS: websites load through the VPN on a path with a smaller MTU that drops fragments.'
 # Clients are kept apart, and the cloud metadata service is out of their reach. First without the rule, to
 # show what it prevents on this runner, then with it.
 printf '2\naccept2\n0\n' | darban
@@ -280,15 +311,25 @@ if (( ! USE_UFW )); then
     iptables -D FORWARD -o tun0 -j ACCEPT
 fi
 
-# A real temporary link: one claim only, and the real profile behind it.
+# A real temporary link: it can be opened again until the client connects, and then it ends. The link
+# service asks the real management interface, from inside its sandbox.
 url=$(printf '4\naccept1\n1\n1\n1\n0\n' | darban | grep -oE 'https://[^ ]+/l/[0-9a-f]{64}')
-curl -ksf "$url" | grep -q 'Get my profile'
-next=$(curl -ks -o /dev/null -w '%{redirect_url}' -X POST "$url")
-curl -ks "${next}/file" -o "$LOG/link.ovpn"
+curl -ksf "$url" | grep -q 'Download profile'
+curl -ksf -H 'Accept-Language: fa-IR,fa;q=0.9' "$url" | grep -q 'dir="rtl"'
+curl -ksf "$url/file" -o "$LOG/link.ovpn"
 grep -q '<key>' "$LOG/link.ovpn"
+grep -qx 'setenv FRIENDLY_NAME "accept1"' "$LOG/link.ovpn"
+[[ $(curl -ks -o /dev/null -w '%{http_code}' "$url/file") == 200 ]]
+connect "$LOG/link.ovpn" "$LOG/link-client.log"
+for attempt in $(seq 1 30); do
+    if [[ $(curl -ks -o /dev/null -w '%{http_code}' "$url") == 410 ]]; then break; fi
+    sleep 1
+done
 [[ $(curl -ks -o /dev/null -w '%{http_code}' "$url") == 410 ]]
+disconnect
+journalctl -u darban-links.service --no-pager | grep -q 'link ended: accept1 connected'
 if journalctl -u darban-links.service --no-pager | grep -q '[0-9a-f]\{64\}'; then echo 'FAIL: a token reached the log.'; exit 1; fi
-echo 'PASS: the temporary link works once and keeps tokens out of the log.'
+echo 'PASS: the temporary link works until the first connection, and keeps tokens out of the log.'
 
 # A broken server: diagnostics say so by exit status, and the tool can still be updated.
 mv /root/pki/ca.crt /root/pki/ca.crt.keep
@@ -352,7 +393,7 @@ echo 9.9.9 > "$next/VERSION"
 bash "$next/setup/install.sh"
 [[ $(darban version) == 9.9.9 ]]
 systemctl is-active --quiet "$UNIT"
-printf '9\n2\n2\n' | darban
+printf '9\n4\n2\n' | darban
 [[ $(darban version) == "$current" ]]
 darban status >/dev/null
 echo 'PASS: an update installs, and Restore previous version goes back.'

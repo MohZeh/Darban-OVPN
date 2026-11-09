@@ -73,10 +73,16 @@ table ip darban {
         type filter hook forward priority filter; policy accept;
         ip saddr $1/24 ip daddr $1/24 drop
         ip saddr $1/24 ip daddr 169.254.0.0/16 drop
+        # TCP segments must fit in one tunnel packet. A larger one is split, and many mobile and home networks
+        # drop the pieces: then most websites never open, while apps that send small packets still work.
+        ip saddr $1/24 tcp flags syn tcp option maxseg size > $DARBAN_MSS tcp option maxseg size set $DARBAN_MSS
+        ip daddr $1/24 tcp flags syn tcp option maxseg size > $DARBAN_MSS tcp option maxseg size set $DARBAN_MSS
     }
 }
 EOF
 }
+# The largest TCP segment through the VPN. With the headers of the tunnel, a packet then stays under 1400 bytes.
+DARBAN_MSS=1300
 # The VPN network of server.conf, as A.B.C.0, when it is a single /24.
 darban_conf_net() {
     awk '$1=="server" && $3=="255.255.255.0" {print $2; exit}' "${1:-$DARBAN_SERVER_CONF}" 2>/dev/null
@@ -90,6 +96,12 @@ darban_live_isolation_ok() {
     local rules
     rules=$(nft list chain ip darban forward 2>/dev/null) || return 1
     grep -Fq "ip saddr $1/24 ip daddr $1/24 drop" <<<"$rules" && grep -Fq "ip saddr $1/24 ip daddr 169.254.0.0/16 drop" <<<"$rules"
+}
+darban_live_mss_ok() {
+    local rules
+    rules=$(nft list chain ip darban forward 2>/dev/null) || return 1
+    grep -Fq "ip saddr $1/24 tcp flags syn tcp option maxseg size > $DARBAN_MSS tcp option maxseg size set $DARBAN_MSS" <<<"$rules" \
+        && grep -Fq "ip daddr $1/24 tcp flags syn tcp option maxseg size > $DARBAN_MSS tcp option maxseg size set $DARBAN_MSS" <<<"$rules"
 }
 subnet_conflict() {
     # Prints the first route overlapping this /24: clients could not reach it through the VPN.

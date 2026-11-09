@@ -52,4 +52,4 @@ Data Channel Offload: OpenVPN's traffic handled inside the kernel, which is fast
 
 ## Temporary link
 
-A one-time address to get a profile. It expires by itself, and opening it does not use it up until the button on the page is pressed.
+An address to get a profile. It works until the device connects to the VPN for the first time, or until its time is up. Opening it or downloading the file does not use it up.

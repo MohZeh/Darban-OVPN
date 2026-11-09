@@ -61,11 +61,21 @@ public_address() {
     done
     return 1
 }
+PORT_FIRST=1024
+PORT_LAST=1999
 free_port() {
-    # The first free UDP port from the usual one up.
-    local port=1194
-    while port_busy "$port" && (( port < 1294 )); do port=$((port + 1)); done
-    printf '%s\n' "$port"
+    # A random free UDP port from 1024 to 1999, so the server does not stand out on 1194, the usual one.
+    local port tries
+    for (( tries = 0; tries < 50; tries++ )); do
+        port=$(shuf -n 1 -i "$PORT_FIRST-$PORT_LAST" 2>/dev/null) || port=''
+        [[ $port =~ ^[0-9]+$ ]] || break
+        if (( port != 1194 )) && ! port_busy "$port"; then printf '%s\n' "$port"; return 0; fi
+    done
+    # Without shuf, or with a crowded range: the first free one.
+    for (( port = PORT_FIRST; port <= PORT_LAST; port++ )); do
+        if (( port != 1194 )) && ! port_busy "$port"; then printf '%s\n' "$port"; return 0; fi
+    done
+    printf '%s\n' "$PORT_LAST"
 }
 easyrsa() { env EASYRSA_PKI="$PKI" EASYRSA_BATCH=1 "$EASYRSA_BIN" "$@" </dev/null >/dev/null; }
 # A fresh VPS often runs unattended-upgrades right after boot, so wait for the dpkg lock instead of failing.
@@ -193,10 +203,8 @@ choose_port() {
     printf '%s Step 2 of 2: VPN port (UDP)%s\n' "$C_BOLD" "$C_RESET"
     if [[ -n $RESUME_PORT ]]; then
         say ' The earlier setup chose this port.'
-    elif [[ $default == 1194 ]]; then
-        say ' 1194 is the usual port for OpenVPN.'
     else
-        say " Port 1194 is already in use, so $default is suggested."
+        say " A free port was picked at random, so this server does not stand out on 1194, the usual OpenVPN port."
     fi
     say
     say "   Press Enter to use $default"

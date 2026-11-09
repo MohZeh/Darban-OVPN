@@ -455,6 +455,8 @@ data-ciphers $ciphers
 auth-nocache
 persist-tun
 verb 3
+# The name OpenVPN Connect shows for this profile, instead of the server address. Other clients ignore it.
+setenv FRIENDLY_NAME "$name"
 
 <ca>
 EOF
@@ -825,11 +827,12 @@ share_client() {
         say
         printf '%sProfile password, shown only now. Send it another way than the link, for example by SMS or a call:%s\n' "$C_BOLD" "$C_RESET" || true
         printf '%s\n' "$PROFILE_PASSWORD" || true
+        info 'In OpenVPN Connect, the person can turn on "Save private key password" when importing, so it is asked only once.'
     fi
 }
 make_password() {
-    # Three groups of three: easy to type on a phone, and no characters that look alike. Bytes from 248 up are
-    # skipped, so every one of the 31 characters is equally likely.
+    # Nine characters in one piece: nothing that might or might not belong to it, easy to type on a phone, and
+    # no characters that look alike. Bytes from 248 up are skipped, so all 31 characters are equally likely.
     local alphabet=abcdefghjkmnpqrstuvwxyz23456789 raw='' out='' i=0 count=0 byte
     while (( count < 9 )); do
         if (( i * 2 >= ${#raw} )); then raw=$(openssl rand -hex 32) || return 1; i=0; fi
@@ -837,7 +840,6 @@ make_password() {
         (( byte < 248 )) || continue
         out+=${alphabet:$(( byte % ${#alphabet} )):1}
         count=$(( count + 1 ))
-        if (( count == 3 || count == 6 )); then out+=-; fi
     done
     printf '%s\n' "$out"
 }
@@ -904,18 +906,44 @@ share_by_download() {
     offer_delete_copy "$OUT_DIR/$name.ovpn"
 }
 tcp_port_open() { timeout 1 bash -c 'exec 3<>"/dev/tcp/127.0.0.1/$0"' "$1" 2>/dev/null; }
+tcp_port_taken() {
+    # True when another program listens on TCP $1, on any address: a panel bound only to the public IP counts
+    # too. The link service itself does not.
+    local listeners pid
+    listeners=$(ss -H -ltnp "sport = :$1" 2>/dev/null) || listeners=''
+    if [[ -z $listeners ]]; then tcp_port_open "$1"; return; fi
+    for pid in $(grep -o 'pid=[0-9]*' <<<"$listeners" | cut -d= -f2 | sort -u); do
+        tr '\0' ' ' <"/proc/$pid/cmdline" 2>/dev/null | grep -q '/linkd\.py ' || return 0
+    done
+    # Held, but by no process this tool can see.
+    grep -q 'pid=' <<<"$listeners" || return 0
+    return 1
+}
+tcp_port_program() {
+    # The name of the program that listens on TCP $1, or "another program".
+    local name
+    name=$(ss -H -ltnp "sport = :$1" 2>/dev/null | grep -o '(("[^"]*"' | head -n 1 | tr -d '("')
+    printf '%s\n' "${name:-another program}"
+}
 choose_link_port() {
-    # The first free one is remembered, so links keep working on a port the firewall already allows.
+    # The first free one is remembered, so links keep working on a port the firewall already allows. It is
+    # checked again for each link: a panel installed later may have taken it.
     local candidate
-    if [[ -n $LINK_PORT ]]; then return 0; fi
+    if [[ -n $LINK_PORT ]]; then
+        if tcp_port_taken "$LINK_PORT"; then
+            fail "TCP $LINK_PORT, the port for links, is now used by $(safe_text "$(tcp_port_program "$LINK_PORT")"). Choose another one: Settings $S_CRUMB Advanced $S_CRUMB Share link port."
+            return 1
+        fi
+        return 0
+    fi
     for candidate in 443 8443 9443; do
-        if ! tcp_port_open "$candidate"; then
+        if ! tcp_port_taken "$candidate"; then
             LINK_PORT=$candidate
             save_config || warn 'Could not save the link port.'
             return 0
         fi
     done
-    fail 'Ports 443, 8443 and 9443 are all in use. Choose one: Settings > Advanced > Share link port.'
+    fail "Ports 443, 8443 and 9443 are all used by other programs. Choose one: Settings $S_CRUMB Advanced $S_CRUMB Share link port."
     return 1
 }
 host_is_ip() { [[ $1 =~ ^[0-9.]+$ ]]; }
@@ -980,13 +1008,13 @@ get_trusted_cert() {
         return 1
     fi
     say
-    info "A trusted certificate for $host avoids a browser warning, and is needed for the app to import from the link."
+    info "A trusted certificate for $host means the person opening the link sees no browser warning."
     if [[ $need != 0 ]]; then
         info "For an IP address it lasts six days, and a new one is requested when a link needs it. It needs certbot $CERTBOT_IP_MIN or newer, from the Certbot project."
     fi
     info 'It needs TCP port 80 open in your provider firewall and free on this server for a moment. Choosing yes accepts the Let'"'"'s Encrypt subscriber agreement.'
     confirm_choice 'Get a free Let'"'"'s Encrypt certificate?' 'No, use a self-signed certificate' 'Yes, get a certificate' normal || return 1
-    if tcp_port_open 80; then warn 'TCP port 80 is in use, so certbot cannot answer on it.'; return 1; fi
+    if tcp_port_taken 80; then warn "TCP port 80 is used by $(safe_text "$(tcp_port_program 80)"), so certbot cannot answer on it."; return 1; fi
     if ! certbot=$(find_certbot "$need"); then
         install_certbot "$need" || { warn 'Could not install certbot.'; return 1; }
         certbot=$(find_certbot "$need") || { warn "No certbot $need or newer is available."; return 1; }
@@ -1062,12 +1090,13 @@ prepare_link() {
 share_by_link() {
     local name=$1 want_qr=$2 host minutes label token key now expires url temp
     host=$(domain)
+    info "The link stops working once $name connects for the first time. Until then it can be opened again."
     while :; do
-        choose_one 'How long should the link work?' '1 hour' '15 minutes' '24 hours' || CHOSEN=0
+        choose_one 'At most, how long should the link work?' '24 hours' '1 hour' '15 minutes' || CHOSEN=0
         case $CHOSEN in
-            2) minutes=15 label='15 minutes' ;;
-            3) minutes=1440 label='24 hours' ;;
-            *) minutes=60 label='1 hour' ;;
+            2) minutes=60 label='1 hour' ;;
+            3) minutes=15 label='15 minutes' ;;
+            *) minutes=1440 label='24 hours' ;;
         esac
         # A link must not outlive its certificate. That can only happen with a trusted one that could not be renewed.
         if link_cert_usable "$host" $(( minutes * 60 )); then break; fi
@@ -1089,7 +1118,7 @@ share_by_link() {
     install -m 600 "$OUT_DIR/$name.ovpn" "$LINK_DIR/$key.ovpn" || return 1
     # The .meta file appears last: until then, the link does not exist for the server.
     temp=$LINK_DIR/$key.tmp
-    printf 'name=%s\nexpires=%s\ncreated=%s\nstate=waiting\nuses=1\n' "$name" "$expires" "$now" >"$temp" || return 1
+    printf 'name=%s\nexpires=%s\ncreated=%s\ndownloads=0\n' "$name" "$expires" "$now" >"$temp" || return 1
     mv -f -- "$temp" "$LINK_DIR/$key.meta" || return 1
     if ! start_link_service "$host"; then
         rm -f -- "$LINK_DIR/$key.meta" "$LINK_DIR/$key.ovpn"
@@ -1105,7 +1134,7 @@ share_by_link() {
     url+=/l/$token
     ok "Temporary link for \"$name\""
     hr
-    kv Valid "$label, one use"
+    kv Valid "until $name first connects, at most $label"
     kv Cancel 'menu 5'
     say
     printf '%s\n' "$url" || true
@@ -1113,19 +1142,16 @@ share_by_link() {
     if [[ $want_qr == yes ]]; then show_qr "$url"; fi
     warn "TCP $LINK_PORT must be open in your provider firewall."
     if ! link_cert_is_trusted; then
-        warn 'This server has no trusted certificate, so the browser shows a warning for this link, and importing directly into the app may not work; use the download button.'
+        warn 'This server has no trusted certificate, so the browser shows a warning for this link.'
         info "Certificate fingerprint: $(openssl x509 -in "$LINK_CERT" -noout -fingerprint -sha256 | sed 's/^.*=//')"
         say
+        # English only: a terminal shows right-to-left text backwards. The guides have the note in Persian.
         say 'Send this note with the link:'
         say 'Your browser will warn that this connection is not private, because this server has no trusted certificate. Only for this link, which came to you straight from me: choose Advanced, then Continue. Never do this for other sites.'
-        say 'مرورگر هشدار می‌دهد که این اتصال خصوصی نیست، چون این سرور گواهی معتبر ندارد. فقط برای همین لینک که مستقیم از من به دستت رسیده، Advanced و بعد Continue را بزن. این کار را برای سایت‌های دیگر نکن.'
-        if [[ -n $PROFILE_PASSWORD ]]; then
-            say 'The file is locked. Its password comes to you separately.'
-            say 'فایل قفل است و رمز آن جداگانه به دستت می‌رسد.'
-        fi
+        if [[ -n $PROFILE_PASSWORD ]]; then say 'The file is locked. Its password comes to you separately.'; fi
         say
     fi
-    info 'Anyone with this link can get this profile. If the user finds it already used, revoke the client and issue a new one.'
+    info "Until $name first connects, anyone with this link can get this profile. If someone else connected first, revoke the client and issue a new one."
     hr
 }
 show_qr() {
@@ -1158,14 +1184,14 @@ active_links() {
         done
     fi
     if (( ${#files[@]} == 0 )); then info 'No active links. Create one from menu 4.'; return 0; fi
-    printf '  %s%3s  %-24s %-10s %s%s\n' "$C_BOLD" '' CLIENT STATUS 'TIME LEFT' "$C_RESET"
+    printf '  %s%3s  %-24s %-16s %s%s\n' "$C_BOLD" '' CLIENT STATUS 'TIME LEFT' "$C_RESET"
     for i in "${!files[@]}"; do
         name=$(awk -F= '$1=="name" {print $2}' "${files[i]}")
-        state=$(awk -F= '$1=="state" {print $2}' "${files[i]}")
+        state=$(awk -F= '$1=="downloads" {print $2}' "${files[i]}")
         expires=$(awk -F= '$1=="expires" {print $2}' "${files[i]}")
         minutes=$(( (expires - now + 59) / 60 ))
-        if [[ $state == waiting ]]; then state='not opened'; else state=opened; fi
-        printf '  %s%3d%s  %-24s %-10s %d min\n' "$C_CYAN" $((i + 1)) "$C_RESET" "$(safe_text "$name")" "$state" "$minutes"
+        if [[ $state =~ ^[1-9][0-9]*$ ]]; then state=downloaded; else state='not downloaded'; fi
+        printf '  %s%3d%s  %-24s %-16s %d min\n' "$C_CYAN" $((i + 1)) "$C_RESET" "$(safe_text "$name")" "$state" "$minutes"
     done
     say
     while :; do
@@ -1844,8 +1870,8 @@ set_link_port() {
     info 'TCP port of temporary links. It must be open in your provider firewall.'
     say
     prompt_valid 'New port, 1 to 65535 (Enter = cancel): ' valid_link_port 'Enter a number from 1 to 65535.' || return 0
-    if tcp_port_open "$REPLY" && ! systemctl is-active --quiet darban-links.service; then
-        warn "TCP $REPLY is already in use by another program. Nothing changed."
+    if tcp_port_taken "$((10#$REPLY))"; then
+        warn "TCP $((10#$REPLY)) is already used by $(safe_text "$(tcp_port_program "$((10#$REPLY))")"). Nothing changed."
         return 1
     fi
     LINK_PORT=$((10#$REPLY))
@@ -1943,10 +1969,12 @@ update_tool() {
     command -v curl >/dev/null || { fail 'curl is required to check for updates.'; return 1; }
     kv Installed "v$DARBAN_VERSION"
     info "Checking the latest release of $DARBAN_REPO${S_ELL}"
-    latest=$(latest_release_version) || rc=$?
+    # curl's own error line would read like a failure, and the message below says what it means.
+    latest=$(latest_release_version 2>/dev/null) || rc=$?
     # curl reports an HTTP error as 22: GitHub answered, and no stable release is there.
     if (( rc == 22 )); then
-        info "No stable release is published yet, so there is nothing to update to: $DARBAN_URL/releases"
+        ok "v$DARBAN_VERSION is up to date. No stable release is published yet; test versions are not offered as updates."
+        info "Releases: $DARBAN_URL/releases"
         return 0
     fi
     if (( rc != 0 )); then fail 'Could not reach GitHub. Check the internet connection of this server.'; return 1; fi
@@ -2125,6 +2153,11 @@ network_rules_health() {
         check ok 'VPN clients are kept apart, and away from the cloud metadata service'
     else
         check bad "VPN clients may reach each other, or the cloud metadata service $S_ARROW $fix"
+    fi
+    if darban_live_mss_ok "$net"; then
+        check ok 'TCP through the VPN fits in one packet, so websites open on every network'
+    else
+        check warn "TCP through the VPN is not limited to one packet, so websites may not open on some networks $S_ARROW $reinstall"
     fi
 }
 health() {
@@ -2396,10 +2429,10 @@ maintenance_menu() {
 draw_setup() {
     clear_screen
     title_bar Setup
-    menu_item 1 "$(printf '%-24s %s' 'Check for updates' "installed: v$DARBAN_VERSION")"
-    menu_item 2 'Restore previous version'
+    menu_item 1 'About'
+    menu_item 2 "$(printf '%-24s %s' 'Check for updates' "installed: v$DARBAN_VERSION")"
     menu_item 3 "$(printf '%-24s %s' 'Daily update notice' "$UPDATE_CHECK")"
-    menu_item 4 'About'
+    menu_item 4 'Restore previous version'
     menu_item 5 'Uninstall this tool only'
     menu_item 6 'Remove everything (tool, OpenVPN, CA)'
     menu_item 0 'Back'
@@ -2413,10 +2446,10 @@ setup_menu() {
         ask 'Choose [0-6, Enter = back]: ' || return 0
         case $REPLY in
             # Unlocked: the installer's own CRL check takes the same lock and would wait for this one.
-            1) menu_action 'Check for updates' update_tool ;;
-            2) menu_action 'Restore previous version' restore_previous ;;
+            1) menu_action 'About' about_text ;;
+            2) menu_action 'Check for updates' update_tool ;;
             3) run_action toggle_update_notice; load_config ;;
-            4) menu_action 'About' about_text ;;
+            4) menu_action 'Restore previous version' restore_previous ;;
             5) menu_action 'Uninstall this tool' uninstall_tool ;;
             6) menu_action 'Remove everything' remove_everything ;;
             0|'') return 0 ;;
@@ -2425,7 +2458,8 @@ setup_menu() {
     done
 }
 program_exit() {
-    printf '\nBye.\n' || true
+    # Said on the way out, so nobody has to look for how to come back.
+    printf '\nTo open this menu again, type: sudo darban\n' || true
     exit 0
 }
 draw_recovery() {
@@ -2488,6 +2522,9 @@ next_steps() {
         say
         warn 'The iptables FORWARD policy is DROP, for example because of Docker. Clients may connect but have no internet until it allows tun0.'
     fi
+    say
+    printf '%sTo manage this server at any time:%s\n' "$C_BOLD" "$C_RESET" || true
+    bullet 'Connect over SSH, type sudo darban and press Enter. The menu opens, where clients are created, shared and revoked.'
     say
 }
 welcome() {
