@@ -293,6 +293,7 @@ show_plan() {
     say
     bullet 'Only IPv4 goes through the VPN. A client with its own IPv6 connection still uses it directly for IPv6.'
     bullet 'adds the OpenVPN project apt repository (stable channel) and installs openvpn, easy-rsa, socat, nftables'
+    if links_can_be_trusted; then bullet 'installs certbot, so temporary links can get a trusted certificate from Let'"'"'s Encrypt at once'; fi
     if in_container; then
         bullet 'this is a container, so it uses the host kernel; no kernel is installed and DCO depends on the host'
     elif (( KERNEL_READY )); then
@@ -358,6 +359,40 @@ install_packages() {
         *) die "Expected OpenVPN 2.7 or newer from the OpenVPN repository, but got ${version:-nothing}." ;;
     esac
     [[ -x $EASYRSA_BIN ]] || die "Easy-RSA is not at $EASYRSA_BIN."
+    install_certbot_for_links
+}
+links_can_be_trusted() { [[ $HOST != localhost ]] && ! { valid_ipv4 "$HOST" && is_private_ip "$HOST"; }; }
+install_certbot_for_links() {
+    # certbot now, so the first link can get a trusted certificate at once. A failure here is no reason to
+    # stop the VPN: the first link tries again. An IP address needs certbot 5.3 or newer, from the snap.
+    local candidate pkg planned
+    links_can_be_trusted || return 0
+    if valid_ipv4 "$HOST"; then
+        if [[ -x /snap/bin/certbot ]]; then return 0; fi
+        candidate=$(apt-cache policy certbot 2>/dev/null | awk '$1=="Candidate:" {print $2; exit}')
+        candidate=${candidate#*:}
+        if [[ $candidate =~ ^[0-9.]+ && $(printf '%s\n5.3\n' "${BASH_REMATCH[0]}" | sort -V | head -n 1) == 5.3 ]]; then
+            :
+        elif command -v snap >/dev/null; then
+            if timeout 600 snap install --classic certbot; then
+                printf 'snap certbot\n' >>"$MARKER"
+            else
+                warn 'Could not install certbot from the snap store; the first link tries again.'
+            fi
+            return 0
+        else
+            return 0
+        fi
+    fi
+    if dpkg-query -W -f='${Status}' certbot 2>/dev/null | grep -q 'install ok installed'; then return 0; fi
+    planned=$(apt_run -s --no-install-recommends install certbot | new_packages) || { warn 'apt cannot install certbot; the first link tries again.'; return 0; }
+    if apt_run -y -q --no-install-recommends install certbot; then
+        for pkg in $planned; do
+            if [[ $pkg == certbot ]]; then printf 'package certbot\n' >>"$MARKER"; else printf 'dep %s\n' "$pkg" >>"$MARKER"; fi
+        done
+    else
+        warn 'Could not install certbot; the first link tries again.'
+    fi
 }
 create_pki() {
     # Nothing renews the server certificate automatically, so it gets a long life under a longer-lived CA.

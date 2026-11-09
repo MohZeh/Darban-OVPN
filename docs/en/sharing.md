@@ -52,12 +52,19 @@ Profiles keep the address they were made with. Send them again from menu `4`.
 
 ## The browser warning
 
-The tool offers a free certificate from Let's Encrypt, for a domain name or for a public IP address. It needs TCP port 80 open in your provider's firewall for a moment, when the certificate is requested and at each renewal. Until the link has a trusted certificate, the question comes back each time you share by link, and Enter still means No.
+On a domain name or a public IP address, links get a trusted certificate, and the browser shows no warning. The setup already installs `certbot` for it.
+
+1. **A trusted certificate already on this server** comes first: one that certbot, a panel such as 3x-ui or x-ui, or acme.sh got for the same address. The tool asks, and Enter uses it. The link service gets a copy, and when the certificate is renewed there, the next link takes the new one. **Settings › Link certificate** also takes a certificate file you name.
+2. Otherwise the tool offers a free certificate from **Let's Encrypt**, and Enter means Yes. It needs TCP port 80 open in your provider's firewall for a moment, when the certificate is requested and at each renewal.
+
+Until the link has a trusted certificate, the question comes back each time you share by link.
+
+A **Cloudflare Origin certificate** is not used, and the tool says so. Browsers trust it only through Cloudflare's proxy, and the VPN address cannot go through that proxy, because OpenVPN uses UDP. A Let's Encrypt certificate works for a domain whose DNS is at Cloudflare, with the proxy off for that name.
 
 - **Domain name:** the certificate comes from Ubuntu's `certbot` package, and certbot renews it by itself. If a renewal fails, for example because port 80 is closed, the tool asks again when a link needs a new one.
 - **IP address:** Let's Encrypt gives a six-day certificate, and a new one is requested when a link needs it. This needs `certbot` 5.3 or newer, which Ubuntu does not have yet, so the tool uses a certbot that is new enough, or installs it from the Certbot project as a snap. A server with neither is not offered one.
 
-If a new certificate cannot be had while the current trusted one still works, the current one stays, and the tool says when it ends. Otherwise, if you decline, or the request fails, the tool makes its own certificate. The link still works and is encrypted, but the browser shows a warning. The tool shows a note to send with the link, and the certificate fingerprint. The note asks the person to go past the warning only for this link, which came straight from you.
+If a new certificate cannot be had while the current trusted one still works, the current one stays, and the tool says when it ends. Otherwise, if you choose No, or the request fails, the tool makes its own certificate. The link still works and is encrypted, but the browser shows a warning. The tool shows a note to send with the link, and the certificate fingerprint. The note asks the person to go past the warning only for this link, which came straight from you.
 
 The tool shows the note in English, because a terminal shows Persian backwards. In Persian, send this:
 

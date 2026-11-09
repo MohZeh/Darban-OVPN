@@ -22,6 +22,11 @@ UPDATE_CACHE=$CONFIG_DIR/.latest-version
 LINK_ENV=$CONFIG_DIR/links.env
 LINK_CERT=$CONFIG_DIR/link-cert.pem
 LINK_KEY=$CONFIG_DIR/link-key.pem
+# Where a link certificate taken from another tool came from, so a renewal there reaches the links.
+LINK_CERT_SOURCE=$CONFIG_DIR/link-cert.source
+SYSTEM_CA_FILE=/etc/ssl/certs/ca-certificates.crt
+# Where certbot, panels such as 3x-ui and x-ui, and acme.sh keep certificates.
+CERT_SEARCH_DIRS='/etc/letsencrypt/live /root/cert /root/.acme.sh'
 CONFIG_FILE=$CONFIG_DIR/config
 TLS_KEY=$DARBAN_SERVER_DIR/tls-crypt.key
 DEFAULT_DATA_CIPHERS=AES-256-GCM:AES-128-GCM
@@ -956,7 +961,7 @@ link_cert_usable() {
     if host_is_ip "$host"; then check=-checkip; else check=-checkhost; fi
     openssl x509 -in "$LINK_CERT" -noout "$check" "$host" 2>/dev/null | grep -q 'does match'
 }
-link_cert_is_trusted() { [[ -L $LINK_CERT ]]; }
+link_cert_is_trusted() { [[ -L $LINK_CERT || -s $LINK_CERT_SOURCE ]]; }
 CERT_NAME=darban-ovpn-links
 # Let's Encrypt issues IP address certificates from Certbot 5.3 on; a hostname works with any version.
 CERTBOT_IP_MIN=5.3
@@ -993,8 +998,9 @@ install_certbot() {
     fi
 }
 get_trusted_cert() {
-    # Let's Encrypt for a hostname or a public IP address. It needs TCP 80 from the internet for a moment.
-    local host=$1 need=0 certbot
+    # get_trusted_cert <host> [asked]: Let's Encrypt for a hostname or a public IP address. It needs TCP 80
+    # from the internet for a moment. "asked" means the person already chose it, so there is no question.
+    local host=$1 asked=${2:-} need=0 certbot
     local -a target
     if host_is_ip "$host"; then
         is_private_ip "$host" && return 1
@@ -1007,13 +1013,16 @@ get_trusted_cert() {
         info "A trusted certificate for an IP address needs certbot $CERTBOT_IP_MIN or newer. Ubuntu does not ship it yet, and this server has no snap to get it from the Certbot project."
         return 1
     fi
-    say
-    info "A trusted certificate for $host means the person opening the link sees no browser warning."
-    if [[ $need != 0 ]]; then
-        info "For an IP address it lasts six days, and a new one is requested when a link needs it. It needs certbot $CERTBOT_IP_MIN or newer, from the Certbot project."
+    if [[ $asked != asked ]]; then
+        say
+        info "A trusted certificate for $host means the person opening the link sees no browser warning."
+        if [[ $need != 0 ]]; then
+            info "For an IP address it lasts six days, and a new one is requested when a link needs it. It needs certbot $CERTBOT_IP_MIN or newer, from the Certbot project."
+        fi
+        info 'It needs TCP port 80 open in your provider firewall and free on this server for a moment. Choosing yes accepts the Let'"'"'s Encrypt subscriber agreement.'
+        choose_one 'Get a free Let'"'"'s Encrypt certificate?' 'Yes, get a certificate' 'No, use a self-signed certificate (browser warning)' || return 1
+        (( CHOSEN == 1 )) || return 1
     fi
-    info 'It needs TCP port 80 open in your provider firewall and free on this server for a moment. Choosing yes accepts the Let'"'"'s Encrypt subscriber agreement.'
-    confirm_choice 'Get a free Let'"'"'s Encrypt certificate?' 'No, use a self-signed certificate' 'Yes, get a certificate' normal || return 1
     if tcp_port_taken 80; then warn "TCP port 80 is used by $(safe_text "$(tcp_port_program 80)"), so certbot cannot answer on it."; return 1; fi
     if ! certbot=$(find_certbot "$need"); then
         install_certbot "$need" || { warn 'Could not install certbot.'; return 1; }
@@ -1027,7 +1036,7 @@ get_trusted_cert() {
     }
     # Recorded only once it exists, so a removal never deletes a certificate this tool did not get.
     record_added "certbot_cert $CERT_NAME"
-    rm -f -- "$LINK_CERT" "$LINK_KEY"
+    rm -f -- "$LINK_CERT" "$LINK_KEY" "$LINK_CERT_SOURCE"
     ln -s "/etc/letsencrypt/live/$CERT_NAME/fullchain.pem" "$LINK_CERT"
     ln -s "/etc/letsencrypt/live/$CERT_NAME/privkey.pem" "$LINK_KEY"
     ok 'Trusted certificate installed.'
@@ -1035,21 +1044,146 @@ get_trusted_cert() {
 make_self_signed_cert() {
     local host=$1 san
     if host_is_ip "$host"; then san=IP:$host; else san=DNS:$host; fi
-    rm -f -- "$LINK_CERT" "$LINK_KEY"
+    rm -f -- "$LINK_CERT" "$LINK_KEY" "$LINK_CERT_SOURCE"
     openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes -keyout "$LINK_KEY" -out "$LINK_CERT" -days 90 \
         -subj "/CN=$host" -addext "subjectAltName=$san" >/dev/null 2>&1 || { fail 'Could not create a certificate for the link.'; return 1; }
     chmod 600 "$LINK_KEY" "$LINK_CERT"
 }
+
+# ---------- a certificate that is already on this server ----------
+cert_covers() {
+    # cert_covers <cert> <host>: the certificate names this hostname or IP address.
+    local check
+    if host_is_ip "$2"; then check=-checkip; else check=-checkhost; fi
+    openssl x509 -in "$1" -noout "$check" "$2" 2>/dev/null | grep -q 'does match'
+}
+cert_key_matches() {
+    local cert_pub key_pub
+    cert_pub=$(openssl x509 -in "$1" -noout -pubkey 2>/dev/null) || return 1
+    key_pub=$(openssl pkey -in "$2" -pubout 2>/dev/null) || return 1
+    [[ -n $cert_pub && $cert_pub == "$key_pub" ]]
+}
+cert_publicly_trusted() {
+    # The first certificate in the file, checked against the system's trusted authorities with the rest of
+    # the file as its chain: what a browser would accept from this file.
+    local dir rc=0
+    dir=$(mktemp -d) || return 1
+    awk -v d="$dir" '/-----BEGIN CERTIFICATE-----/ {n++} n {print > (d (n == 1 ? "/leaf.pem" : "/chain.pem"))}' "$1" 2>/dev/null || rc=1
+    if (( rc == 0 )) && [[ -s $dir/leaf.pem ]]; then
+        if [[ -s $dir/chain.pem ]]; then
+            openssl verify -CAfile "$SYSTEM_CA_FILE" -untrusted "$dir/chain.pem" "$dir/leaf.pem" >/dev/null 2>&1 || rc=1
+        else
+            openssl verify -CAfile "$SYSTEM_CA_FILE" "$dir/leaf.pem" >/dev/null 2>&1 || rc=1
+        fi
+    else
+        rc=1
+    fi
+    rm -rf -- "$dir"
+    return "$rc"
+}
+cert_is_cloudflare_origin() { openssl x509 -in "$1" -noout -issuer 2>/dev/null | grep -qi 'cloudflare origin'; }
+cert_end_date() { date -u -d "$(openssl x509 -in "$1" -noout -enddate 2>/dev/null | cut -d= -f2)" +%Y-%m-%d 2>/dev/null; }
+existing_cert_pairs() {
+    # Certificate and key pairs where other tools keep them: certbot, panels such as 3x-ui, and acme.sh.
+    local root dir name
+    for root in $CERT_SEARCH_DIRS; do
+        for dir in "$root"/*/; do
+            [[ -d $dir ]] || continue
+            dir=${dir%/}
+            name=${dir##*/}
+            [[ $name == "$CERT_NAME" ]] && continue
+            if [[ -s $dir/fullchain.pem && -s $dir/privkey.pem ]]; then
+                printf '%s\t%s\n' "$dir/fullchain.pem" "$dir/privkey.pem"
+            elif [[ -s $dir/fullchain.cer && -s $dir/${name%_ecc}.key ]]; then
+                printf '%s\t%s\n' "$dir/fullchain.cer" "$dir/${name%_ecc}.key"
+            fi
+        done
+    done
+}
+cert_problem() {
+    # cert_problem <cert> <key> <host>: why this pair cannot serve links, or nothing when it can.
+    if [[ ! -s $1 ]]; then printf 'There is no certificate file at %s.\n' "$1"; return; fi
+    if [[ ! -s $2 ]]; then printf 'There is no key file at %s.\n' "$2"; return; fi
+    if ! openssl x509 -in "$1" -noout >/dev/null 2>&1; then printf '%s is not a PEM certificate.\n' "$1"; return; fi
+    if ! cert_covers "$1" "$3"; then printf 'The certificate in %s is not for %s.\n' "$1" "$3"; return; fi
+    if ! cert_key_matches "$1" "$2"; then printf 'The key in %s does not belong to that certificate.\n' "$2"; return; fi
+    if ! openssl x509 -in "$1" -noout -checkend 90000 >/dev/null 2>&1; then printf 'The certificate in %s ends within a day.\n' "$1"; return; fi
+    if cert_is_cloudflare_origin "$1"; then
+        printf '%s\n' "The certificate in $1 is a Cloudflare Origin certificate. Browsers trust it only through Cloudflare's proxy, and the VPN address cannot go through that proxy, because OpenVPN uses UDP. The browser would still warn."
+        return
+    fi
+    if ! cert_publicly_trusted "$1"; then printf 'Browsers would not trust the certificate in %s: it is self-signed, or its file lacks the intermediate certificates.\n' "$1"; fi
+}
+find_existing_cert() {
+    # Prints "cert<TAB>key<TAB>end date" of the trusted pair for this host that lasts longest.
+    local host=$1 cert key end best='' best_end=''
+    while IFS=$'\t' read -r cert key; do
+        [[ -n $cert ]] || continue
+        [[ -z $(cert_problem "$cert" "$key" "$host") ]] || continue
+        end=$(cert_end_date "$cert") || continue
+        if [[ -z $best || $end > $best_end ]]; then best="$cert"$'\t'"$key"$'\t'"$end"; best_end=$end; fi
+    done < <(existing_cert_pairs)
+    [[ -n $best ]] && printf '%s\n' "$best"
+}
+explain_untrusted_certs() {
+    # A certificate for this host that cannot be used is named, so nobody wonders why it was passed over.
+    local host=$1 cert key problem
+    while IFS=$'\t' read -r cert key; do
+        [[ -n $cert ]] && cert_covers "$cert" "$host" || continue
+        problem=$(cert_problem "$cert" "$key" "$host")
+        if [[ -n $problem ]]; then info "$problem"; fi
+    done < <(existing_cert_pairs)
+}
+use_existing_cert() {
+    # A copy, not a link: the link service cannot read /root. Each new link copies it again after a renewal.
+    local cert=$1 key=$2
+    rm -f -- "$LINK_CERT" "$LINK_KEY"
+    install -m 600 "$cert" "$LINK_CERT" || return 1
+    install -m 600 "$key" "$LINK_KEY" || return 1
+    printf '%s\n%s\n' "$cert" "$key" >"$LINK_CERT_SOURCE" || return 1
+    chmod 600 "$LINK_CERT_SOURCE"
+    audit "link certificate taken from $cert"
+    ok "Links use the trusted certificate from $(safe_text "$cert"). When it is renewed there, the next link takes the new one."
+}
+refresh_copied_cert() {
+    # A certificate taken from elsewhere is copied again once its owner has renewed it.
+    local host=$1 cert='' key=''
+    [[ -s $LINK_CERT_SOURCE ]] || return 0
+    { IFS= read -r cert; IFS= read -r key; } <"$LINK_CERT_SOURCE" || true
+    [[ -n $cert && -n $key ]] || return 0
+    if cmp -s -- "$cert" "$LINK_CERT" && cmp -s -- "$key" "$LINK_KEY"; then return 0; fi
+    if [[ -z $(cert_problem "$cert" "$key" "$host") ]]; then
+        install -m 600 "$cert" "$LINK_CERT" && install -m 600 "$key" "$LINK_KEY" && info "The link certificate was renewed in $(safe_text "$cert"); links use the new one."
+    fi
+}
+offer_trusted_cert() {
+    # A trusted certificate already on this server comes first, then Let's Encrypt. Returns 1 when neither.
+    local host=$1 found cert key end
+    if found=$(find_existing_cert "$host"); then
+        IFS=$'\t' read -r cert key end <<<"$found"
+        say
+        info "This server already has a trusted certificate for $host, in $(safe_text "$cert"), valid until $end."
+        choose_one 'Which certificate should links use?' 'The one already on this server' "A new one from Let's Encrypt" 'A self-signed one (browser warning)' || return 1
+        case $CHOSEN in
+            1) use_existing_cert "$cert" "$key"; return ;;
+            2) get_trusted_cert "$host" asked; return ;;
+            *) return 1 ;;
+        esac
+    fi
+    explain_untrusted_certs "$host"
+    get_trusted_cert "$host"
+}
 ensure_link_cert() {
     local host=$1
     local ends
+    refresh_copied_cert "$host"
     if link_cert_usable "$host"; then
-        # A self-signed certificate is no reason to stop offering a trusted one: the question returns, No by
-        # default, and a No keeps the current certificate.
-        link_cert_is_trusted || get_trusted_cert "$host" || true
+        # A self-signed certificate is no reason to stop offering a trusted one: the question returns with each
+        # link, and No keeps the current certificate.
+        link_cert_is_trusted || offer_trusted_cert "$host" || true
         return 0
     fi
-    if get_trusted_cert "$host"; then return 0; fi
+    if offer_trusted_cert "$host"; then return 0; fi
     # A trusted certificate that still works is kept, so open links do not change to a self-signed one.
     if link_cert_is_trusted && link_cert_usable "$host" 0; then
         ends=$(openssl x509 -in "$LINK_CERT" -noout -enddate 2>/dev/null | cut -d= -f2)
@@ -1058,6 +1192,56 @@ ensure_link_cert() {
     fi
     make_self_signed_cert "$host"
 }
+link_cert_summary() {
+    local end
+    [[ -s $LINK_CERT ]] || { printf 'none yet\n'; return; }
+    end=$(cert_end_date "$LINK_CERT") || end='?'
+    if [[ -s $LINK_CERT_SOURCE ]]; then
+        printf 'trusted, from %s, until %s\n' "$(head -n 1 "$LINK_CERT_SOURCE")" "$end"
+    elif [[ -L $LINK_CERT ]]; then
+        printf "trusted, Let's Encrypt, until %s\n" "$end"
+    else
+        printf 'self-signed, until %s\n' "$end"
+    fi
+}
+change_link_cert() {
+    local host cert key guess problem found end
+    host=$(domain)
+    [[ -n $host ]] && valid_endpoint "$host" || { warn "Set the server address first: Settings $S_CRUMB 1."; return 1; }
+    kv Current "$(safe_text "$(link_cert_summary)")"
+    say
+    choose_one 'Which certificate should links use?' 'Find a trusted one on this server' 'A certificate file on this server' "A new one from Let's Encrypt" 'Keep the current one' || { cancelled; return 0; }
+    case $CHOSEN in
+        1)
+            if found=$(find_existing_cert "$host"); then
+                IFS=$'\t' read -r cert key end <<<"$found"
+                info "Found: $(safe_text "$cert"), valid until $end."
+                use_existing_cert "$cert" "$key"
+            else
+                info "No trusted certificate for $host was found where certbot, panels such as 3x-ui, and acme.sh keep them."
+                explain_untrusted_certs "$host"
+            fi ;;
+        2)
+            info 'Usually two files: the certificate with its chain (fullchain), and the private key.'
+            prompt_valid 'Certificate file (Enter = cancel): ' valid_abs_path 'Enter a full path that starts with /.' || return 0
+            cert=$REPLY
+            guess=''
+            if [[ -s ${cert%/*}/privkey.pem ]]; then guess=${cert%/*}/privkey.pem; elif [[ -s ${cert%.*}.key ]]; then guess=${cert%.*}.key; fi
+            if [[ -n $guess ]]; then
+                ask "Key file [$guess]: " || { cancelled; return 0; }
+                key=${REPLY:-$guess}
+            else
+                prompt_valid 'Key file (Enter = cancel): ' valid_abs_path 'Enter a full path that starts with /.' || return 0
+                key=$REPLY
+            fi
+            problem=$(cert_problem "$cert" "$key" "$host")
+            if [[ -n $problem ]]; then warn "$problem Nothing changed."; return 1; fi
+            use_existing_cert "$cert" "$key" ;;
+        3) get_trusted_cert "$host" asked || warn 'The current certificate stays.' ;;
+        *) info 'The current certificate stays.' ;;
+    esac
+}
+valid_abs_path() { [[ $1 == /* && $1 != *$'\n'* ]]; }
 start_link_service() {
     local attempt
     printf 'LINK_HOST=%s\nLINK_PORT=%s\n' "$1" "$LINK_PORT" >"$LINK_ENV" || return 1
@@ -2335,6 +2519,7 @@ draw_settings() {
     menu_item 1 "$(printf '%-24s %s' 'Server address' "${host:-not set}")"
     menu_item 2 "$(printf '%-24s %s' 'OpenVPN UDP port' "$port")"
     menu_item 3 'Advanced'
+    menu_item 4 "$(printf '%-24s %s' 'Link certificate' "$(link_cert_summary | cut -d, -f1)")"
     menu_item 0 'Back'
     hr
 }
@@ -2390,13 +2575,14 @@ settings_menu() {
     while :; do
         if (( redraw )); then draw_settings || true; fi
         redraw=1
-        ask 'Choose [0-3, Enter = back]: ' || return 0
+        ask 'Choose [0-4, Enter = back]: ' || return 0
         case $REPLY in
             1) menu_action 'Change server address' set_domain ;;
             2) menu_action 'Change OpenVPN UDP port' change_port ;;
             3) advanced_menu ;;
+            4) menu_action 'Link certificate' change_link_cert ;;
             0|'') return 0 ;;
-            *) warn "Unknown option \"$REPLY\". Enter a number from 0 to 3."; redraw=0 ;;
+            *) warn "Unknown option \"$REPLY\". Enter a number from 0 to 4."; redraw=0 ;;
         esac
     done
 }

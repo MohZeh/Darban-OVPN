@@ -138,5 +138,6 @@ sed -e "s#^DARBAN_LIB=.*#DARBAN_LIB=$E/lib#" -e "s#^DARBAN_PKI=.*#DARBAN_PKI=$P#
 echo 'darban_require_root() { :; }' >> "$E/lib/common.sh"
 cp "$SRC/lib/ui.sh" "$E/lib/ui.sh"
 sed -e "s#^source /usr/local/lib/darban/#source $E/lib/#" -e "s#^OUT_DIR=.*#OUT_DIR=$E/clients#" -e "s#^LINK_DIR=.*#LINK_DIR=$E/links#" -e "s#^BACKUP_ROOT=.*#BACKUP_ROOT=$E/backups-tool#" -e "s#^SBIN_DIR=.*#SBIN_DIR=$E/sbin#" -e "s#^UNIT_DIR=.*#UNIT_DIR=$E/units#" -e "s#^CONFIG_DIR=.*#CONFIG_DIR=$E/cfg#" \
+    -e "s#^SYSTEM_CA_FILE=.*#SYSTEM_CA_FILE=$E/system-ca.pem#" -e "s#^CERT_SEARCH_DIRS=.*#CERT_SEARCH_DIRS='$E/le-live $E/panel-cert $E/acme'#" \
     "$SRC/bin/darban" > "$E/manager.sh"
 sed -e "s#^source /usr/local/lib/darban/#source $E/lib/#" "$SRC/bin/darban-crl-maintain" > "$E/crl-maintain"
