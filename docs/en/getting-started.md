@@ -42,7 +42,7 @@ sudo bash -c 'curl -fsSL https://github.com/MohZeh/Darban-OVPN/releases/download
 Each question shows a suggestion. **Press Enter to accept it.**
 
 1. **Server address:** press Enter. A domain name is optional. With a domain name or a public IP address, the tool can get a trusted certificate, so temporary links open without a browser warning.
-2. **VPN port:** press Enter. The suggested port is a free one picked at random, so the server does not stand out on 1194, the usual OpenVPN port.
+2. **VPN port:** press Enter. The suggested port is a free one picked at random, and is not 1194, the usual OpenVPN port. This does not replace a firewall or encryption.
 3. **Install this server?** Press Enter on **Install now**.
 
 Nothing is installed before the third answer; until then the tool only refreshes the list of packages. To see the full plan first, press `2` and then Enter on **Show details**.
@@ -80,7 +80,7 @@ Open that TCP port in your provider's firewall too, as in step 5. The tool shows
 
 Send the link in any messenger. A link preview does not use it up. It works until its time is up, or until a connection with this profile is seen, and until then the person can open it again.
 
-If the server has no trusted certificate, the tool also shows a short note. Send it with the link, because the browser shows a security warning for this link. If you chose a password, send it another way, for example by SMS or a call.
+If the link has no trusted certificate, the browser shows a security warning when it is opened. The tool then shows a short note for the person; send it with the link. The same note in Persian is in [The browser warning](sharing.md#the-browser-warning). If you chose a password, send it another way, for example by SMS or a call.
 
 ## Step 8: Connect the device
 

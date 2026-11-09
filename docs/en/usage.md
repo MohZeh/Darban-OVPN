@@ -72,7 +72,7 @@ Run the install command again, or use **9 Setup**, then `2` **Check for updates*
 sudo darban update
 ```
 
-Only the tool changes. OpenVPN does not restart, and clients stay as they are. To go back, use **9 Setup**, then `4` **Restore previous version**.
+Only the tool changes. OpenVPN does not restart, and clients stay as they are. If the earlier install lacks a rule the new version needs, such as the TCP MSS limit, the update adds it. To go back, use **9 Setup**, then `4` **Restore previous version**.
 
 ## Check the server
 
@@ -111,4 +111,4 @@ sudo darban version
 sudo darban help
 ```
 
-The menu closes after 15 minutes without input. Each color has one meaning: cyan for the keys to press, magenta for what to type or do, green, yellow and red for success, warnings and errors, and red for menu items that cannot be undone. `NO_COLOR=1` turns colors off. Actions are recorded in the system journal: `sudo journalctl -t darban`.
+The menu closes after 15 minutes without input. Each color has one meaning: cyan for the keys to press, magenta for what to type or do, green, yellow and red for success, warnings and errors, and red for menu items that cannot be undone. Every message also has its own symbol and words, so it reads the same without colors. `NO_COLOR=1` turns colors off. Actions are recorded in the system journal: `sudo journalctl -t darban`.

@@ -49,7 +49,7 @@ sudo openvpn --config client1.ovpn
 
 ## Check that it works
 
-While connected, open [api.ipify.org](https://api.ipify.org). It should show the address of the VPN server, not your usual one.
+While connected, open [api.ipify.org](https://api.ipify.org). It should show the address of the VPN server, not your usual one. If the administrator chose a split tunnel, only part of the traffic goes through the VPN, and this page shows your usual address; that is not an error.
 
 **If it does not connect:** tell the server administrator, and see [Troubleshooting](troubleshooting.md).
 

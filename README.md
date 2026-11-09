@@ -48,17 +48,18 @@ sudo darban
 - Create, list and revoke clients, with clear expiry information
 - Issue a new certificate under a revoked name; old profiles stay blocked
 - See every valid certificate, and why one cannot be managed if that is the case
-- See who is connected, and end one client's session without touching the others
+- See who is connected, and end one client's session without touching the others, when OpenVPN's management interface is available
 
 **Sharing**
-- Temporary links that stop at the first connection, valid for at most 24 hours, 1 hour or 15 minutes, and QR codes
-- A free trusted certificate for links, for a domain name or a public IP address
+- Temporary links valid for at most 24 hours, 1 hour or 15 minutes, which end sooner once a connection with their profile is seen, and QR codes
+- A trusted certificate for links, for a domain name or a public IP address: one already on the server, or a free one from Let's Encrypt
 - Optional short password on the private key, for links without a trusted certificate
 - `scp` and `sftp` commands for your own operating system
 
 **Server**
 - Daily CRL renewal, with protection against a restored old CA database silently un-revoking clients
 - Advanced settings for routing, DNS, network, ciphers and keepalive, with automatic rollback
+- TCP MSS for VPN traffic is limited, so websites also open on networks that drop split packets
 - Update notice in the menu, update and restore from inside the tool
 - A setup that stops half way continues on the next run, or can be undone
 - Diagnostics, updates and removal keep working on a broken server
@@ -75,7 +76,7 @@ Green is management, blue is profile delivery and orange is VPN traffic. The too
 
 ## Security model
 
-- A profile holds a private key, so a link stops working at the first connection, and expires. There are no permanent links. A short password on the key can be added for a link without a trusted certificate, and sent another way.
+- A profile holds a private key, so every link has a time limit, and there are no permanent links. A short password on the key can be added for a link without a trusted certificate, and sent another way.
 - Clients cannot reach each other, or the cloud provider's metadata service, through the server.
 - Only a hash of each link token stays on the server, and tokens never reach the logs.
 - The CA key has no passphrase, because the daily CRL renewal must run unattended. **Anyone who gains root on the server can issue certificates**, so protect the server and keep an encrypted backup elsewhere.

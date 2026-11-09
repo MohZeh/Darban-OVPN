@@ -5,7 +5,8 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 ## [Unreleased]
 
 ### Changed
-- A temporary link works until its client connects for the first time, or for at most 24 hours, 1 hour or 15 minutes; Enter means 24 hours. Until then the page and the file can be opened again, and menu `5` shows whether the file was downloaded.
+- A temporary link works for at most 24 hours, 1 hour or 15 minutes, and ends sooner once a connection with its profile is seen; Enter means 24 hours. Until then the page and the file can be opened again, and menu `5` shows whether the file was downloaded.
+- The Persian README, guides and link page are rewritten in plain, formal Persian, with the technical names kept as they are. They say only what is checked, and the English guides now carry the same additions: a split tunnel in the connection check, the self-signed certificate case, the TCP MSS term, and what not to send in a problem report.
 - The link page is in Persian when the device's language is Persian, and in English otherwise. It no longer has a button that opens OpenVPN Connect directly, which opened the app on Android without importing the profile; the downloaded file is opened instead.
 - The note to send with a link is shown in English only, because a terminal shows Persian backwards. The Persian note is in the sharing guide.
 - A new server suggests a random free UDP port from 1024 to 1999 instead of 1194.

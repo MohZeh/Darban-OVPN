@@ -56,10 +56,12 @@ sudo bash -c 'set -o pipefail; curl -fsSL https://github.com/MohZeh/Darban-OVPN/
 ## What the install does
 
 - Adds the OpenVPN project's apt repository (stable channel) and installs `openvpn`, `easy-rsa`, `socat` and `nftables`.
+- On a public address, also installs `certbot`, so temporary links can get a Let's Encrypt certificate: Ubuntu's package for a domain name, and the Certbot project's snap for an IP address. If this fails, the VPN install goes on, and the first link tries again.
 - If the running kernel has no `ovpn` module, installs `linux-image-virtual-hwe-24.04` or `linux-image-virtual-hwe-26.04`, matching the system, without recommended packages. If apt plans firmware or graphics packages, the setup stops. A container needs no kernel.
 - Creates a CA in `/root/pki` and a server certificate valid for 10 years.
 - Writes `/etc/openvpn/server/server.conf`, enables IPv4 forwarding, and adds NAT for the VPN only, in its own nftables table.
 - Keeps clients apart: they cannot reach each other, or the cloud provider's metadata service at `169.254.169.254`, through the server. They can still reach other private networks the server reaches.
+- Limits TCP MSS for VPN traffic to 1300 in both directions, only for connections that announce a larger one.
 - Starts OpenVPN, and writes details to `/var/log/darban-setup.log`.
 
 If a kernel is added, the current one stays as a fallback and nothing reboots automatically. The VPN works at once without [DCO](glossary.md#dco).
@@ -68,6 +70,7 @@ The address comes from the network interface. Behind NAT, it is looked up with `
 
 | Default | Value |
 |---|---|
+| VPN port | A random free UDP port from 1024 to 1999, never 1194 |
 | VPN network | First free `/24` from `10.8.0.0` |
 | Routing | All client IPv4 traffic |
 | Client DNS | `1.1.1.1`, `8.8.8.8` |
@@ -84,7 +87,7 @@ If `/etc/openvpn/server/server.conf` exists, the server setup is skipped, and th
 
 If a check fails, the installer stops before installing anything and says why. On such a server **Remove everything** is refused, and changing the VPN network is refused because this tool does not manage its NAT.
 
-For single-client disconnect, add a local management socket and install `socat`:
+For single-client disconnect, add a local management socket and install `socat`. The same socket lets a temporary link end when a connection is seen; without it, links end only when their time is up:
 
 ```text
 management /run/openvpn-server/darban.sock unix
@@ -126,7 +129,7 @@ UPDATE_CHECK=no
 | Port | Needed for |
 |---|---|
 | Your chosen UDP port | VPN clients |
-| 443, 8443 or 9443 TCP | Temporary links; the first free one is kept |
+| 443, 8443 or 9443 TCP | Temporary links. The first one that no other program uses on any address is chosen and kept, and checked again for each link. If another program has taken it, the tool names that program |
 | 80 TCP, for a moment | Only for a Let's Encrypt certificate, when it is requested and at each renewal: about every 60 days for a domain name, and for each new six-day certificate of an IP address |
 
 ## The blocklist (CRL)
