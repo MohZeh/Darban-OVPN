@@ -1200,8 +1200,8 @@ test_temporary_link_end_to_end() {
     start_links_stub
     out=$(menu '4\nalice\n1\n1\n1\n0\n')
     has 'the link is shown' "https://127.0.0.1:$LINK_TEST_PORT/l/" "$out"
-    has 'it says how long it works' 'until alice first connects, at most 24 hours' "$out"
-    has 'it says the first connection ends it' 'The link stops working once alice connects for the first time' "$out"
+    has 'it says how long it works' 'Valid     24 hours' "$out"
+    has 'without a management interface it says a connection cannot end it' 'the link cannot see a connection' "$out"
     has 'it warns about the firewall' "TCP $LINK_TEST_PORT must be open" "$out"
     has 'it warns about the browser warning' 'no trusted certificate' "$out"
     has 'the note limits going past the warning to this link' 'Never do this for other sites' "$out"
@@ -1273,10 +1273,13 @@ PY
 }
 
 test_link_ends_at_the_first_connection() {
-    local url meta created attempt
+    local url meta created attempt out
     link_mgmt_server
     start_links_stub
-    url=$(new_link alice)
+    out=$(menu '4\nalice\n1\n1\n1\n0\n')
+    has 'with a management interface it says a connection ends it' 'or about 10 seconds after a connection with this profile is seen' "$out"
+    has 'and so does the validity line' 'or until a connection with this profile is seen' "$out"
+    url=$(grep -oE 'https://[^ ]+/l/[0-9a-f]{64}' <<<"$out")
     meta=$(ls "$E"/links/*.meta)
     created=$(awk -F= '$1=="created" {print $2}' "$meta")
     printf 'TITLE\tOpenVPN\nCLIENT_LIST\talice\t198.51.100.7:1\t10.8.0.2\t\t1\t1\tthen\t%s\tUNDEF\t0\t0\tAES-256-GCM\nCLIENT_LIST\tbob\t198.51.100.8:1\t10.8.0.3\t\t1\t1\tnow\t%s\tUNDEF\t1\t1\tAES-256-GCM\nEND\n' \
@@ -1316,6 +1319,40 @@ test_temporary_link_expiry_cancel_and_revoke() {
     [[ $(web -o /dev/null -w '%{http_code}' "$url") == 410 ]]; rc_is 'revoking a client ends its links' 0 "$?"
     ok_if 'revoking leaves no copy' test -z "$(find "$E/links" -name '*.ovpn')"
     stop_links_stub
+}
+
+test_link_time_question_esc_makes_no_link() {
+    # Esc on the time question cancels: no link, no link service, and no password shown for a link.
+    local script=$E/script out rc
+    start_links_stub
+    cat > "$script" <<'EOF'
+Choose [0-9] => 4\r
+Number or name => alice\r
+Enter: Temporary link => \r
+Enter: No password => \r
+Enter: 24 hours => \e
+Press Enter to return => \r
+Choose [0-9] => 0\r
+EOF
+    out=$(NO_COLOR=1 python3 "$HERE/pty-drive.py" --timeout 30 "$script" -- bash "$E/manager.sh" 2>&1); rc=$?
+    rc_is 'Esc on the time question returns to the menu' 0 "$rc"
+    has 'it says nothing changed' 'Cancelled; nothing changed.' "$out"
+    lacks 'no link is shown' '/l/' "$out"
+    ok_if 'no link is stored' test -z "$(find "$E/links" -name '*.meta' 2>/dev/null)"
+    if grep -q 'restart darban-links.service' "$STUB_LOG" 2>/dev/null; then result 0 'the link service is not started'; else result 1 'the link service is not started'; fi
+    ok_if 'the profile stays on the server' test -s "$E/clients/alice.ovpn"
+    if (( rc != 0 )); then printf '%s\n' "$out" | tail -n 25 | cut -c1-150 | sed 's/^/    | /'; fi
+    stop_links_stub
+}
+
+test_link_page_language_follows_the_preference_order() {
+    local h
+    for h in 'fa' 'fa-IR' 'fa-IR,fa;q=0.9,en;q=0.8'; do
+        [[ $(python3 -c 'import sys; sys.path.insert(0, sys.argv[1]); import linkd; print(linkd.language(sys.argv[2]))' "$REPO/lib" "$h") == fa ]]; rc_is "Persian for: $h" 0 "$?"
+    done
+    for h in 'en-US,fa;q=0.9' 'fa;q=0' 'fa;q=0,de' 'de-DE' '' 'fa;q=abc' ';;;'; do
+        [[ $(python3 -c 'import sys; sys.path.insert(0, sys.argv[1]); import linkd; print(linkd.language(sys.argv[2]))' "$REPO/lib" "$h") == en ]]; rc_is "English for: ${h:-no header}" 0 "$?"
+    done
 }
 
 test_link_server_ends_when_idle() {
@@ -1471,7 +1508,7 @@ alice
 ')
     has 'a link longer than the certificate is refused' 'The link certificate ends before 24 hours are over' "$out"
     has 'and a shorter one is made' "https://vpn.example.com:$LINK_TEST_PORT/l/" "$out"
-    has 'for the time chosen after it' 'until alice first connects, at most 1 hour' "$out"
+    has 'for the time chosen after it' 'Valid     1 hour' "$out"
     ok_if 'it is not replaced by a self-signed one' test -L "$E/cfg/link-cert.pem"
     has 'and the link is made' "https://vpn.example.com:$LINK_TEST_PORT/l/" "$out"
     stop_links_stub
@@ -2080,12 +2117,12 @@ STUB
     chmod +x "$E/bin/ip"
     out=$(mgr status)
     has 'both live rules pass' 'VPN clients are kept apart' "$out"
-    has 'the TCP size rule passes' 'TCP through the VPN fits in one packet' "$out"
+    has 'the TCP size rule passes' 'TCP MSS for VPN traffic is limited to 1300 in both directions' "$out"
     sed -i '/maxseg/d' "$E/live-forward"
     out=$(mgr status)
-    has 'a missing TCP size rule is reported, with the installer as the fix' 'websites may not open on some networks' "$out"
+    has 'a missing TCP size rule is reported, with the installer as the fix' 'The TCP MSS rule for VPN traffic is missing or different' "$out"
     has 'and the installer is named' '--version v' "$out"
-    lacks 'and it is not called fine' 'TCP through the VPN fits in one packet' "$out"
+    lacks 'and it is not called fine' 'TCP MSS for VPN traffic is limited to 1300 in both directions' "$out"
     has 'the live NAT passes' 'NAT for the VPN network 10.8.0.0/24 present' "$out"
     printf '		ip saddr 10.8.0.0/24 oifname "eth0" accept
 ' > "$E/live-post"
@@ -2270,18 +2307,18 @@ test_link_page_guides_the_person_receiving_it() {
     base=${url%/l/*}
     out=$(web -A 'Mozilla/5.0 (Linux; Android 14)' -H 'Accept-Language: fa-IR,fa;q=0.9,en-US;q=0.8' "$url")
     has 'Android gets the store link' 'play.google.com/store/apps/details?id=net.openvpn.openvpn' "$out"
-    has 'a Persian device gets the steps in Persian' 'اپ OpenVPN Connect را نصب کن' "$out"
+    has 'a Persian device gets the steps in Persian' 'برنامهٔ OpenVPN Connect را نصب کنید' "$out"
     has 'from right to left' 'dir="rtl"' "$out"
     lacks 'and not in English as well' 'Install the OpenVPN Connect app' "$out"
     out=$(web -A 'Mozilla/5.0 (iPhone; CPU iPhone OS 18_0)' -H 'Accept-Language: de-DE,de;q=0.9,fa;q=0.5' "$url")
     has 'iPhone gets the App Store link' 'apps.apple.com/app/openvpn-connect' "$out"
     has 'another language first gets English' 'Install the OpenVPN Connect app' "$out"
-    lacks 'and no Persian' 'اپ OpenVPN Connect را نصب کن' "$out"
+    lacks 'and no Persian' 'برنامهٔ OpenVPN Connect را نصب کنید' "$out"
     out=$(web -A 'Mozilla/5.0 (Windows NT 10.0)' "$url")
     has 'a computer gets the download page' 'openvpn.net/client/' "$out"
     has 'no language means English' 'Press <b>Download profile</b>' "$out"
     out=$(web -H 'Accept-Language: fa' "$base/l/$(printf 'b%.0s' {1..64})")
-    has 'a link that no longer works says so in Persian too' 'این لینک دیگر معتبر نیست' "$out"
+    has 'a link that no longer works says so in Persian too' 'این لینک دیگر کار نمی‌کند' "$out"
     stop_links_stub
 }
 
@@ -2333,7 +2370,7 @@ make_test_ca() {
 }
 
 test_link_uses_a_certificate_already_on_the_server() {
-    local out
+    local out before
     start_links_stub
     echo vpn.example.com > "$E/cfg/domain"
     make_test_ca vpn.example.com "$E/panel-cert/vpn.example.com" fullchain.pem privkey.pem
@@ -2352,6 +2389,18 @@ test_link_uses_a_certificate_already_on_the_server() {
     has 'a renewal there reaches the links' 'links use the new one' "$out"
     cmp -s "$E/cfg/link-cert.pem" "$E/panel-cert/vpn.example.com/fullchain.pem"; rc_is 'the new one is copied' 0 "$?"
     menu '5\n1\n0\n' >/dev/null
+
+    # A renewal seen half way, a new certificate but still the old key, is refused, and the pair in use stays.
+    before=$(sha256sum < "$E/cfg/link-cert.pem")
+    make_test_ca vpn.example.com "$E/half" fullchain.pem privkey.pem
+    cp "$E/half/fullchain.pem" "$E/panel-cert/vpn.example.com/fullchain.pem"
+    out=$(menu '4\nalice\n1\n1\n1\n0\n')
+    lacks 'a certificate without its new key is not taken' 'links use the new one' "$out"
+    [[ $(sha256sum < "$E/cfg/link-cert.pem") == "$before" ]]; rc_is 'and the pair in use stays as it was' 0 "$?"
+    cert_key_pair_ok() { [[ $(openssl x509 -in "$E/cfg/link-cert.pem" -noout -pubkey) == "$(openssl pkey -in "$E/cfg/link-key.pem" -pubout)" ]]; }
+    cert_key_pair_ok; rc_is 'its certificate and key still belong together' 0 "$?"
+    menu '5\n1\n0\n' >/dev/null
+    cp "$E/half/privkey.pem" "$E/panel-cert/vpn.example.com/privkey.pem"
 
     # A file chosen by hand: a key that does not belong is refused.
     make_test_ca vpn.example.com "$E/other" cert.pem cert.key
@@ -2545,6 +2594,30 @@ test_ci_scope_skips_only_documentation() {
     has 'a tag always runs the tests' 'code=true' "$(scope EVENT=push GITHUB_REF=refs/tags/v1.0.0 BEFORE="$base")"
     has 'the weekly run always runs the tests' 'code=true' "$(scope EVENT=schedule)"
     has 'a manual run always runs the tests' 'code=true' "$(scope EVENT=workflow_dispatch)"
+}
+
+test_guides_name_the_real_setup_items() {
+    # Every "`N` ... **Label**" for a Setup item in the guides uses the number the Setup menu shows.
+    local out
+    out=$(python3 - "$REPO" <<'PY'
+import pathlib, re, sys
+root = pathlib.Path(sys.argv[1])
+code = (root / 'bin/darban').read_text(encoding='utf-8')
+block = code[code.index('draw_setup() {'):code.index('setup_menu() {')]
+menu = {label: num for num, label in re.findall(r"menu_item (\d) \"?\$?\(?(?:printf '%-24s %s' )?'([^']+)'", block)}
+bad = []
+for path in sorted((root / 'docs').glob('*/usage.md')):
+    text = path.read_text(encoding='utf-8')
+    for num, label in re.findall(r'`(\d)`[^`*\n]{0,20}\*\*([A-Za-z ]+?)(?::)?\*\*', text):
+        for name, real in menu.items():
+            if label.strip().startswith(name.split(' (')[0]) and num != real:
+                bad.append(f'{path.relative_to(root)}: `{num}` {label.strip()} (menu: {real})')
+print('items: ' + ', '.join(f'{v} {k}' for k, v in sorted(menu.items(), key=lambda i: i[1])))
+print('\n'.join(bad) if bad else 'all match')
+PY
+)
+    has 'the Setup menu was read' '2 Check for updates' "$out"
+    has 'the guides use the Setup numbers of the menu' 'all match' "$out"
 }
 
 test_ci_skips_only_what_its_pull_request_tested() {

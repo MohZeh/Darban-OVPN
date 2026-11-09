@@ -68,7 +68,7 @@ A client is one person or device. The tool asks right after the install:
 3. **How will the client get this profile?** Press Enter for **Temporary link**.
 4. **Get a free Let's Encrypt certificate?** This comes only on a public address. Open TCP port 80 in your provider's firewall for a moment, then press Enter for **Yes, get a certificate**: the link then opens without a browser warning. If this server already has a trusted certificate for its address, the tool offers that one first; press Enter to use it. Until you have one, the question comes back with each link. See [The browser warning](sharing.md#the-browser-warning).
 5. **Lock the private key with a password?** Press Enter for no password. See [A password on the key](sharing.md#a-password-on-the-key) for when one helps.
-6. **At most, how long should the link work?** Press Enter for 24 hours. The link stops sooner, as soon as the device connects.
+6. **At most, how long should the link work?** Press Enter for 24 hours. The link usually stops sooner, about 10 seconds after a connection with this profile is seen.
 
 **You should see:** a link that starts with `https://`, and the TCP port it uses.
 
@@ -78,7 +78,7 @@ Open that TCP port in your provider's firewall too, as in step 5. The tool shows
 
 ## Step 7: Send the link
 
-Send the link in any messenger. A link preview does not use it up. It works until the device connects for the first time, and until then the person can open it again.
+Send the link in any messenger. A link preview does not use it up. It works until its time is up, or until a connection with this profile is seen, and until then the person can open it again.
 
 If the server has no trusted certificate, the tool also shows a short note. Send it with the link, because the browser shows a security warning for this link. If you chose a password, send it another way, for example by SMS or a call.
 

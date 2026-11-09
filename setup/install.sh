@@ -137,7 +137,7 @@ if [[ -f $NAT_FILE ]]; then
         elif nft -c -f "$NAT_FILE.new" && cp -a -- "$NAT_FILE" "$NAT_FILE.before" && mv -f -- "$NAT_FILE.new" "$NAT_FILE" \
             && nft -f "$NAT_FILE" && darban_live_nat_ok "$vpn_net" && darban_live_isolation_ok "$vpn_net" && darban_live_mss_ok "$vpn_net"; then
             rm -f -- "$NAT_FILE.before"
-            echo 'The NAT rules are up to date: VPN clients are kept apart from each other, and TCP fits in one tunnel packet.'
+            echo 'The NAT rules are up to date: VPN clients are kept apart from each other, and TCP MSS for VPN traffic is limited to 1300.'
         else
             if [[ -f $NAT_FILE.before ]]; then mv -f -- "$NAT_FILE.before" "$NAT_FILE"; nft -f "$NAT_FILE" || true; fi
             rm -f -- "$NAT_FILE.new"

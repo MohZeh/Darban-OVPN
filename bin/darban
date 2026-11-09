@@ -824,8 +824,9 @@ share_client() {
     fi
     say
     case $method in
-        1) share_by_link "$name" no ;;
-        2) share_by_link "$name" yes ;;
+        # A link that was cancelled (2) or not made shows no password for it.
+        1) share_by_link "$name" no || { (( $? == 2 )) && { SHARED=0; return 0; }; return 1; } ;;
+        2) share_by_link "$name" yes || { (( $? == 2 )) && { SHARED=0; return 0; }; return 1; } ;;
         3) share_by_download "$name" ;;
     esac
     if [[ -n $PROFILE_PASSWORD ]]; then
@@ -1134,12 +1135,26 @@ explain_untrusted_certs() {
         if [[ -n $problem ]]; then info "$problem"; fi
     done < <(existing_cert_pairs)
 }
+copy_cert_pair() {
+    # copy_cert_pair <cert> <key> <host>: both files are copied beside the current pair and checked there as a
+    # pair, then put in place. Any failure leaves the current pair as it was. A renewal elsewhere between the
+    # two copies gives a pair that does not match, and is refused the same way.
+    local cert=$1 key=$2 host=$3 new_cert new_key
+    new_cert=$(mktemp "$CONFIG_DIR/.link-cert.XXXXXX") || return 1
+    new_key=$(mktemp "$CONFIG_DIR/.link-key.XXXXXX") || { rm -f -- "$new_cert"; return 1; }
+    if cp -- "$cert" "$new_cert" && cp -- "$key" "$new_key" && chmod 600 "$new_cert" "$new_key" \
+        && [[ -z $(cert_problem "$new_cert" "$new_key" "$host") ]] \
+        && mv -f -- "$new_key" "$LINK_KEY" && mv -f -- "$new_cert" "$LINK_CERT"; then
+        return 0
+    fi
+    rm -f -- "$new_cert" "$new_key"
+    return 1
+}
 use_existing_cert() {
     # A copy, not a link: the link service cannot read /root. Each new link copies it again after a renewal.
-    local cert=$1 key=$2
-    rm -f -- "$LINK_CERT" "$LINK_KEY"
-    install -m 600 "$cert" "$LINK_CERT" || return 1
-    install -m 600 "$key" "$LINK_KEY" || return 1
+    local cert=$1 key=$2 host
+    host=$(domain)
+    copy_cert_pair "$cert" "$key" "$host" || { fail "Could not take the certificate from $(safe_text "$cert"); the current one stays."; return 1; }
     printf '%s\n%s\n' "$cert" "$key" >"$LINK_CERT_SOURCE" || return 1
     chmod 600 "$LINK_CERT_SOURCE"
     audit "link certificate taken from $cert"
@@ -1152,8 +1167,8 @@ refresh_copied_cert() {
     { IFS= read -r cert; IFS= read -r key; } <"$LINK_CERT_SOURCE" || true
     [[ -n $cert && -n $key ]] || return 0
     if cmp -s -- "$cert" "$LINK_CERT" && cmp -s -- "$key" "$LINK_KEY"; then return 0; fi
-    if [[ -z $(cert_problem "$cert" "$key" "$host") ]]; then
-        install -m 600 "$cert" "$LINK_CERT" && install -m 600 "$key" "$LINK_KEY" && info "The link certificate was renewed in $(safe_text "$cert"); links use the new one."
+    if [[ -z $(cert_problem "$cert" "$key" "$host") ]] && copy_cert_pair "$cert" "$key" "$host"; then
+        info "The link certificate was renewed in $(safe_text "$cert"); links use the new one."
     fi
 }
 offer_trusted_cert() {
@@ -1274,9 +1289,14 @@ prepare_link() {
 share_by_link() {
     local name=$1 want_qr=$2 host minutes label token key now expires url temp
     host=$(domain)
-    info "The link stops working once $name connects for the first time. Until then it can be opened again."
+    if link_sees_connections; then
+        info "The link stops working when its time is up, or about 10 seconds after a connection with this profile is seen, whichever comes first. Until then it can be opened again."
+    else
+        warn 'This server has no local management interface, so the link cannot see a connection: it works until its time is up.'
+    fi
     while :; do
-        choose_one 'At most, how long should the link work?' '24 hours' '1 hour' '15 minutes' || CHOSEN=0
+        # Esc means no link at all: nothing is created, and the profile stays on the server.
+        choose_one 'At most, how long should the link work?' '24 hours' '1 hour' '15 minutes' || { cancelled; return 2; }
         case $CHOSEN in
             2) minutes=60 label='1 hour' ;;
             3) minutes=15 label='15 minutes' ;;
@@ -1289,7 +1309,6 @@ share_by_link() {
             return 1
         fi
         warn "The link certificate ends before $label are over. Choose a shorter time."
-        if (( CHOSEN == 0 )); then minutes=15 label='15 minutes'; break; fi
     done
     ca_lock || return 1
     # The answers above took time: this client may have been revoked since.
@@ -1318,7 +1337,7 @@ share_by_link() {
     url+=/l/$token
     ok "Temporary link for \"$name\""
     hr
-    kv Valid "until $name first connects, at most $label"
+    if link_sees_connections; then kv Valid "$label, or until a connection with this profile is seen"; else kv Valid "$label"; fi
     kv Cancel 'menu 5'
     say
     printf '%s%s%s\n' "$C_LINK" "$url" "$C_RESET" || true
@@ -1335,7 +1354,7 @@ share_by_link() {
         if [[ -n $PROFILE_PASSWORD ]]; then say 'The file is locked. Its password comes to you separately.'; fi
         say
     fi
-    info "Until $name first connects, anyone with this link can get this profile. If someone else connected first, revoke the client and issue a new one."
+    info "Until the link ends, anyone who has it can get this profile. If a connection you did not expect shows up, revoke the client and issue a new one."
     hr
 }
 show_qr() {
@@ -1493,6 +1512,15 @@ mgmt_kill_client() {
     [[ $reply == *"ERROR: common name '$name' not found"* ]] && return 3
     printf '%s\n' "$reply" >&2 || true
     return 1
+}
+link_sees_connections() {
+    # The link service reads the same interface itself, without socat: one local management line is enough.
+    local spec addr port extra
+    spec=$(awk '$1=="management" {n++; s=$2 "\t" $3 "\t" $4} END {if(n==1) print s}' "$DARBAN_SERVER_CONF" 2>/dev/null)
+    [[ -n $spec ]] || return 1
+    IFS=$'\t' read -r addr port extra <<<"$spec"
+    [[ -z $extra ]] || return 1
+    [[ $port == unix || ( ( $addr == 127.0.0.1 || $addr == localhost || $addr == ::1 ) && $port =~ ^[0-9]+$ ) ]]
 }
 mgmt_available() {
     # True only when mgmt_kill_client could really use it.
@@ -2339,9 +2367,9 @@ network_rules_health() {
         check bad "VPN clients may reach each other, or the cloud metadata service $S_ARROW $fix"
     fi
     if darban_live_mss_ok "$net"; then
-        check ok 'TCP through the VPN fits in one packet, so websites open on every network'
+        check ok 'TCP MSS for VPN traffic is limited to 1300 in both directions'
     else
-        check warn "TCP through the VPN is not limited to one packet, so websites may not open on some networks $S_ARROW $reinstall"
+        check warn "The TCP MSS rule for VPN traffic is missing or different; on some networks websites may not load $S_ARROW $reinstall"
     fi
 }
 health() {

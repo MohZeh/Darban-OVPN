@@ -37,8 +37,10 @@ sudo bash -c 'curl -fsSL https://github.com/MohZeh/Darban-OVPN/releases/download
 ## Install without questions
 
 ```bash
-sudo bash -c 'curl -fsSL https://github.com/MohZeh/Darban-OVPN/releases/download/v1.0.0-rc.2/get.sh | bash -s -- --yes --host vpn.example.com --port 1194'
+sudo bash -c 'set -o pipefail; curl -fsSL https://github.com/MohZeh/Darban-OVPN/releases/download/v1.0.0-rc.2/get.sh | bash -s -- --yes --host vpn.example.com --port 1194'
 ```
+
+`set -o pipefail` makes the command fail when the download fails, so a script that runs it sees the error. Without it, a failed download still ends with status 0, although nothing is installed.
 
 | Option | Meaning |
 |---|---|
@@ -160,6 +162,8 @@ Only the CRL renews automatically. The menu warns 30 days before the CA or serve
 ## Backup
 
 Keep an **encrypted** copy of these paths away from the server. They hold the CA private key. Never share them or put them in a repository.
+
+The backup that **Remove everything** offers is a `.tar.gz` file in `/root`, readable only by root. It holds the CA private key and is **not encrypted**. Move it off the server, and keep it encrypted.
 
 ```text
 /root/pki

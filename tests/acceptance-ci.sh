@@ -239,7 +239,7 @@ for handle in $(nft -a list chain ip darban forward | awk '/maxseg/ {print $NF}'
 without=$(website)
 echo "Without the TCP size rule, on a 1400-byte path that drops fragments: ${without:-0} bytes of a website arrived"
 darban status >"$LOG/no-mss.log" 2>&1 || true
-grep -q 'websites may not open on some networks' "$LOG/no-mss.log"
+grep -q 'The TCP MSS rule for VPN traffic is missing or different' "$LOG/no-mss.log"
 systemctl restart darban-nat.service
 with=$(website)
 echo "With the rule: ${with:-0} bytes arrived"
@@ -248,7 +248,7 @@ if [[ ${without:-0} =~ ^[0-9]+$ ]] && (( ${without:-0} >= 10000 )); then
     echo 'NOTE: this runner did not lose large packets even without the rule, so only the result with it is judged.'
 fi
 darban status >"$LOG/mss.log" 2>&1
-grep -q 'TCP through the VPN fits in one packet' "$LOG/mss.log"
+grep -q 'TCP MSS for VPN traffic is limited to 1300 in both directions' "$LOG/mss.log"
 nft delete table ip darbantest
 ip netns exec "$NS" nft delete table ip darbantest
 ip link set dt0 mtu 1500

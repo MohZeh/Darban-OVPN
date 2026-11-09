@@ -179,8 +179,8 @@ def connected_clients(address, timeout=3):
 
 
 def language(header):
-    """Persian when the device asks for it first, English otherwise."""
-    best, best_q = 'en', -1.0
+    """Persian when the language the device prefers most is Persian, English otherwise. q=0 means "not this one"."""
+    best, best_q = 'en', 0.0
     for part in (header or '').split(',')[:20]:
         match = LANG_RE.match(part)
         if not match:
@@ -212,7 +212,8 @@ TEXT = {
     'en': {
         'title': 'VPN profile',
         'heading': 'VPN profile for {name}',
-        'lasts': 'This link works until your device connects to the VPN for the first time. Until then you can open it again.',
+        'lasts': 'This link works until its time is up, or until a connection with this profile is seen, whichever '
+                 'comes first. Until then you can open it again.',
         'install': '<a href="{app}">Install the OpenVPN Connect app</a>.',
         'download': 'Press <b>Download profile</b>, then open the downloaded file: it opens in OpenVPN Connect. '
                     'If it does not, open the app and import the file from your downloads.',
@@ -220,22 +221,23 @@ TEXT = {
         'button': 'Download profile',
         'private': 'This file holds a private key. Do not share it.',
         'gone_heading': 'This link is no longer valid',
-        'gone': 'It has expired or was cancelled, or the device it was made for has already connected. '
+        'gone': 'Its time is up, it was cancelled, or a connection with this profile was already seen. '
                 'If you did not connect yourself, tell the server administrator right away.',
     },
     'fa': {
         'title': 'پروفایل VPN',
         'heading': 'پروفایل VPN برای {name}',
-        'lasts': 'این لینک تا اولین باری که دستگاهت به VPN وصل شود کار می‌کند. تا آن موقع می‌توانی دوباره بازش کنی.',
-        'install': '<a href="{app}">اپ OpenVPN Connect را نصب کن</a>.',
-        'download': 'دکمهٔ <b>دریافت پروفایل</b> را بزن و بعد فایل دانلودشده را باز کن؛ در OpenVPN Connect باز می‌شود. '
-                    'اگر باز نشد، اپ را باز کن و فایل را از پوشهٔ دانلودها وارد کن.',
-        'connect': 'در اپ، <b>Connect</b> را بزن.',
-        'button': 'دریافت پروفایل',
-        'private': 'این فایل کلید خصوصی دارد. آن را به کسی نده.',
-        'gone_heading': 'این لینک دیگر معتبر نیست',
-        'gone': 'منقضی یا لغو شده، یا دستگاهی که برایش ساخته شده بود قبلاً وصل شده است. '
-                'اگر خودت وصل نشده‌ای، فوراً به مدیر سرور خبر بده.',
+        'lasts': 'این لینک تا پایان مهلتش کار می‌کند، یا تا وقتی که اتصالی با این پروفایل دیده شود؛ هر کدام زودتر باشد. '
+                 'تا آن زمان می‌توانید دوباره بازش کنید.',
+        'install': '<a href="{app}">برنامهٔ OpenVPN Connect را نصب کنید</a>.',
+        'download': 'روی <b>دانلود پروفایل</b> بزنید و فایل دانلودشده را باز کنید تا در OpenVPN Connect باز شود. '
+                    'اگر باز نشد، برنامه را باز کنید و فایل را از پوشهٔ دانلودها وارد کنید.',
+        'connect': 'در برنامه روی <b>Connect</b> بزنید.',
+        'button': 'دانلود پروفایل',
+        'private': 'این فایل کلید خصوصی دارد. آن را برای کسی نفرستید.',
+        'gone_heading': 'این لینک دیگر کار نمی‌کند',
+        'gone': 'مهلت آن تمام شده، لغو شده، یا اتصالی با این پروفایل دیده شده است. '
+                'اگر خودتان وصل نشده‌اید، فوراً به مدیر سرور خبر دهید.',
     },
 }
 
