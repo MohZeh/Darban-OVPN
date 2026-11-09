@@ -22,6 +22,9 @@ UPDATE_CACHE=$CONFIG_DIR/.latest-version
 LINK_ENV=$CONFIG_DIR/links.env
 LINK_CERT=$CONFIG_DIR/link-cert.pem
 LINK_KEY=$CONFIG_DIR/link-key.pem
+# The ports a first link tries, in order. Uncommon on purpose: panels such as 3x-ui, and tools such as Portainer,
+# often take 443, 8443 and 9443, and a link would then block them while it lasts.
+LINK_PORT_CHOICES='9347 9563 9741'
 # Where a link certificate taken from another tool came from, so a renewal there reaches the links.
 LINK_CERT_SOURCE=$CONFIG_DIR/link-cert.source
 SYSTEM_CA_FILE=/etc/ssl/certs/ca-certificates.crt
@@ -942,14 +945,14 @@ choose_link_port() {
         fi
         return 0
     fi
-    for candidate in 443 8443 9443; do
+    for candidate in $LINK_PORT_CHOICES; do
         if ! tcp_port_taken "$candidate"; then
             LINK_PORT=$candidate
             save_config || warn 'Could not save the link port.'
             return 0
         fi
     done
-    fail "Ports 443, 8443 and 9443 are all used by other programs. Choose one: Settings $S_CRUMB Advanced $S_CRUMB Share link port."
+    fail "Ports ${LINK_PORT_CHOICES// /, } are all used by other programs. Choose one: Settings $S_CRUMB Advanced $S_CRUMB Share link port."
     return 1
 }
 host_is_ip() { [[ $1 =~ ^[0-9.]+$ ]]; }
