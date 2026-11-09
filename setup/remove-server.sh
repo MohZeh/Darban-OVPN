@@ -183,7 +183,7 @@ rm -f -- "$SETUP_LOG"
 echo
 echo 'OpenVPN, the CA, client profiles, NAT and this tool were removed.'
 if [[ -n $backup_file ]]; then
-    printf 'The backup holds the CA private key; keep it safe or delete it: %s\n' "$backup_file"
+    printf 'The backup holds the CA private key and is not encrypted. Move it off the server and keep it encrypted, or delete it: %s\n' "$backup_file"
 fi
 if (( ${#added_kernel[@]} > 0 && ! KERNEL )); then
     printf 'The Virtual HWE kernel was kept. It is safe to leave installed.\n'

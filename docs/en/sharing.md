@@ -18,7 +18,7 @@ A profile (`.ovpn` file) holds a private key: whoever has it can connect as that
 3. Open the TCP port the tool shows in your provider's firewall.
 4. Send the link, and the note if the tool shows one.
 
-The link stops working as soon as the device connects to the VPN for the first time, or when its time is up. Until then, the person can open it and download the file again, so a mistake on the phone costs nothing. The person follows [Connect a device](connect-devices.md). There are no permanent links, because a link stays in chat histories.
+The link stops working when its time is up, or about 10 seconds after a connection with this profile is seen, whichever comes first. Until then, the person can open it and download the file again, so a mistake on the phone costs nothing. The person follows [Connect a device](connect-devices.md). There are no permanent links, because a link stays in chat histories.
 
 **If the link stopped working before the person connected:** someone else may have connected with it. Revoke the client and create a new one.
 
@@ -52,7 +52,7 @@ Profiles keep the address they were made with. Send them again from menu `4`.
 
 ## The browser warning
 
-On a domain name or a public IP address, links get a trusted certificate, and the browser shows no warning. The setup already installs `certbot` for it.
+On a domain name or a public IP address, a link can have a trusted certificate, and the browser then shows no warning. The setup already installs `certbot` for it. Getting one can still fail, for example when TCP port 80 is closed in the provider's firewall; the tool then says so.
 
 1. **A trusted certificate already on this server** comes first: one that certbot, a panel such as 3x-ui or x-ui, or acme.sh got for the same address. The tool asks, and Enter uses it. The link service gets a copy, and when the certificate is renewed there, the next link takes the new one. **Settings › Link certificate** also takes a certificate file you name.
 2. Otherwise the tool offers a free certificate from **Let's Encrypt**, and Enter means Yes. It needs TCP port 80 open in your provider's firewall for a moment, when the certificate is requested and at each renewal.
@@ -77,7 +77,7 @@ If you locked the key, add:
 ## How links are protected
 
 - Opening a link or downloading the file does not use it up, so a messenger's preview or a mistake costs nothing.
-- The link ends when the client connects for the first time after the link was made. The link service asks OpenVPN about this every 10 seconds. Menu `5` shows whether the file was downloaded.
+- The link ends when a connection with the profile is seen after the link was made. The link service asks OpenVPN's management interface about this every 10 seconds, so a connection shorter than that can be missed. A server without a local management interface, such as one this tool did not set up, cannot see connections: its links work until their time is up, and the tool says so when it makes one. Menu `5` shows whether the file was downloaded.
 - The page is in Persian when the device's language is Persian, and in English otherwise.
 - Only a hash of the link's token stays on the server, so a lost link cannot be shown again.
 - The copy of the profile is kept in `/run/darban-links`, which a reboot clears.

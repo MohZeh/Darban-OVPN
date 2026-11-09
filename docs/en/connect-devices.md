@@ -10,7 +10,7 @@ For the person who received a link or a `.ovpn` file. The app is **OpenVPN Conne
 2. Do this on the device you want to connect. Press **Download profile**.
 3. Open the downloaded file. On most phones it opens in OpenVPN Connect; the steps for each device are below.
 
-The link works until this device connects to the VPN for the first time. Until then you can open it and download the file again. The page is in Persian when your device's language is Persian, and in English otherwise.
+The link works until its time is up, or until a connection with this profile is seen, whichever comes first. Until then you can open it and download the file again. The page is in Persian when your device's language is Persian, and in English otherwise.
 
 The file holds a private key. Do not share or publish it.
 

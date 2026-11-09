@@ -21,6 +21,12 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 - Websites open through the VPN on networks that drop split packets, such as many mobile and home networks; before, only apps that send small packets worked. TCP is limited to segments that fit in one tunnel packet, an update adds the rule to an existing install, and diagnostics check it.
 - The port for links, and port 80 for a certificate, count a program that listens only on the public address, and the remembered link port is checked again for each link, with the name of the program that took it.
 - Check for updates no longer shows curl's 404 line while no stable release exists; it says the installed version is the newest offered.
+- Esc on the question of how long a link works cancels: no link is made, no password is shown for one, and the tool does not wait for a connection.
+- Messages and guides say what is really checked. Diagnostics report the TCP MSS rule, not that websites open on every network. A link ends when a connection with its profile is seen, checked every 10 seconds, and a server without a local management interface is told that its links last until their time is up. A trusted certificate for links is possible, not promised.
+- Taking a certificate from another tool copies the certificate and key beside the current pair, checks them as a pair, and only then replaces it, so a failure or a renewal half way keeps the current pair.
+- The link page ignores a language marked `q=0`.
+- The guides show Setup's current numbers, and a test compares them with the menu.
+- The backup that Remove everything makes is named as not encrypted, on screen and in the guide. The guide's command for an install without questions fails when the download fails.
 
 ## [1.0.0-rc.2] - 2026-11-08
 

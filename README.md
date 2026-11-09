@@ -39,7 +39,7 @@ sudo darban
 ## Why Darban
 
 - **A server in minutes.** Enter accepts a working default at every step, and you see your first client connect.
-- **Profiles that travel safely.** A link stops working once the device connects, or when its time is up, and a messenger's preview cannot use it up.
+- **Profiles that travel safely.** A link stops working when its time is up, or once a connection with its profile is seen, and a messenger's preview cannot use it up.
 - **Revocation you can trust.** The revocation list is checked against the CA, and a client that is not really blocked is named until it is.
 
 ## Features
