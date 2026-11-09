@@ -12,7 +12,12 @@ UI_TTY=0
 [[ -t 0 && -t 1 ]] && UI_TTY=1
 UI_CLEAR=$UI_TTY
 UI_WIDTH=72
-C_RESET='' C_BOLD='' C_DIM='' C_RED='' C_GREEN='' C_YELLOW='' C_CYAN='' C_REVERSE=''
+C_RESET='' C_BOLD='' C_DIM='' C_RED='' C_GREEN='' C_YELLOW='' C_CYAN='' C_BLUE='' C_MAGENTA='' C_UNDERLINE='' C_REVERSE=''
+# What each color means. Code uses these roles, so one meaning always has one color:
+#   title and keys cyan, groups and values blue, labels and hints dim, what to type or do magenta,
+#   success green, warning yellow, error and danger red. Every message keeps its symbol and its words too,
+#   so nothing depends on color alone, and NO_COLOR or a pipe loses nothing.
+C_TITLE='' C_GROUP='' C_KEY='' C_VALUE='' C_LABEL='' C_HINT='' C_INFO='' C_CMD='' C_LINK='' C_DANGER=''
 S_OK='+' S_BAD='x' S_WARN='!' S_URGENT='!!' S_INFO='-' S_LINE='-' S_DOT='*' S_SEP='|' S_ARROW='->' S_ELL='...' S_CRUMB='>' S_POINTER='>' S_UPDOWN='Up/Down'
 UI_CHOOSING=0
 UI_SAVED_STTY=''
@@ -20,7 +25,11 @@ ui_init() {
     local cols
     # Colors only on a real terminal, and never when NO_COLOR is set (https://no-color.org).
     if (( UI_TTY )) && [[ -z ${NO_COLOR:-} && ${TERM:-dumb} != dumb ]]; then
+        # The eight basic colors only: each terminal shows them in its own theme, light or dark.
         C_RESET=$'\e[0m' C_BOLD=$'\e[1m' C_DIM=$'\e[2m' C_RED=$'\e[31m' C_GREEN=$'\e[32m' C_YELLOW=$'\e[33m' C_CYAN=$'\e[36m' C_REVERSE=$'\e[7m'
+        C_BLUE=$'\e[34m' C_MAGENTA=$'\e[35m' C_UNDERLINE=$'\e[4m'
+        C_TITLE=$C_BOLD$C_CYAN C_GROUP=$C_BOLD$C_BLUE C_KEY=$C_BOLD$C_CYAN C_VALUE=$C_BLUE C_LABEL=$C_DIM C_HINT=$C_DIM
+        C_INFO=$C_BLUE C_CMD=$C_BOLD$C_MAGENTA C_LINK=$C_CYAN$C_UNDERLINE C_DANGER=$C_RED
     fi
     # Box/check symbols only when the locale is UTF-8 (e.g. PuTTY with a legacy charset shows garbage).
     if [[ ${LC_ALL:-${LC_CTYPE:-${LANG:-}}} =~ [Uu][Tt][Ff]-?8 ]]; then
@@ -30,21 +39,41 @@ ui_init() {
     [[ $cols =~ ^[0-9]+$ ]] || cols=80
     UI_WIDTH=$(( cols < 40 ? 40 : cols > 72 ? 72 : cols ))
 }
+cmd() {
+    # cmd <text>: a command to type, inside a sentence: "type $(cmd sudo darban)".
+    printf '%s%s%s' "$C_CMD" "$*" "$C_RESET" || true
+}
+with_action() {
+    # What follows the arrow is the thing to do, a command or a menu path, and gets the color for that.
+    local text=$1
+    if [[ -n $C_CMD && $text == *" $S_ARROW "* ]]; then
+        printf '%s %s %s%s%s' "${text%%" $S_ARROW "*}" "$S_ARROW" "$C_CMD" "${text#*" $S_ARROW "}" "$C_RESET" || true
+    else
+        printf '%s' "$text" || true
+    fi
+}
 say() { printf '%s\n' "$*" || true; }
-info() { printf '%s %s\n' "$S_INFO" "$*" || true; }
-ok() { printf '%s%s%s %s\n' "$C_GREEN" "$S_OK" "$C_RESET" "$*" || true; }
-warn() { printf '%s%s WARNING:%s %s\n' "$C_YELLOW" "$S_WARN" "$C_RESET" "$*" >&2 || true; }
-fail() { printf '%s%s ERROR:%s %s\n' "$C_RED" "$S_BAD" "$C_RESET" "$*" >&2 || true; }
-urgent() { printf '%s%s%s URGENT:%s %s\n' "$C_BOLD" "$C_RED" "$S_URGENT" "$C_RESET" "$*" >&2 || true; }
+info() { printf '%s%s%s %s\n' "$C_INFO" "$S_INFO" "$C_RESET" "$(with_action "$*")" || true; }
+ok() { printf '%s%s%s %s\n' "$C_GREEN" "$S_OK" "$C_RESET" "$(with_action "$*")" || true; }
+warn() { printf '%s%s WARNING:%s %s\n' "$C_YELLOW" "$S_WARN" "$C_RESET" "$(with_action "$*")" >&2 || true; }
+fail() { printf '%s%s ERROR:%s %s\n' "$C_RED" "$S_BAD" "$C_RESET" "$(with_action "$*")" >&2 || true; }
+urgent() { printf '%s%s%s URGENT:%s %s\n' "$C_BOLD" "$C_RED" "$S_URGENT" "$C_RESET" "$(with_action "$*")" >&2 || true; }
 darban_error() { fail "$*"; }
-bullet() { printf '    %s %s\n' "$S_INFO" "$*" || true; }
-kv() { printf '  %-9s %s\n' "$1" "$2" || true; }
+bullet() { printf '    %s%s%s %s\n' "$C_INFO" "$S_INFO" "$C_RESET" "$(with_action "$*")" || true; }
+kv() {
+    # The label quiet, the value in its color; a value that brings its own colors keeps them.
+    if [[ $2 == *$'\e'* ]]; then
+        printf '  %s%-9s%s %s\n' "$C_LABEL" "$1" "$C_RESET" "$2" || true
+    else
+        printf '  %s%-9s%s %s%s%s\n' "$C_LABEL" "$1" "$C_RESET" "$C_VALUE" "$2" "$C_RESET" || true
+    fi
+}
 hr() {
     local line
     printf -v line '%*s' "$UI_WIDTH" ''
     printf '%s%s%s\n' "$C_DIM" "${line// /$S_LINE}" "$C_RESET" || true
 }
-section() { printf '%s %s%s\n' "$C_BOLD" "$1" "$C_RESET" || true; hr; }
+section() { printf '%s %s%s\n' "$C_TITLE" "$1" "$C_RESET" || true; hr; }
 clear_screen() {
     # Cursor home + clear visible screen only; scrollback is kept so earlier commands can still be copied.
     if (( UI_CLEAR )); then printf '\e[H\e[2J' || true; fi
@@ -89,7 +118,7 @@ ask() {
     local rc=0
     REPLY=''
     DARBAN_INT=0
-    read -r -t "$IDLE_TIMEOUT" -p "$1" REPLY || rc=$?
+    read -r -t "$IDLE_TIMEOUT" -p "$C_BOLD$1$C_RESET" REPLY || rc=$?
     if (( DARBAN_INT )); then DARBAN_INT=0; printf '\n' || true; return 1; fi
     if (( rc > 128 )); then idle_exit; fi
     normalize_reply

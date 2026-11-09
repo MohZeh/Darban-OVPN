@@ -426,7 +426,7 @@ pick_client() {
     fi
     say "$question"
     for i in "${!names[@]}"; do
-        printf '  %s%3d%s  %-24s %s%s%s\n' "$C_CYAN" $((i + 1)) "$C_RESET" "${names[i]}" "$C_DIM" "${notes[i]}" "$C_RESET"
+        printf '  %s%3d%s  %-24s %s%s%s\n' "$C_KEY" $((i + 1)) "$C_RESET" "${names[i]}" "$C_HINT" "${notes[i]}" "$C_RESET"
     done
     show_blocked "${blocked[@]}"
     say
@@ -532,17 +532,17 @@ download_panel() {
         target=$DOWNLOAD_SSH_USER@$DOWNLOAD_SSH_HOST
         if [[ $only == all || $only == windows ]]; then
             say '  Windows (PowerShell):'
-            printf 'scp -P %s %s:%s "$env:USERPROFILE\\Downloads\\%s"\n' "$DOWNLOAD_SSH_PORT" "$target" "$fetch" "$filename" || true
+            printf '%sscp -P %s %s:%s "$env:USERPROFILE\\Downloads\\%s"%s\n' "$C_CMD" "$DOWNLOAD_SSH_PORT" "$target" "$fetch" "$filename" "$C_RESET" || true
             say
         fi
         if [[ $only == all || $only == unix ]]; then
             say '  macOS / Linux:'
-            printf 'scp -P %s %s:%s ~/Downloads/\n' "$DOWNLOAD_SSH_PORT" "$target" "$fetch" || true
+            printf '%sscp -P %s %s:%s ~/Downloads/%s\n' "$C_CMD" "$DOWNLOAD_SSH_PORT" "$target" "$fetch" "$C_RESET" || true
             say
         fi
         if [[ $only == all || $only == sftp ]]; then
             say '  WinSCP / FileZilla (SFTP):'
-            printf 'sftp://%s:%s%s\n' "$target" "$DOWNLOAD_SSH_PORT" "$fetch" || true
+            printf '%ssftp://%s:%s%s%s\n' "$C_LINK" "$target" "$DOWNLOAD_SSH_PORT" "$fetch" "$C_RESET" || true
             say
         fi
     fi
@@ -1306,7 +1306,7 @@ share_by_link() {
     mv -f -- "$temp" "$LINK_DIR/$key.meta" || return 1
     if ! start_link_service "$host"; then
         rm -f -- "$LINK_DIR/$key.meta" "$LINK_DIR/$key.ovpn"
-        fail "The link service did not start on TCP $LINK_PORT. Check: journalctl -u darban-links.service -n 30 --no-pager"
+        fail "The link service did not start on TCP $LINK_PORT. Check: $(cmd journalctl -u darban-links.service -n 30 --no-pager)"
         return 1
     fi
     # The link holds its own copy, so nothing stays behind in the download folder.
@@ -1321,7 +1321,7 @@ share_by_link() {
     kv Valid "until $name first connects, at most $label"
     kv Cancel 'menu 5'
     say
-    printf '%s\n' "$url" || true
+    printf '%s%s%s\n' "$C_LINK" "$url" "$C_RESET" || true
     say
     if [[ $want_qr == yes ]]; then show_qr "$url"; fi
     warn "TCP $LINK_PORT must be open in your provider firewall."
@@ -1375,7 +1375,7 @@ active_links() {
         expires=$(awk -F= '$1=="expires" {print $2}' "${files[i]}")
         minutes=$(( (expires - now + 59) / 60 ))
         if [[ $state =~ ^[1-9][0-9]*$ ]]; then state=downloaded; else state='not downloaded'; fi
-        printf '  %s%3d%s  %-24s %-16s %d min\n' "$C_CYAN" $((i + 1)) "$C_RESET" "$(safe_text "$name")" "$state" "$minutes"
+        printf '  %s%3d%s  %-24s %-16s %d min\n' "$C_KEY" $((i + 1)) "$C_RESET" "$(safe_text "$name")" "$state" "$minutes"
     done
     say
     while :; do
@@ -2176,7 +2176,7 @@ update_tool() {
     bash "$DARBAN_LIB/get.sh" --version "v$latest" || { fail 'The update failed. See the messages above.'; audit "update to v$latest failed"; return 1; }
     audit "updated: v$DARBAN_VERSION -> v$latest"
     say
-    ok "Updated to v$latest. Start it again: sudo darban"
+    ok "Updated to v$latest. Start it again: $(cmd sudo darban)"
     exit "$RC_QUIT"
 }
 restore_previous() {
@@ -2206,7 +2206,7 @@ restore_previous() {
     rm -rf -- "$newest"
     critical_end
     audit "restored previous version: v$DARBAN_VERSION -> v${version:-unknown}"
-    ok "Restored v${version:-unknown}. Start it again: sudo darban"
+    ok "Restored v${version:-unknown}. Start it again: $(cmd sudo darban)"
     exit "$RC_QUIT"
 }
 toggle_update_notice() {
@@ -2286,9 +2286,9 @@ check() {
         bad) symbol=$S_BAD color=$C_RED HEALTH_BAD=$((HEALTH_BAD + 1)) ;;
         warn) symbol=$S_WARN color=$C_YELLOW ;;
     esac
-    printf '  %s%s%s %s\n' "$color" "$symbol" "$C_RESET" "$2" || true
+    printf '  %s%s%s %s\n' "$color" "$symbol" "$C_RESET" "$(with_action "$2")" || true
 }
-group() { printf '\n %s%s%s\n' "$C_BOLD" "$1" "$C_RESET" || true; }
+group() { printf '\n %s%s%s\n' "$C_GROUP" "$1" "$C_RESET" || true; }
 check_expiry() {
     # check_expiry <label> <epoch>
     if (( $2 <= $(date -u +%s) )); then check bad "$1 EXPIRED on $(date -u -d "@$2" +%Y-%m-%d)"
@@ -2444,7 +2444,7 @@ health() {
 
 # ---------- screens ----------
 title_bar() {
-    printf '%s Darban OVPN v%s%s%s\n' "$C_BOLD" "$DARBAN_VERSION" "${1:+ $S_CRUMB $1}" "$C_RESET"
+    printf '%s Darban OVPN v%s%s%s\n' "$C_TITLE" "$DARBAN_VERSION" "${1:+ $S_CRUMB $1}" "$C_RESET"
     hr
 }
 status_block() {
@@ -2483,11 +2483,16 @@ status_block() {
         if e=$(darban_server_cert_pem | openssl x509 -noout -enddate 2>/dev/null) && e=$(date -u -d "${e#notAfter=}" +%s) && (( $(days_until "$e") <= EXPIRY_WARN_DAYS )); then printf '%s\n' "Server certificate expires $(date -u -d "@$e" +%Y-%m-%d); it is not renewed automatically"; fi
         printf '%s\n' "${CONFIG_ISSUES[@]}"
     } | while IFS= read -r alert; do
-        if [[ -n $alert ]]; then printf '  %s%s %s%s\n' "$C_YELLOW" "$S_WARN" "$alert" "$C_RESET"; fi
+        if [[ -n $alert ]]; then printf '  %s%s %s%s\n' "$C_YELLOW" "$S_WARN" "$(with_action "$alert")" "$C_RESET"; fi
     done
 }
-menu_item() { printf '   %s%2s%s  %s\n' "$C_CYAN" "$1" "$C_RESET" "$2" || true; }
-menu_group() { printf ' %s%s%s\n' "$C_BOLD" "$1" "$C_RESET" || true; }
+menu_item() {
+    # menu_item <key> <label> [danger]: a key to press, and its label, red when it cannot be undone.
+    local color=''
+    if [[ ${3:-} == danger ]]; then color=$C_DANGER; fi
+    printf '   %s%2s%s  %s%s%s\n' "$C_KEY" "$1" "$C_RESET" "$color" "$2" "$C_RESET" || true
+}
+menu_group() { printf ' %s%s%s\n' "$C_GROUP" "$1" "$C_RESET" || true; }
 draw_main() {
     clear_screen
     title_bar
@@ -2496,7 +2501,7 @@ draw_main() {
     menu_group CLIENTS
     menu_item 1 'List clients'
     menu_item 2 'Create client'
-    menu_item 3 'Revoke client (permanent)'
+    menu_item 3 'Revoke client (permanent)' danger
     menu_group SHARE
     menu_item 4 'Share a profile (link, QR, download)'
     menu_item 5 'Active links'
@@ -2507,8 +2512,8 @@ draw_main() {
     menu_item 9 'Setup (update, uninstall, remove all)'
     menu_item 0 'Exit'
     hr
-    printf ' %sInside an action, an empty answer or Ctrl+C cancels.%s\n' "$C_DIM" "$C_RESET"
-    printf ' %s%s %s %s%s\n' "$C_DIM" "${DARBAN_URL#https://}" "$S_SEP" "$DARBAN_EMAIL" "$C_RESET"
+    printf ' %sInside an action, an empty answer or Ctrl+C cancels.%s\n' "$C_HINT" "$C_RESET"
+    printf ' %s%s %s %s%s\n' "$C_HINT" "${DARBAN_URL#https://}" "$S_SEP" "$DARBAN_EMAIL" "$C_RESET"
 }
 draw_settings() {
     local host port
@@ -2619,8 +2624,8 @@ draw_setup() {
     menu_item 2 "$(printf '%-24s %s' 'Check for updates' "installed: v$DARBAN_VERSION")"
     menu_item 3 "$(printf '%-24s %s' 'Daily update notice' "$UPDATE_CHECK")"
     menu_item 4 'Restore previous version'
-    menu_item 5 'Uninstall this tool only'
-    menu_item 6 'Remove everything (tool, OpenVPN, CA)'
+    menu_item 5 'Uninstall this tool only' danger
+    menu_item 6 'Remove everything (tool, OpenVPN, CA)' danger
     menu_item 0 'Back'
     hr
 }
@@ -2645,7 +2650,7 @@ setup_menu() {
 }
 program_exit() {
     # Said on the way out, so nobody has to look for how to come back.
-    printf '\nTo open this menu again, type: sudo darban\n' || true
+    printf '\nTo open this menu again, type: %s\n' "$(cmd sudo darban)" || true
     exit 0
 }
 draw_recovery() {
@@ -2655,8 +2660,8 @@ draw_recovery() {
     hr
     menu_item 1 'Diagnostics (read-only)'
     menu_item 2 'Check for updates'
-    menu_item 3 'Uninstall this tool only'
-    menu_item 4 'Remove everything (tool, OpenVPN, CA)'
+    menu_item 3 'Uninstall this tool only' danger
+    menu_item 4 'Remove everything (tool, OpenVPN, CA)' danger
     menu_item 0 'Exit'
     hr
     printf ' %sThe other options return when this is fixed.%s\n' "$C_DIM" "$C_RESET" || true
@@ -2702,7 +2707,7 @@ next_steps() {
     if needs_reboot; then
         say
         printf '%sLater:%s\n' "$C_BOLD" "$C_RESET" || true
-        bullet 'Reboot once when convenient, for a faster VPN: sudo reboot'
+        bullet "Reboot once when convenient, for a faster VPN: $(cmd sudo reboot)"
     fi
     if iptables -S FORWARD 2>/dev/null | grep -q '^-P FORWARD DROP' && ! command -v ufw >/dev/null; then
         say
@@ -2710,7 +2715,7 @@ next_steps() {
     fi
     say
     printf '%sTo manage this server at any time:%s\n' "$C_BOLD" "$C_RESET" || true
-    bullet 'Connect over SSH, type sudo darban and press Enter. The menu opens, where clients are created, shared and revoked.'
+    bullet "Connect over SSH, type $(cmd sudo darban) and press Enter. The menu opens, where clients are created, shared and revoked."
     say
 }
 welcome() {

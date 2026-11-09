@@ -14,6 +14,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 - The Setup menu lists About first, then the update entries, and the two removals last.
 - The end of a new install, leaving the menu, the README and the guides say how to open the menu again: `sudo darban`.
 - Links take a trusted certificate already on the server for the same address, from certbot, a panel such as 3x-ui, or acme.sh, and copy it again after a renewal there. **Settings › Link certificate** also takes a certificate file by its path. A Cloudflare Origin certificate is named and not used, because browsers trust it only through Cloudflare's proxy.
+- Colors have one meaning each, across the menus and messages: cyan for the title and the keys to press, blue for groups and values, dim for labels and hints, magenta for what to type or do (every command, and the part after `→`), green, yellow and red for success, warnings and errors, and red for menu items that cannot be undone. Only the eight basic colors are used, so a light or dark terminal shows them in its own theme, and every message keeps its symbol and words. `NO_COLOR=1` still turns them off.
 - The Let's Encrypt question lists Yes first, and Enter means Yes. The setup installs certbot on a public address, so the first link does not wait for it.
 
 ### Fixed
