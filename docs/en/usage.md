@@ -111,4 +111,4 @@ sudo darban version
 sudo darban help
 ```
 
-The menu closes after 15 minutes without input. `NO_COLOR=1` turns colors off. Actions are recorded in the system journal: `sudo journalctl -t darban`.
+The menu closes after 15 minutes without input. Each color has one meaning: cyan for the keys to press, magenta for what to type or do, green, yellow and red for success, warnings and errors, and red for menu items that cannot be undone. `NO_COLOR=1` turns colors off. Actions are recorded in the system journal: `sudo journalctl -t darban`.
