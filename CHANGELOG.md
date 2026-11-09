@@ -4,6 +4,10 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## [Unreleased]
 
+## [1.0.0-rc.4] - 2026-11-09
+
+Release candidate for `v1.0.0`, for testing on a server that is not in use. It replaces `v1.0.0-rc.3`, whose setup stopped on a public IP address.
+
 ### Changed
 - A first link takes the first free port of 9347, 9563 and 9741 instead of 443, 8443 and 9443, which panels such as 3x-ui and tools such as Portainer often use; a link would then hold their port while it lasts. A port already saved stays as it is, and Settings › Advanced › Share link port changes it.
 - TCP MSS for VPN traffic is limited to 1280 instead of 1300, for a little more room on paths with a smaller MTU.
