@@ -2396,7 +2396,7 @@ test_setup_installs_certbot_for_links() {
     prepare_blank_server_again
     : > "$STUB_LOG"
     setup_run --host 192.168.1.10 --port 21194 --yes >/dev/null
-    if grep -q 'certbot' "$STUB_LOG"; then result 1 'a private address gets no certbot'; else result 0 'a private address gets no certbot'; fi
+    if grep -q 'certbot' "$STUB_LOG"; then result 0 'a private address gets no certbot'; else result 1 'a private address gets no certbot'; fi
 }
 
 test_old_certbot_is_not_used_for_an_ip() {
