@@ -1404,6 +1404,22 @@ test_share_password() {
     if grep -rq "$password" "$E/stub.log"; then result 0 'the password is not logged'; else result 1 'the password is not logged'; fi
 }
 
+test_first_link_takes_an_uncommon_port() {
+    # Without a saved port, the first free one of 9347, 9563 and 9741, never one a panel usually takes.
+    local out pid
+    start_links_stub
+    sed -i '/^LINK_PORT=/d' "$E/cfg/config"
+    python3 -c 'import socket, sys, time
+s = socket.socket(); s.bind(("127.0.0.1", 9347)); s.listen(); time.sleep(60)' &
+    pid=$!
+    sleep 0.5
+    out=$(menu '4\nalice\n1\n1\n1\n0\n')
+    has 'a busy first choice is passed over for the next one' 'https://127.0.0.1:9563/l/' "$out"
+    grep -qx 'LINK_PORT=9563' "$E/cfg/config"; rc_is 'and it is remembered' 0 "$?"
+    kill "$pid" 2>/dev/null
+    stop_links_stub
+}
+
 test_link_port_taken_by_another_program() {
     local port out pid
     port=$(( 40000 + RANDOM % 20000 ))

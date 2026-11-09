@@ -118,7 +118,7 @@ DOWNLOAD_SSH_HOST=203.0.113.10
 DOWNLOAD_SSH_PORT=22
 DOWNLOAD_SSH_USER=root
 CLIENT_CERT_DAYS=825
-LINK_PORT=443
+LINK_PORT=9347
 UPDATE_CHECK=no
 ```
 
@@ -129,7 +129,7 @@ UPDATE_CHECK=no
 | Port | Needed for |
 |---|---|
 | Your chosen UDP port | VPN clients |
-| 443, 8443 or 9443 TCP | Temporary links. The first one that no other program uses on any address is chosen and kept, and checked again for each link. If another program has taken it, the tool names that program |
+| 9347, 9563 or 9741 TCP | Temporary links. The first one that no other program uses on any address is chosen and kept, and checked again for each link. If another program has taken it, the tool names that program. These ports are uncommon on purpose: panels such as 3x-ui, and tools such as Portainer, often use 443, 8443 and 9443. **Settings › Advanced › Share link port** sets another one |
 | 80 TCP, for a moment | Only for a Let's Encrypt certificate, when it is requested and at each renewal: about every 60 days for a domain name, and for each new six-day certificate of an IP address |
 
 ## The blocklist (CRL)

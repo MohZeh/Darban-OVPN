@@ -4,13 +4,14 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## [Unreleased]
 
+### Changed
+- A first link takes the first free port of 9347, 9563 and 9741 instead of 443, 8443 and 9443, which panels such as 3x-ui and tools such as Portainer often use; a link would then hold their port while it lasts. A port already saved stays as it is, and Settings › Advanced › Share link port changes it.
+- TCP MSS for VPN traffic is limited to 1280 instead of 1300, for a little more room on paths with a smaller MTU.
+
 ### Fixed
 - A new server on a public IP address finishes the setup again. In `v1.0.0-rc.3` the setup stopped without a word right after "OpenVPN ... installed": reading certbot's version from `apt-cache` ended early, `apt-cache` was killed by SIGPIPE, and `pipefail` turned that into a failure. The certbot step now reads to the end, and nothing that fails inside it can stop the setup.
 - A temporary link opens on a device that is already connected to the same server. The TCP MSS limit covered traffic through the server, but not connections to the server itself, so the page did not load through the VPN on networks that drop split packets. The limit now also covers those, and diagnostics check it.
 - Esc on the question of how long a link works says that the client was still created, and where to share or revoke it.
-
-### Changed
-- TCP MSS for VPN traffic is limited to 1280 instead of 1300, for a little more room on paths with a smaller MTU.
 
 ## [1.0.0-rc.3] - 2026-11-09
 
