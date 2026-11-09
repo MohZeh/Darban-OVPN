@@ -61,7 +61,7 @@ sudo bash -c 'set -o pipefail; curl -fsSL https://github.com/MohZeh/Darban-OVPN/
 - Creates a CA in `/root/pki` and a server certificate valid for 10 years.
 - Writes `/etc/openvpn/server/server.conf`, enables IPv4 forwarding, and adds NAT for the VPN only, in its own nftables table.
 - Keeps clients apart: they cannot reach each other, or the cloud provider's metadata service at `169.254.169.254`, through the server. They can still reach other private networks the server reaches.
-- Limits TCP MSS for VPN traffic to 1300 in both directions, only for connections that announce a larger one.
+- Limits TCP MSS for VPN traffic to 1280 in both directions, only for connections that announce a larger one: traffic through the server, and connections to the server itself, such as a temporary link opened on a device that is already connected.
 - Starts OpenVPN, and writes details to `/var/log/darban-setup.log`.
 
 If a kernel is added, the current one stays as a fallback and nothing reboots automatically. The VPN works at once without [DCO](glossary.md#dco).

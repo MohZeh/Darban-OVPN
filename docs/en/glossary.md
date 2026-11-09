@@ -48,7 +48,7 @@ Lets clients reach the internet through the server's address.
 
 ## TCP MSS
 
-The largest amount of data in one TCP segment. The tool limits it to 1300 in both directions for VPN traffic, so packets also arrive on networks that drop split packets. MSS is not MTU, the largest whole packet on a path.
+The largest amount of data in one TCP segment. The tool limits it to 1280 in both directions for VPN traffic, so packets also arrive on networks that drop split packets. MSS is not MTU, the largest whole packet on a path.
 
 ## DCO
 

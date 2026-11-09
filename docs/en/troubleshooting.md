@@ -24,7 +24,7 @@ sudo darban status
 |---|---|
 | Docker or another program set the FORWARD policy to DROP | Allow traffic from `tun0` in that firewall. With `ufw`, see the line in `sudo darban status` |
 | Forwarding or NAT is off | `sudo darban status` shows it under **Network** |
-| Apps work, but websites do not open | One possible cause: large packets are split on the way, and the network drops the pieces. An install from before `v1.0.0-rc.3` lacks the rule that limits TCP MSS: run the install command again. `sudo darban status` then shows `TCP MSS for VPN traffic is limited to 1300`. If websites still do not open, check DNS, and compare with the internet without the VPN |
+| Apps work, but websites do not open | One possible cause: large packets are split on the way, and the network drops the pieces. An install from before `v1.0.0-rc.3` lacks the rule that limits TCP MSS: run the install command again. `sudo darban status` then shows `TCP MSS for VPN traffic is limited to 1280`. If websites still do not open, check DNS, and compare with the internet without the VPN |
 
 ## The link does not open
 
