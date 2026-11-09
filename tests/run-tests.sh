@@ -2548,8 +2548,9 @@ test_ci_scope_skips_only_documentation() {
 }
 
 test_ci_skips_only_what_its_pull_request_tested() {
-    local dir=$WORK/tested origin=$WORK/tested-origin.git base pr squash other
-    tested() { (cd "$dir" && PATH="$dir/stub:$PATH" REPO=o/r REMOTE="$origin" "$@" bash "$REPO/scripts/ci-already-tested.sh" 2>&1); }
+    local dir=$WORK/tested origin=$WORK/tested-origin.git script=$REPO/scripts/ci-already-tested.sh base pr squash other
+    # REPO inside is the GitHub name the script asks the API about, not this checkout.
+    tested() { (cd "$dir" && PATH="$dir/stub:$PATH" REPO=o/r REMOTE="$origin" "$@" bash "$script" 2>&1); }
     mkdir -p "$dir/stub" && git -C "$dir" init -q && git init -q --bare "$origin"
     git -C "$dir" config user.email t@example.com; git -C "$dir" config user.name t
     printf 'a\n' >"$dir/run.sh"; git -C "$dir" add run.sh && git -C "$dir" commit -qm base
