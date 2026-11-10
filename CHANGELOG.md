@@ -4,6 +4,10 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## [Unreleased]
 
+## [1.0.0-rc.6] - 2026-11-10
+
+Release candidate for `v1.0.0`, for testing on a server that is not in use. It replaces `v1.0.0-rc.5`, with the fixes and changes from its test on a real server. A server on `v1.0.0-rc.5` or older reaches it with the install command, not with `darban update`; from this version on, `darban update` offers the next test version.
+
 ### Changed
 - A test version is offered the newest release, test versions included, so `darban update` moves a release candidate to the next one and then to the final version. A final version is still offered only final versions. Up to `v1.0.0-rc.5`, a test version was offered nothing; leave it once with the install command of the newer version.
 - Settings shows the link port by number, also before the first link: the port that link will take.
