@@ -27,7 +27,7 @@ ssh root@203.0.113.10
 ## Step 3: Run the install command
 
 ```bash
-sudo bash -c 'curl -fsSL https://github.com/MohZeh/Darban-OVPN/releases/download/v1.0.0-rc.4/get.sh | bash'
+sudo bash -c 'curl -fsSL https://github.com/MohZeh/Darban-OVPN/releases/download/v1.0.0-rc.5/get.sh | bash'
 ```
 
 **You should see:** `Step 1 of 2: Server address`.
