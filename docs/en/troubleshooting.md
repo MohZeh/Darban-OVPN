@@ -80,7 +80,9 @@ The daily blocklist check or another session holds the lock. Try again in a minu
 
 ## Update says there is nothing to update to
 
-No stable release has been published yet, so the version you have is the newest one offered. Test versions are never offered as updates. See the [Releases](https://github.com/MohZeh/Darban-OVPN/releases) page.
+A final version, such as `v1.0.0`, is offered only final versions. A test version, such as `v1.0.0-rc.5`, is offered the newest release, test versions included, so it moves to the next test version and then to the final one. If the message says no stable release is published yet, your final version is the newest one. See the [Releases](https://github.com/MohZeh/Darban-OVPN/releases) page.
+
+Versions up to `v1.0.0-rc.5` were not offered test versions. To leave one of them, run the install command of the newer version once; after that, updates work from the menu.
 
 ## Reporting a problem
 

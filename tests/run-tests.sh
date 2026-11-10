@@ -573,6 +573,8 @@ test_update_from_the_menu() {
     fake_release
     # The installed copy of get.sh, as setup/install.sh places it.
     cp "$E/get.sh" "$E/lib/get.sh"
+    # A final version, which is offered only final versions.
+    set_installed_version 1.0.0
     out=$(menu '9\n2\n1\n0\n0\n')
     has 'the new version is offered' 'Install v9.9.9' "$out"
     has 'option 1 keeps this version' 'Cancelled; nothing changed' "$out"
@@ -1569,20 +1571,22 @@ test_about_and_contact_are_shown() {
 }
 
 set_installed_version() { sed -i "s/^DARBAN_VERSION=.*/DARBAN_VERSION=$1/" "$E/manager.sh"; }
+# A test version reads the list of all releases; release_list <tag> stands for it with one release.
+release_list() { printf '[{"tag_name": "v%s", "prerelease": true}]\n' "$1" > "$RELEASE/releases?per_page=20"; }
 test_update_knows_pre_releases() {
     local out
     fake_release
     cp "$E/get.sh" "$E/lib/get.sh"
     printf 'Fixed things.\n\033[31mno escape\n' > "$RELEASE/RELEASE-NOTES.txt"
     set_installed_version 1.0.0-beta.1
-    echo 1.0.0 > "$RELEASE/VERSION"
+    release_list 1.0.0
     out=$(menu '9\n2\n1\n0\n0\n')
     has 'the final release is newer than its beta' 'Install v1.0.0' "$out"
     has 'its notes are shown' 'Fixed things.' "$out"
     if [[ $out == *$'\033'* ]]; then result 0 'escape codes in notes are removed'; else result 1 'escape codes in notes are removed'; fi
-    echo 1.0.0-rc.1 > "$RELEASE/VERSION"
+    release_list 1.0.0-rc.1
     has 'an rc is newer than a beta' 'Install v1.0.0-rc.1' "$(menu '9\n2\n1\n0\n0\n')"
-    echo 1.0.0-alpha.1 > "$RELEASE/VERSION"
+    release_list 1.0.0-alpha.1
     has 'an alpha is older than a beta' 'This is the latest version' "$(menu '9\n2\n0\n0\n')"
     set_installed_version 1.0.0
     echo 1.0.0-rc.9 > "$RELEASE/VERSION"
@@ -1592,6 +1596,46 @@ test_update_knows_pre_releases() {
     echo 1.10.0 > "$RELEASE/VERSION"
     set_installed_version 1.9.0
     has 'numbers compare as numbers' 'Install v1.10.0' "$(menu '9\n2\n1\n0\n0\n')"
+}
+
+test_a_test_version_is_offered_the_next_test_version() {
+    # A release candidate follows the newest release, test versions included; a final version does not.
+    local out list
+    fake_release
+    cp "$E/get.sh" "$E/lib/get.sh"
+    list="$RELEASE/releases?per_page=20"
+    printf '[\n  {\n    "tag_name": "v1.0.0-rc.4",\n    "prerelease": true\n  },\n  {\n    "tag_name": "v1.0.0-rc.10",\n    "prerelease": true\n  },\n  {\n    "tag_name": "v1.0.0-rc.9",\n    "prerelease": true\n  }\n]\n' > "$list"
+    set_installed_version 1.0.0-rc.4
+    out=$(menu '9\n2\n1\n0\n0\n')
+    has 'the highest test version is offered' 'Install v1.0.0-rc.10' "$out"
+    grep -q 'api.github.com/repos/MohZeh/Darban-OVPN/releases?per_page=20' "$STUB_LOG"; rc_is 'from the list of all releases' 0 "$?"
+    printf '[{"tag_name": "v1.0.0", "prerelease": false}, {"tag_name": "v1.0.0-rc.10", "prerelease": true}]\n' > "$list"
+    has 'then the final version' 'Install v1.0.0' "$(menu '9\n2\n1\n0\n0\n')"
+    printf '[{"tag_name": "v1.0.0-rc.4", "prerelease": true}]\n' > "$list"
+    has 'the same test version: nothing to do' 'This is the latest version' "$(menu '9\n2\n0\n0\n')"
+    printf '[{"tag_name": "v9; rm -rf", "prerelease": true}]\n' > "$list"
+    has 'a tag that is not a version is ignored' 'No stable release is published yet' "$(menu '9\n2\n0\n0\n')"
+    set_installed_version 1.0.0
+    echo 1.0.0 > "$RELEASE/VERSION"
+    printf '[{"tag_name": "v1.0.1-rc.1", "prerelease": true}]\n' > "$list"
+    has 'a final version is not offered a test version' 'This is the latest version' "$(menu '9\n2\n0\n0\n')"
+}
+
+test_settings_apply_in_the_same_session() {
+    # Each action runs apart from the menu: a setting it saves must reach the menu and the next action at once.
+    local out
+    start_links_stub
+    out=$(menu '7\n3\n5\n0\n5\nalice\n1\n1\n0\n')
+    has 'Settings shows the new lifetime at once' 'Link lifetime            5 hours' "$out"
+    has 'and the next link takes it' 'Valid     5 hours' "$out"
+    menu '6\n1\n0\n' >/dev/null
+    out=$(menu '7\n6\n7\n30\n0\n0\n0\n')
+    has 'Advanced shows a new client lifetime at once' 'New client lifetime      30' "$out"
+    out=$(menu '7\n6\n7\n0\n0\n0\n0\n')
+    has 'a setting returned to its default shows the default' 'New client lifetime      Easy-RSA default' "${out##*Days a new client}"
+    grep -Eq 'Link port +[0-9]+$' <<<"$(menu '7\n0\n0\n')"; rc_is 'Settings shows the link port by number, before any link' 0 "$?"
+    lacks 'and no longer says when it is chosen' 'chosen when needed' "$(menu '7\n4\n\n0\n0\n')"
+    stop_links_stub
 }
 
 test_update_notice_in_the_header() {
@@ -1901,6 +1945,7 @@ test_broken_server_can_still_be_diagnosed_and_removed() {
     lacks 'the menu hides what cannot work' 'Create client' "$out"
     out=$(menu '1\n\n0\n')
     has 'the menu offers diagnostics' 'Listening on UDP' "$out"
+    release_list 9.9.9
     out=$(bash "$E/manager.sh" update 2>&1 <<<'9.9.9')
     has 'an update still works' 'Updated to v9.9.9' "$out"
     has 'removing the tool is still offered' 'This removes the tool' "$(mgr uninstall)"

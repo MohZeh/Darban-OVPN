@@ -118,6 +118,9 @@ run_action() {
     ACTION_RUNNING=0
     DARBAN_INT=0
     ACTION_RC=$rc
+    # A setting the action saved lives only in the file: read it again, so the menu shows it and the next
+    # action uses it.
+    load_config
     case $rc in
         0|1|"$RC_NO_PAUSE") ;;
         130) say; info 'Cancelled.' ;;
@@ -138,6 +141,10 @@ menu_action() {
 # ---------- configuration and server facts ----------
 load_config() {
     local key value
+    # The defaults first: the menu reads the file again after each action, and a setting returned to its
+    # default has no line left in the file.
+    DOWNLOAD_SSH_HOST='' DOWNLOAD_SSH_PORT=22 DOWNLOAD_SSH_USER=root CLIENT_CERT_DAYS='' LINK_PORT='' LINK_HOURS=''
+    UPDATE_CHECK=yes
     CONFIG_ISSUES=()
     [[ -f $CONFIG_FILE ]] || { CONFIG_ISSUES+=("$CONFIG_FILE is missing; download commands are disabled."); return 0; }
     # Parsed as data, never sourced.
@@ -976,15 +983,27 @@ choose_link_port() {
         fi
         return 0
     fi
-    for candidate in $LINK_PORT_CHOICES; do
-        if ! tcp_port_taken "$candidate"; then
-            LINK_PORT=$candidate
-            save_config || warn 'Could not save the link port.'
-            return 0
-        fi
-    done
+    if candidate=$(next_link_port); then
+        LINK_PORT=$candidate
+        save_config || warn 'Could not save the link port.'
+        return 0
+    fi
     fail "Ports ${LINK_PORT_CHOICES// /, } are all used by other programs. Choose one: Settings $S_CRUMB Link port."
     return 1
+}
+next_link_port() {
+    # The port the first link will take: the first of the choices that no other program uses.
+    local candidate
+    for candidate in $LINK_PORT_CHOICES; do
+        if ! tcp_port_taken "$candidate"; then printf '%s\n' "$candidate"; return 0; fi
+    done
+    return 1
+}
+link_port_summary() {
+    # For Settings: the saved port, or the one the first link will take.
+    local next
+    if [[ -n $LINK_PORT ]]; then printf '%s\n' "$LINK_PORT"; return; fi
+    if next=$(next_link_port); then printf '%s\n' "$next"; else printf 'all of %s are in use\n' "${LINK_PORT_CHOICES// /, }"; fi
 }
 host_is_ip() { [[ $1 =~ ^[0-9.]+$ ]]; }
 link_cert_usable() {
@@ -2152,7 +2171,7 @@ set_link_hours() {
     ok "Saved: links work for at most $(hours_label "$LINK_HOURS"). It applies from the next link."
 }
 set_link_port() {
-    kv Current "${LINK_PORT:-chosen when needed}"
+    kv Current "$(link_port_summary)"
     info 'TCP port of temporary links. It must be open in your provider firewall.'
     say
     prompt_valid 'New port, 1 to 65535 (Enter = cancel): ' valid_link_port 'Enter a number from 1 to 65535.' || return 0
@@ -2214,7 +2233,25 @@ version_is_newer() {
     if [[ $b == "$base_b" ]]; then return 1; fi
     [[ $(printf '%s\n%s\n' "$a" "$b" | sort -V | tail -n 1) == "$a" ]]
 }
-latest_release_version() { curl -fsSL --proto '=https' --proto-redir '=https' --tlsv1.2 --max-time 20 "$DARBAN_URL/releases/latest/download/VERSION"; }
+latest_release_version() {
+    # A final version is offered only final versions. A test version follows test versions too, so a release
+    # candidate can be updated to the next one, and then to the final version.
+    if [[ $DARBAN_VERSION == *-* ]]; then newest_release_version; return; fi
+    curl -fsSL --proto '=https' --proto-redir '=https' --tlsv1.2 --max-time 20 "$DARBAN_URL/releases/latest/download/VERSION"
+}
+newest_release_version() {
+    # The highest version among the published releases, test versions included. GitHub lists no drafts here.
+    local list tag newest=''
+    list=$(curl -fsSL --proto '=https' --proto-redir '=https' --tlsv1.2 --max-time 20 \
+        "https://api.github.com/repos/$DARBAN_REPO/releases?per_page=20") || return
+    while IFS= read -r tag; do
+        tag=${tag#v}
+        valid_version "$tag" || continue
+        if [[ -z $newest ]] || version_is_newer "$tag" "$newest"; then newest=$tag; fi
+    done < <(grep -o '"tag_name": *"v[^"]*"' <<<"$list" | sed 's/^.*"\(v[^"]*\)"$/\1/')
+    [[ -n $newest ]] || return 22
+    printf '%s\n' "$newest"
+}
 start_update_check() {
     # In the background and at most once a day, so the menu never waits for the network.
     [[ $UPDATE_CHECK == yes ]] || return 0
@@ -2259,7 +2296,7 @@ update_tool() {
     latest=$(latest_release_version 2>/dev/null) || rc=$?
     # curl reports an HTTP error as 22: GitHub answered, and no stable release is there.
     if (( rc == 22 )); then
-        ok "v$DARBAN_VERSION is up to date. No stable release is published yet; test versions are not offered as updates."
+        ok "v$DARBAN_VERSION is up to date. No stable release is published yet."
         info "Releases: $DARBAN_URL/releases"
         return 0
     fi
@@ -2629,7 +2666,7 @@ draw_settings() {
     menu_item 2 "$(printf '%-24s %s' 'OpenVPN UDP port' "$port")"
     menu_group LINKS
     menu_item 3 "$(printf '%-24s %s' 'Link lifetime' "$(hours_label "$(link_hours)")")"
-    menu_item 4 "$(printf '%-24s %s' 'Link port' "${LINK_PORT:-chosen when needed}")"
+    menu_item 4 "$(printf '%-24s %s' 'Link port' "$(link_port_summary)")"
     menu_item 5 "$(printf '%-24s %s' 'Link certificate' "$(link_cert_summary | cut -d, -f1)")"
     menu_group MORE
     menu_item 6 'Advanced'

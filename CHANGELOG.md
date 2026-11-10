@@ -4,6 +4,13 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## [Unreleased]
 
+### Changed
+- A test version is offered the newest release, test versions included, so `darban update` moves a release candidate to the next one and then to the final version. A final version is still offered only final versions. Up to `v1.0.0-rc.5`, a test version was offered nothing; leave it once with the install command of the newer version.
+- Settings shows the link port by number, also before the first link: the port that link will take.
+
+### Fixed
+- A setting saved from the menu takes effect at once. Each action runs apart from the menu, which kept the values it had read at start: Settings showed the old link lifetime, link port, new client lifetime or download access, and the next link or client still used them, until the menu was opened again.
+
 ## [1.0.0-rc.5] - 2026-11-10
 
 Release candidate for `v1.0.0`, for testing on a server that is not in use. It replaces `v1.0.0-rc.4`, with the changes asked for after its test on a real server: easier sharing, a link lifetime setting, and menus ordered by use. The main menu numbers changed.
