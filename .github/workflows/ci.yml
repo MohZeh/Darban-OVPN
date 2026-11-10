@@ -63,14 +63,20 @@ jobs:
         run: bash scripts/build-release.sh "$RUNNER_TEMP/release"
 
   test:
-    # Each Ubuntu version is its own job, with its own status; one failing does not stop the other.
-    name: Test (Ubuntu ${{ matrix.ubuntu }})
+    # Each Ubuntu version and each suite is its own job, so they run side by side and the slowest suite alone
+    # sets the waiting time. One failing does not stop the others.
+    name: Test (Ubuntu ${{ matrix.ubuntu }}, ${{ matrix.suite }})
     needs: lint
     if: needs.lint.outputs.code == 'true'
     strategy:
       fail-fast: false
       matrix:
         ubuntu: ['24.04', '26.04']
+        suite: [stand-in Easy-RSA, real Easy-RSA, real terminal]
+        # The stand-in adds only failure cases Easy-RSA cannot produce, so one Ubuntu version is enough.
+        exclude:
+          - ubuntu: '26.04'
+            suite: stand-in Easy-RSA
     runs-on: ubuntu-${{ matrix.ubuntu }}
     timeout-minutes: 15
     steps:
@@ -85,16 +91,18 @@ jobs:
           test "$VERSION_ID" = "$EXPECTED"
           echo "Ubuntu $VERSION_ID, kernel $(uname -r)" >> "$GITHUB_STEP_SUMMARY"
       - name: Install Easy-RSA
+        if: matrix.suite == 'real Easy-RSA'
         run: |
           sudo apt-get -o Acquire::Retries=3 update
           sudo apt-get -o Acquire::Retries=3 install -y easy-rsa
-      # The stand-in adds only failure cases Easy-RSA cannot produce, so once is enough.
       - name: Tests with the stand-in Easy-RSA
-        if: matrix.ubuntu == '24.04'
+        if: matrix.suite == 'stand-in Easy-RSA'
         run: bash tests/run-tests.sh </dev/null
       - name: Tests with the real Easy-RSA
+        if: matrix.suite == 'real Easy-RSA'
         run: DARBAN_REAL_EASYRSA=/usr/share/easy-rsa/easyrsa bash tests/run-tests.sh </dev/null
       - name: Real-terminal key tests
+        if: matrix.suite == 'real terminal'
         run: python3 tests/run-tty-tests.py </dev/null
 
   # Runs the real setup, OpenVPN, Easy-RSA, systemd and a real client on a throwaway runner.
