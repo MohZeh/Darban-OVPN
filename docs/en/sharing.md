@@ -48,8 +48,10 @@ For a phone in front of you, choose **Show a QR code** in the copy question, and
 Use this when a link cannot be used, for example when your provider does not let you open a TCP port, or to fetch the file to your own computer over SSH.
 
 1. Choose **Keep it on the server**.
-2. The tool shows a command for Windows, one for macOS and Linux, and an address for WinSCP or FileZilla. Run the one for your computer, now or later.
+2. The tool shows a command for Windows, one for macOS and Linux, and an address for WinSCP or FileZilla. Then it offers to copy one of them, as in [Copying what you send](#copying-what-you-send). Run the one for your computer, now or later.
 3. After downloading, delete the server copy from menu `6`.
+
+This way asks for no password: the file comes to you over SSH, which already checks that it is your server.
 
 If you log in with a user other than `root`, that user gets a private copy of the file in its home folder. The address, port and user come from **Settings › Advanced › Download access**.
 
@@ -57,7 +59,7 @@ If you log in with a user other than `root`, that user gets a private copy of th
 
 Usually no password is needed, and Enter means **No password**. A password helps most when the link has no trusted certificate: the browser then cannot tell the real server from one placed in between. A password sent by another route keeps the file useless to anyone who only has the link.
 
-Answer **Yes, make a password**, and the tool suggests a short random password of 9 characters in one piece, such as `k7m3xt9vw`, easy to type on a phone. Press Enter to use it, or type your own of at least 9 characters. It is shown with the link, and cannot be shown again later. It is safer to send it by another route than the link, for example by SMS or a call, so one leak is not enough: choose **Copy without the password**, and send the password separately.
+A password is offered only for a temporary link. Answer **Yes, make a password**, and the tool shows a suggested password on its own line: a random one of 9 characters in one piece, such as `k7m3xt9vw`, easy to type on a phone. Press Enter to use it. Or type your own: a word or a short phrase of at least 9 characters, in English letters, digits, spaces or symbols, so it types the same on every device. It is shown with the link, and cannot be shown again later. It is safer to send it by another route than the link, for example by SMS or a call, so one leak is not enough: choose **Copy without the password**, and send the password separately.
 
 The app asks for it when connecting. So that it asks only once, turn on **Save private key password** in OpenVPN Connect when importing the profile, or later in the profile's settings.
 

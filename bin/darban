@@ -529,7 +529,7 @@ security_note() {
 download_panel() {
     # download_panel <file> <title> [windows|unix|sftp]. Commands are printed uncolored, unindented and one
     # per line, so copying them from the terminal never picks up escape codes or frame characters.
-    local file=$1 title=$2 only=${3:-all} name filename current_remote expected cert_exp target fetch=${DOWNLOAD_FILE:-$1}
+    local file=$1 title=$2 only=${3:-all} name filename current_remote expected cert_exp fetch=${DOWNLOAD_FILE:-$1}
     filename=${file##*/}
     name=${filename%.ovpn}
     ok "$title"
@@ -550,25 +550,34 @@ download_panel() {
     if [[ -z $DOWNLOAD_SSH_HOST ]]; then
         warn "Download commands unavailable: set DOWNLOAD_SSH_HOST (and DOWNLOAD_SSH_PORT/USER) in $CONFIG_FILE."
     else
-        target=$DOWNLOAD_SSH_USER@$DOWNLOAD_SSH_HOST
         if [[ $only == all || $only == windows ]]; then
             say '  Windows (PowerShell):'
-            printf '%sscp -P %s %s:%s "$env:USERPROFILE\\Downloads\\%s"%s\n' "$C_CMD" "$DOWNLOAD_SSH_PORT" "$target" "$fetch" "$filename" "$C_RESET" || true
+            printf '%s%s%s\n' "$C_CMD" "$(download_command windows "$file")" "$C_RESET" || true
             say
         fi
         if [[ $only == all || $only == unix ]]; then
             say '  macOS / Linux:'
-            printf '%sscp -P %s %s:%s ~/Downloads/%s\n' "$C_CMD" "$DOWNLOAD_SSH_PORT" "$target" "$fetch" "$C_RESET" || true
+            printf '%s%s%s\n' "$C_CMD" "$(download_command unix "$file")" "$C_RESET" || true
             say
         fi
         if [[ $only == all || $only == sftp ]]; then
             say '  WinSCP / FileZilla (SFTP):'
-            printf '%ssftp://%s:%s%s%s\n' "$C_LINK" "$target" "$DOWNLOAD_SSH_PORT" "$fetch" "$C_RESET" || true
+            printf '%s%s%s\n' "$C_LINK" "$(download_command sftp "$file")" "$C_RESET" || true
             say
         fi
     fi
     security_note
     hr
+}
+download_command() {
+    # download_command <windows|unix|sftp> <file>: the plain text of one way to fetch the file, for the panel
+    # and for the clipboard alike.
+    local fetch=${DOWNLOAD_FILE:-$2} target=$DOWNLOAD_SSH_USER@$DOWNLOAD_SSH_HOST
+    case $1 in
+        windows) printf 'scp -P %s %s:%s "$env:USERPROFILE\\Downloads\\%s"' "$DOWNLOAD_SSH_PORT" "$target" "$fetch" "${2##*/}" ;;
+        unix) printf 'scp -P %s %s:%s ~/Downloads/' "$DOWNLOAD_SSH_PORT" "$target" "$fetch" ;;
+        sftp) printf 'sftp://%s:%s%s' "$target" "$DOWNLOAD_SSH_PORT" "$fetch" ;;
+    esac
 }
 
 # ---------- actions ----------
@@ -814,25 +823,23 @@ share_client() {
     }
     method=$CHOSEN
     SHARED=1
+    PROFILE_PASSWORD=''
     say
-    # The link's certificate is settled first, because a link without a trusted one gets a word about the password.
-    if (( method == 1 )); then
-        prepare_link || return 1
-        if link_cert_is_trusted; then choose_profile_password; else choose_profile_password untrusted; fi
-    else
-        choose_profile_password
+    if (( method == 2 )); then
+        # The admin fetches this file over SSH, which already proves the server: a password would add nothing.
+        share_by_download "$name"
+        return 0
     fi
+    # The link's certificate is settled first, because a link without a trusted one gets a word about the password.
+    prepare_link || return 1
+    if link_cert_is_trusted; then choose_profile_password; else choose_profile_password untrusted; fi
     if [[ -n $PROFILE_PASSWORD ]]; then
         ca_lock || return 1
         write_profile "$name" yes || return 1
         ca_unlock
     fi
     say
-    case $method in
-        # A link that was cancelled (2) or not made shows no password for it.
-        1) share_by_link "$name" || return 1 ;;
-        *) share_by_download "$name"; if [[ -n $PROFILE_PASSWORD ]]; then share_password; fi ;;
-    esac
+    share_by_link "$name" || return 1
 }
 share_text() {
     # share_text <link> <password> <note>: what goes to the person, each label and value on its own line.
@@ -853,10 +860,10 @@ show_share_block() {
     say
 }
 offer_copy() {
-    # offer_copy <first label> <extra option or ''> <option> <text> [<option> <text>]...: Enter copies the first
-    # text. Returns 3 when the extra option, placed after the copy options, was chosen. Only a terminal has a
-    # clipboard to reach; a script gets no question, so its answers stay in step.
-    local first=$1 extra=$2 i
+    # offer_copy <what to select instead> <extra option or ''> <option> <text> [<option> <text>]...: Enter copies
+    # the first text. Returns 3 when the extra option, placed after the copy options, was chosen. Only a terminal
+    # has a clipboard to reach; a script gets no question, so its answers stay in step.
+    local select=$1 extra=$2 i
     shift 2
     (( UI_TTY )) || return 0
     local -a labels=() texts=()
@@ -868,16 +875,7 @@ offer_copy() {
     (( i < ${#texts[@]} )) || return 0
     copy_to_clipboard "${texts[i]}" || { warn 'Could not copy.'; return 0; }
     ok 'Copied to your clipboard, if your terminal allows it.'
-    info "If pasting does not give this text, your terminal does not allow it (PuTTY, for example). Select the lines from \"$first:\" down with the mouse instead."
-}
-share_password() {
-    # After a download, the password is all that goes to the person.
-    say
-    info 'The password is shown only now. Send it another way than the file, for example by SMS or a call.'
-    info 'In OpenVPN Connect, the person can turn on "Save private key password" when importing, so it is asked only once.'
-    hr
-    show_share_block '' "$PROFILE_PASSWORD" ''
-    offer_copy Password '' 'Copy the password' "$(share_text '' "$PROFILE_PASSWORD" '')"
+    info "If pasting does not give this text, your terminal does not allow it (PuTTY, for example). Select $select with the mouse instead."
 }
 make_password() {
     # Nine characters in one piece: nothing that might or might not belong to it, easy to type on a phone, and
@@ -902,13 +900,29 @@ choose_profile_password() {
     suggested=$(make_password) || { fail 'Could not create a password.'; return 1; }
     PROFILE_PASSWORD=$suggested
     (( UI_TTY )) || return 0
+    # The suggestion stands on its own line in the color it has in the final block, so it reads as the
+    # password and not as part of a sentence.
     say
-    info "Press Enter to use $suggested, or type your own (at least 9 characters) and press Enter."
+    say "${C_BOLD}Suggested password:${C_RESET}"
+    say "$C_SECRET$suggested$C_RESET"
+    say
+    info 'Press Enter to use it. Or type your own: a word or a short phrase of at least 9 characters, in English letters, digits, spaces or symbols.'
     while :; do
-        ask "Password [$suggested]: " || { PROFILE_PASSWORD=$suggested; return 0; }
-        PROFILE_PASSWORD=${REPLY:-$suggested}
-        if (( ${#PROFILE_PASSWORD} >= 9 )); then return 0; fi
-        warn 'Use at least 9 characters.'
+        ask 'Password (Enter = the suggested one): ' || { PROFILE_PASSWORD=$suggested; return 0; }
+        if [[ -z $REPLY ]]; then
+            PROFILE_PASSWORD=$suggested
+            ok 'The suggested password is used.'
+            return 0
+        fi
+        if (( ${#REPLY} < 9 )); then warn 'Use at least 9 characters.'; continue; fi
+        # Another keyboard can encode other letters differently, and the key would then not open on the device.
+        if printf '%s' "$REPLY" | LC_ALL=C grep -q '[^ -~]'; then
+            warn 'Use only English letters, digits, spaces and symbols, so the password types the same on every device.'
+            continue
+        fi
+        PROFILE_PASSWORD=$REPLY
+        ok 'Your password is used.'
+        return 0
     done
 }
 prepare_download_copy() {
@@ -951,6 +965,11 @@ share_by_download() {
     prepare_download_copy "$OUT_DIR/$name.ovpn"
     download_panel "$OUT_DIR/$name.ovpn" "Profile for \"$name\" rebuilt"
     info "Kept on the server: $OUT_DIR/$name.ovpn. After downloading it, delete it from menu 6."
+    [[ -n $DOWNLOAD_SSH_HOST ]] || return 0
+    offer_copy 'the command' '' \
+        'Copy the Windows command' "$(download_command windows "$OUT_DIR/$name.ovpn")" \
+        'Copy the macOS or Linux command' "$(download_command unix "$OUT_DIR/$name.ovpn")" \
+        'Copy the SFTP address' "$(download_command sftp "$OUT_DIR/$name.ovpn")"
 }
 tcp_port_open() { timeout 1 bash -c 'exec 3<>"/dev/tcp/127.0.0.1/$0"' "$1" 2>/dev/null; }
 tcp_port_taken() {
@@ -1407,12 +1426,12 @@ share_by_link() {
     while :; do
         rc=0
         if [[ -n $PROFILE_PASSWORD ]]; then
-            offer_copy Link "$qr" \
+            offer_copy 'the lines from "Link:" down' "$qr" \
                 "$(copy_label "$note" password)" "$(share_text "$url" "$PROFILE_PASSWORD" "$note")" \
                 'Copy without the password' \
                 "$(share_text "$url" '' "${note:+$note }The file is locked. Its password comes to you separately.")" || rc=$?
         else
-            offer_copy Link "$qr" "$(copy_label "$note")" "$(share_text "$url" '' "$note")" || rc=$?
+            offer_copy 'the lines from "Link:" down' "$qr" "$(copy_label "$note")" "$(share_text "$url" '' "$note")" || rc=$?
         fi
         (( rc == 3 )) || break
         say

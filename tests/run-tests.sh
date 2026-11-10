@@ -181,7 +181,7 @@ test_dotted_name_is_fully_managed() {
     has 'list shows the dotted name (C-02)' 'john.doe' "$out"
     has 'list counts it' '2 valid' "$out"
     has 'header agrees with the list' '2 valid' "$(menu '0\n')"
-    out=$(menu '5\njohn.doe\n2\n1\n0\n')
+    out=$(menu '5\njohn.doe\n2\n0\n')
     has 're-export works' 'Profile for "john.doe" rebuilt' "$out"
     ok_if 'profile written' test -s "$E/clients/john.doe.ovpn"
     has 'download offers it' 'john.doe' "$(menu '5\n\n0\n')"
@@ -202,7 +202,7 @@ test_reissued_name_revokes_the_valid_certificate() {
     has 'list shows the valid certificate (C-02)' 'VALID' "$out"
     lacks 'the default list leaves the history out' 'REVOKED' "$out"
     has 'list --all shows the revoked history' 'REVOKED' "$(mgr list --all)"
-    out=$(menu '5\nalice\n2\n1\n0\n')
+    out=$(menu '5\nalice\n2\n0\n')
     has 're-export works' 'Profile for "alice" rebuilt' "$out"
     grep -q "$(openssl x509 -in "$PKI/issued/alice.crt" -outform PEM | sed -n 2p)" "$E/clients/alice.ovpn"
     rc_is 'the profile holds the new certificate' 0 "$?"
@@ -263,7 +263,7 @@ test_blocked_valid_certificates_are_visible() {
 
 test_failed_crl_after_revoke_can_be_finished() {
     local out rc serial
-    menu '5\nalice\n2\n1\n0\n' >/dev/null
+    menu '5\nalice\n2\n0\n' >/dev/null
     ok_if 'export exists' test -s "$E/clients/alice.ovpn"
     serial=$(serial_of "$PKI/issued/alice.crt")
     out=$(printf '4\nalice\nalice\n0\n' | FAIL_GENCRL=1 bash "$E/manager.sh" 2>&1)
@@ -307,7 +307,7 @@ test_repair_runs_from_the_settings_menu() {
 
 test_timer_repair_leaves_a_visible_unfinished_revocation() {
     local out rc
-    menu '5\nalice\n2\n1\n0\n' >/dev/null
+    menu '5\nalice\n2\n0\n' >/dev/null
     printf '4\nalice\nalice\n0\n' | FAIL_GENCRL=1 bash "$E/manager.sh" >/dev/null 2>&1
     out=$(maintain --auto); rc=$?
     rc_is 'timer repairs the CRL' 0 "$rc"
@@ -371,7 +371,7 @@ test_revoked_name_can_be_issued_again() {
 
 test_name_reuse_requires_a_finished_revocation() {
     local out
-    menu '5\nalice\n2\n1\n0\n' >/dev/null
+    menu '5\nalice\n2\n0\n' >/dev/null
     printf '4\nalice\nalice\n0\n' | FAIL_GENCRL=1 bash "$E/manager.sh" >/dev/null 2>&1
     out=$(menu '1\nalice\n\n0\n')
     has 'refused while the old certificate is not blocked' 'the published CRL has a problem' "$out"
@@ -1396,7 +1396,7 @@ test_link_server_ends_when_idle() {
 
 test_share_questions() {
     local out
-    out=$(menu '5\nalice\n2\n1\n0\n')
+    out=$(menu '5\nalice\n2\n0\n')
     has 'the question has two options' '  2  Keep it on the server: download it with scp or sftp' "$out"
     lacks 'the QR code is not one of them' 'QR code: scan it' "$out"
     has 'keeping it says where the file is' 'Kept on the server' "$out"
@@ -1412,14 +1412,19 @@ test_share_questions() {
 }
 
 test_share_password() {
-    local out password
-    out=$(menu '5\nalice\n2\n2\n0\n')
+    local out password profile
+    lacks 'keeping the file on the server asks no password' 'Lock the private key' "$(menu '5\nalice\n2\n0\n')"
+    start_links_stub
+    out=$(menu '5\nalice\n1\n2\n0\n')
+    stop_links_stub
     has 'the password is shown once' 'shown only now' "$out"
     password=$(grep -A1 '^Password:$' <<<"$out" | tail -n 1)
     [[ $password =~ ^[a-km-np-z2-9]{9}$ ]]; rc_is 'the password is nine characters in one piece, without look-alike characters' 0 "$?"
-    grep -q 'ENCRYPTED PRIVATE KEY' "$E/clients/alice.ovpn"; rc_is 'the key in the profile is locked' 0 "$?"
-    if grep -q 'BEGIN PRIVATE KEY' "$E/clients/alice.ovpn"; then result 0 'no open key in the profile'; else result 1 'no open key in the profile'; fi
-    sed -n '/<key>/,/<\/key>/p' "$E/clients/alice.ovpn" | sed '1d;$d' > "$E/locked.key"
+    # The link holds its own copy of the profile.
+    profile=$(find "$E/links" -name '*.ovpn' | head -n 1)
+    grep -q 'ENCRYPTED PRIVATE KEY' "$profile"; rc_is 'the key in the profile is locked' 0 "$?"
+    if grep -q 'BEGIN PRIVATE KEY' "$profile"; then result 0 'no open key in the profile'; else result 1 'no open key in the profile'; fi
+    sed -n '/<key>/,/<\/key>/p' "$profile" | sed '1d;$d' > "$E/locked.key"
     openssl pkey -in "$E/locked.key" -passin "pass:$password" -noout 2>/dev/null; rc_is 'the password opens it' 0 "$?"
     openssl asn1parse -in "$E/locked.key" 2>/dev/null | grep -q 'INTEGER *:0927C0'; rc_is 'guessing it is slowed by 600000 rounds' 0 "$?"
     openssl pkey -in "$E/locked.key" -passin pass:wrong -noout 2>/dev/null; rc_not0 'a wrong password does not' "$?"
@@ -2350,6 +2355,52 @@ EOF
     if (( rc != 0 )); then printf '%s\n' "$out" | tail -n 25 | cut -c1-150 | sed 's/^/    | /'; fi
 }
 
+test_own_password_in_a_real_terminal() {
+    # A password of your own: a word or a short phrase of at least 9 characters, in letters every keyboard types.
+    local script=$E/script out rc
+    start_links_stub
+    cat > "$script" <<'EOF'
+Choose [0-9] => 5\r
+Number or name => alice\r
+Enter: Temporary link => \r
+Enter: No password => 2\r
+Password (Enter = the suggested one) => short\r
+Use at least 9 characters => سلام دنیای خوب\r
+Use only English letters => blue sky 42\r
+Enter: Copy link, password and note => 2\r
+Press Enter to return => \r
+Choose [0-9] => 0\r
+EOF
+    out=$(NO_COLOR=1 python3 "$HERE/pty-drive.py" --timeout 30 "$script" -- bash "$E/manager.sh" 2>&1); rc=$?
+    rc_is 'a password of your own' 0 "$rc"
+    out=${out//$'\r'/}
+    has 'it is taken, and says so' 'Your password is used.' "$out"
+    has 'it goes into the block' $'Password:\nblue sky 42\n' "$out"
+    if (( rc != 0 )); then printf '%s\n' "$out" | tail -n 25 | cut -c1-150 | sed 's/^/    | /'; fi
+    stop_links_stub
+}
+
+test_keep_on_server_copies_each_command_in_a_real_terminal() {
+    # Keeping the file is for the admin: no password, and each command can be copied on its own.
+    local script=$E/script out rc copied
+    cat > "$script" <<'EOF'
+Choose [0-9] => 5\r
+Number or name => alice\r
+Enter: Temporary link => 2\r
+Enter: Copy the Windows command => 2\r
+Press Enter to return => \r
+Choose [0-9] => 0\r
+EOF
+    out=$(NO_COLOR=1 python3 "$HERE/pty-drive.py" --timeout 30 "$script" -- bash "$E/manager.sh" 2>&1); rc=$?
+    rc_is 'keeping the file in a real terminal' 0 "$rc"
+    lacks 'no password is asked' 'Lock the private key' "$out"
+    has 'the SFTP address can be copied too' 'Copy the SFTP address' "$out"
+    copied=$(grep -o $'\e]52;c;[A-Za-z0-9+/=]*' <<<"$out" | tail -n 1 | sed 's/^.*;//' | base64 -d 2>/dev/null)
+    [[ $copied == 'scp -P '*' ~/Downloads/' ]]; rc_is 'the second option copies the macOS and Linux command' 0 "$?"
+    has 'it says what to select if copying is not allowed' 'Select the command with the mouse instead.' "$out"
+    if (( rc != 0 )); then printf '%s\n' "$out" | tail -n 25 | cut -c1-150 | sed 's/^/    | /'; fi
+}
+
 test_link_block_and_copy_in_a_real_terminal() {
     # Link, password and note in one block, in the order the copy key copies them; the second option leaves
     # the password out, for sending it another way.
@@ -2362,7 +2413,7 @@ Enter: Create a client => \r
 Client name [client1] => \r
 Enter: Temporary link => \r
 Enter: No password => 2\r
-Password [ => \r
+Password (Enter = the suggested one) => \r
 Enter: Copy link, password and note => 2\r
 client1 is connected from 198.51.100.7 => \r
 Choose [0-9] => 0\r
@@ -2372,6 +2423,8 @@ EOF
     out=${out//$'\r'/}
     link=$(grep -A1 '^Link:$' <<<"$out" | tail -n 1)
     password=$(grep -A1 '^Password:$' <<<"$out" | tail -n 1)
+    has 'the suggestion stands on its own line' "Suggested password:"$'\n'"$password"$'\n' "$out"
+    has 'Enter takes it, and says so' 'The suggested password is used.' "$out"
     [[ $link == https://*/l/* ]]; rc_is 'the link is on the line under Link:' 0 "$?"
     [[ $password =~ ^[a-km-np-z2-9]{9}$ ]]; rc_is 'the password is on the line under Password:' 0 "$?"
     has 'the three come in one block, in this order' "Link:"$'\n'"$link"$'\n'"Password:"$'\n'"$password"$'\n'"Note:"$'\n' "$out"
@@ -2406,7 +2459,7 @@ test_download_uses_a_copy_the_user_can_read() {
     mkdir -p "$home"
     printf '#!/usr/bin/env bash\nif [[ ${1:-} == passwd ]]; then echo "ali:x:1000:1000::%s:/bin/bash"; exit 0; fi\nexec /usr/bin/getent "$@"\n' "$home" > "$E/bin/getent"; chmod +x "$E/bin/getent"
     sed -i 's/^DOWNLOAD_SSH_USER=.*/DOWNLOAD_SSH_USER=ali/' "$E/cfg/config"
-    out=$(printf '5\nalice\n2\n1\n\n0\n' | bash "$E/manager.sh" 2>&1)
+    out=$(printf '5\nalice\n2\n\n0\n' | bash "$E/manager.sh" 2>&1)
     has 'the command fetches the copy' "ali@" "$out"
     has 'from the user home' "$home/alice.ovpn" "$out"
     ok_if 'the copy exists' test -s "$home/alice.ovpn"
@@ -2415,12 +2468,12 @@ test_download_uses_a_copy_the_user_can_read() {
     ok_if 'and deletes it' test ! -e "$home/alice.ovpn"
     # A file of the same name that is not this client's profile stays.
     echo 'not a profile' > "$home/alice.ovpn"
-    menu '5\nalice\n2\n1\n\n0\n' >/dev/null
+    menu '5\nalice\n2\n\n0\n' >/dev/null
     echo 'not a profile' > "$home/alice.ovpn"
     menu '6\n1\n2\n0\n' >/dev/null
     grep -q 'not a profile' "$home/alice.ovpn"; rc_is 'a file that is not the profile stays' 0 "$?"
     menu '1\nbob\n0\n' >/dev/null
-    printf '5\nbob\n2\n1\n\n0\n' | bash "$E/manager.sh" >/dev/null 2>&1
+    printf '5\nbob\n2\n\n0\n' | bash "$E/manager.sh" >/dev/null 2>&1
     ok_if 'bob has a user copy' test -s "$home/bob.ovpn"
     revoke_menu bob >/dev/null
     ok_if 'revoking deletes the user copy' test ! -e "$home/bob.ovpn"

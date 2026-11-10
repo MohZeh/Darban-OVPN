@@ -107,8 +107,8 @@ Open UDP 1194 in your server
 Enter: Create a client => \r
 Client name [client1] => accept1\r
 Enter: Temporary link => 2\r
-Enter: No password => \r
 Kept on the server
+Enter: Copy the Windows command => 4\r
 Waiting for accept1 to connect => \r
 Choose [0-9] => 0\r
 EOF
@@ -130,7 +130,7 @@ cat > "$LOG/share.keys" <<'EOF'
 Choose [0-9] => 5\r
 Number or name => accept1\r
 Enter: Temporary link => 2\r
-Enter: No password => \r
+Enter: Copy the Windows command => 4\r
 accept1 is connected from => \r
 Choose [0-9] => 0\r
 EOF
