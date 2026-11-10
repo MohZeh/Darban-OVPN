@@ -106,9 +106,10 @@ cat > "$LOG/welcome.keys" <<'EOF'
 Open UDP 1194 in your server
 Enter: Create a client => \r
 Client name [client1] => accept1\r
-Enter: Temporary link => 4\r
+Enter: Temporary link => 2\r
+Enter: No password => \r
 Kept on the server
-Press Enter to return => \r
+Waiting for accept1 to connect => \r
 Choose [0-9] => 0\r
 EOF
 in_terminal welcome 60 darban welcome
@@ -126,12 +127,10 @@ echo 'PASS: the connected client is listed.'
 
 # The tool waits for the connection after sharing, and another SSH user gets a copy it can read.
 cat > "$LOG/share.keys" <<'EOF'
-Choose [0-9] => 4\r
+Choose [0-9] => 5\r
 Number or name => accept1\r
-Enter: Temporary link => 3\r
+Enter: Temporary link => 2\r
 Enter: No password => \r
-Enter: Windows => \r
-Enter: Keep it and return => \r
 accept1 is connected from => \r
 Choose [0-9] => 0\r
 EOF
@@ -145,7 +144,7 @@ fi
 echo 'PASS: the tool saw the real connection after sharing.'
 
 # Revoked while connected: only this session ends, without restarting OpenVPN for everyone.
-printf '3\naccept1\naccept1\n0\n' | darban | tee "$LOG/revoke.log"
+printf '4\naccept1\naccept1\n0\n' | darban | tee "$LOG/revoke.log"
 grep -q 'Active session of accept1 disconnected' "$LOG/revoke.log"
 echo 'PASS: revoking ends the active session of that client alone.'
 disconnect
@@ -154,7 +153,7 @@ if connect "$LOG/old.ovpn" "$LOG/b.log"; then echo 'FAIL: the revoked profile st
 disconnect
 echo 'PASS: the revoked profile was refused.'
 
-printf '2\naccept1\n0\n' | darban
+printf '1\naccept1\n0\n' | darban
 connect /root/openvpn-clients/accept1.ovpn "$LOG/c.log"
 echo 'PASS: a new certificate under the same name connects.'
 disconnect
@@ -165,13 +164,13 @@ echo 'PASS: the old profile stays refused after the name was reused.'
 darban list --all
 
 # Advanced settings against the real service: a good change is applied, and a broken one is rolled back.
-printf '7\n3\n2\n9.9.9.9\n2\n0\n0\n0\n' | darban
+printf '7\n6\n2\n9.9.9.9\n2\n0\n0\n0\n' | darban
 grep -q 'dhcp-option DNS 9.9.9.9' /etc/openvpn/server/server.conf
 systemctl is-active --quiet "$UNIT"
 mkdir -p "/etc/systemd/system/$UNIT.d"
 printf '[Service]\nExecStartPre=/bin/sh -c "! grep -q 198.51.100.1 /etc/openvpn/server/server.conf"\n' > "/etc/systemd/system/$UNIT.d/acceptance.conf"
 systemctl daemon-reload
-printf '7\n3\n2\n198.51.100.1\n2\n0\n0\n0\n' | darban | tee "$LOG/rollback.log"
+printf '7\n6\n2\n198.51.100.1\n2\n0\n0\n0\n' | darban | tee "$LOG/rollback.log"
 grep -q 'Rolled back' "$LOG/rollback.log"
 if grep -q 198.51.100.1 /etc/openvpn/server/server.conf; then echo 'FAIL: the broken change stayed.'; exit 1; fi
 grep -q 'dhcp-option DNS 9.9.9.9' /etc/openvpn/server/server.conf
@@ -180,7 +179,7 @@ rm -rf "/etc/systemd/system/$UNIT.d"
 systemctl daemon-reload
 echo 'PASS: a change that stops the service is rolled back.'
 
-printf '7\n3\n3\n10.99.0.0\n2\n0\n0\n0\n' | darban
+printf '7\n6\n3\n10.99.0.0\n2\n0\n0\n0\n' | darban
 grep -q '^server 10.99.0.0 255.255.255.0' /etc/openvpn/server/server.conf
 grep -q '10.99.0.0/24' /etc/darban/nat.nft
 nft list table ip darban | grep -q '10.99.0.0/24'
@@ -271,7 +270,7 @@ ip netns exec "$NS" ip link set dt1 mtu 1500
 echo 'PASS: websites load through the VPN on a path with a smaller MTU that drops fragments.'
 # Clients are kept apart, and the cloud metadata service is out of their reach. First without the rule, to
 # show what it prevents on this runner, then with it.
-printf '2\naccept2\n0\n' | darban
+printf '1\naccept2\n0\n' | darban
 ip netns add "$NS-b"
 ip link add dt2 type veth peer name dt3
 ip link set dt3 netns "$NS-b"
@@ -328,7 +327,7 @@ fi
 
 # A real temporary link: it can be opened again until the client connects, and then it ends. The link
 # service asks the real management interface, from inside its sandbox.
-url=$(printf '4\naccept1\n1\n1\n1\n0\n' | darban | grep -oE 'https://[^ ]+/l/[0-9a-f]{64}')
+url=$(printf '5\naccept1\n1\n1\n0\n' | darban | grep -oE 'https://[^ ]+/l/[0-9a-f]{64}')
 curl -ksf "$url" | grep -q 'Download profile'
 curl -ksf -H 'Accept-Language: fa-IR,fa;q=0.9' "$url" | grep -q 'dir="rtl"'
 curl -ksf "$url/file" -o "$LOG/link.ovpn"

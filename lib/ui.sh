@@ -17,7 +17,7 @@ C_RESET='' C_BOLD='' C_DIM='' C_RED='' C_GREEN='' C_YELLOW='' C_CYAN='' C_BLUE='
 #   title and keys cyan, groups and values blue, labels and hints dim, what to type or do magenta,
 #   success green, warning yellow, error and danger red. Every message keeps its symbol and its words too,
 #   so nothing depends on color alone, and NO_COLOR or a pipe loses nothing.
-C_TITLE='' C_GROUP='' C_KEY='' C_VALUE='' C_LABEL='' C_HINT='' C_INFO='' C_CMD='' C_LINK='' C_DANGER=''
+C_TITLE='' C_GROUP='' C_KEY='' C_VALUE='' C_LABEL='' C_HINT='' C_INFO='' C_CMD='' C_LINK='' C_DANGER='' C_SECRET=''
 S_OK='+' S_BAD='x' S_WARN='!' S_URGENT='!!' S_INFO='-' S_LINE='-' S_DOT='*' S_SEP='|' S_ARROW='->' S_ELL='...' S_CRUMB='>' S_POINTER='>' S_UPDOWN='Up/Down'
 UI_CHOOSING=0
 UI_SAVED_STTY=''
@@ -30,6 +30,8 @@ ui_init() {
         C_BLUE=$'\e[34m' C_MAGENTA=$'\e[35m' C_UNDERLINE=$'\e[4m'
         C_TITLE=$C_BOLD$C_CYAN C_GROUP=$C_BOLD$C_BLUE C_KEY=$C_BOLD$C_CYAN C_VALUE=$C_BLUE C_LABEL=$C_DIM C_HINT=$C_DIM
         C_INFO=$C_BLUE C_CMD=$C_BOLD$C_MAGENTA C_LINK=$C_CYAN$C_UNDERLINE C_DANGER=$C_RED
+        # A password is something the person types, so it takes that color, and bold so it cannot be missed.
+        C_SECRET=$C_BOLD$C_MAGENTA
     fi
     # Box/check symbols only when the locale is UTF-8 (e.g. PuTTY with a legacy charset shows garbage).
     if [[ ${LC_ALL:-${LC_CTYPE:-${LANG:-}}} =~ [Uu][Tt][Ff]-?8 ]]; then
@@ -74,6 +76,13 @@ hr() {
     printf '%s%s%s\n' "$C_DIM" "${line// /$S_LINE}" "$C_RESET" || true
 }
 section() { printf '%s %s%s\n' "$C_TITLE" "$1" "$C_RESET" || true; hr; }
+copy_to_clipboard() {
+    # OSC 52: the terminal on the user's own computer puts the text on its clipboard, over SSH too.
+    # Nothing comes back, so nothing here can know whether the terminal allowed it.
+    local data
+    data=$(printf '%s' "$1" | base64 | tr -d '\n') || return 1
+    printf '\e]52;c;%s\a' "$data" || return 1
+}
 clear_screen() {
     # Cursor home + clear visible screen only; scrollback is kept so earlier commands can still be copied.
     if (( UI_CLEAR )); then printf '\e[H\e[2J' || true; fi

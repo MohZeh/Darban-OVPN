@@ -105,9 +105,10 @@ Open **Settings › Advanced**. Items 1 to 6 change `server.conf` and restart Op
 | 4 | Data ciphers | `AES-256-GCM`, `AES-128-GCM`, `CHACHA20-POLY1305`, separated by colons. Others would turn DCO off. Clients with no cipher in common must get a new profile |
 | 5 | Keepalive | Ping interval and timeout in seconds. The timeout must be at least twice the interval |
 | 6 | Log detail | `0` to `6`, where `3` is normal. `4` and up are for troubleshooting and can log private details |
-| 7 | Download access | SSH address, port and user shown in `scp` and `sftp` commands. No restart |
-| 8 | New client lifetime | Days for new client certificates, or `0` for the Easy-RSA default. No restart |
-| 9 | Share link port | TCP port for temporary links. No restart |
+| 7 | New client lifetime | Days for new client certificates, or `0` for the Easy-RSA default. No restart |
+| 8 | Download access | SSH address, port and user shown in `scp` and `sftp` commands. No restart |
+
+The link settings are in **Settings** itself: **Link lifetime**, **Link port** and **Link certificate**. None of them restarts OpenVPN.
 
 **How a change is applied:** you confirm it, `server.conf` is backed up next to itself (the newest five are kept), and OpenVPN restarts. If the UDP port does not return within 5 seconds, the previous file is restored and OpenVPN restarted. If that also fails, an urgent message says so. This check is local: it cannot prove that clients reach the server from the internet.
 
@@ -129,7 +130,7 @@ UPDATE_CHECK=no
 | Port | Needed for |
 |---|---|
 | Your chosen UDP port | VPN clients |
-| 9347, 9563 or 9741 TCP | Temporary links. The first one that no other program uses on any address is chosen and kept, and checked again for each link. If another program has taken it, the tool names that program. These ports are uncommon on purpose: panels such as 3x-ui, and tools such as Portainer, often use 443, 8443 and 9443. **Settings › Advanced › Share link port** sets another one |
+| 9347, 9563 or 9741 TCP | Temporary links. The first one that no other program uses on any address is chosen and kept, and checked again for each link. If another program has taken it, the tool names that program. These ports are uncommon on purpose: panels such as 3x-ui, and tools such as Portainer, often use 443, 8443 and 9443. **Settings › Link port** sets another one |
 | 80 TCP, for a moment | Only for a Let's Encrypt certificate, when it is requested and at each renewal: about every 60 days for a domain name, and for each new six-day certificate of an IP address |
 
 ## The blocklist (CRL)

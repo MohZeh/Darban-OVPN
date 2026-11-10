@@ -43,6 +43,8 @@ DOWNLOAD_SSH_USER=root
 CLIENT_CERT_DAYS=''
 # TCP port of temporary links; empty means the first free one is chosen when it is first needed.
 LINK_PORT=''
+# Hours a temporary link works at most; empty means 24.
+LINK_HOURS=''
 # The menu looks for a new release at most once a day; no turns that off.
 UPDATE_CHECK=yes
 CONFIG_ISSUES=()
@@ -76,6 +78,10 @@ valid_name() { [[ $1 =~ ^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$ && $1 != server && ! $1
 # safe as a file name and as one word of an Easy-RSA argument or a management-interface command.
 valid_link_port() { [[ $1 =~ ^[0-9]{1,5}$ ]] && (( 10#$1 >= 1 && 10#$1 <= 65535 )); }
 valid_client_days() { [[ $1 =~ ^[0-9]{1,4}$ ]] && (( 10#$1 >= 1 && 10#$1 <= 3650 )); }
+# A link holds a private key and stays in chat histories, so it lasts three days at most.
+valid_link_hours() { [[ $1 =~ ^[0-9]{1,2}$ ]] && (( 10#$1 >= 1 && 10#$1 <= 72 )); }
+link_hours() { printf '%s' "${LINK_HOURS:-24}"; }
+hours_label() { if (( $1 == 1 )); then printf '1 hour'; else printf '%s hours' "$1"; fi; }
 valid_existing_name() { [[ $1 =~ ^[A-Za-z0-9][A-Za-z0-9._@+-]{0,127}$ && $1 != server ]]; }
 
 # ---------- action runner ----------
@@ -143,6 +149,7 @@ load_config() {
             DOWNLOAD_SSH_USER) DOWNLOAD_SSH_USER=$value ;;
             CLIENT_CERT_DAYS) CLIENT_CERT_DAYS=$value ;;
             LINK_PORT) LINK_PORT=$value ;;
+            LINK_HOURS) LINK_HOURS=$value ;;
             UPDATE_CHECK) UPDATE_CHECK=$value ;;
             *) CONFIG_ISSUES+=("Unknown setting ignored in $CONFIG_FILE: $key") ;;
         esac
@@ -165,6 +172,10 @@ load_config() {
     if [[ -n $LINK_PORT ]] && ! valid_link_port "$LINK_PORT"; then
         CONFIG_ISSUES+=("Invalid LINK_PORT in $CONFIG_FILE; choosing a free port."); LINK_PORT=''
     fi
+    if [[ -n $LINK_HOURS ]] && ! valid_link_hours "$LINK_HOURS"; then
+        CONFIG_ISSUES+=("Invalid LINK_HOURS in $CONFIG_FILE; links work for 24 hours."); LINK_HOURS=''
+    fi
+    if [[ -n $LINK_HOURS ]]; then LINK_HOURS=$((10#$LINK_HOURS)); fi
     if [[ -z $DOWNLOAD_SSH_HOST ]] && (( ${#CONFIG_ISSUES[@]} == 0 )); then
         CONFIG_ISSUES+=("DOWNLOAD_SSH_HOST is not set in $CONFIG_FILE; download commands are disabled.")
     fi
@@ -526,7 +537,7 @@ download_panel() {
     if cert_exp=$(cert_end_epoch "$DARBAN_PKI/issued/$name.crt"); then kv 'Valid to' "$(describe_expiry "$cert_exp")"; fi
     expected="remote $(domain) $(server_port 2>/dev/null || printf '?')"
     if [[ $current_remote != "$expected" ]]; then
-        warn "This file points to ${current_remote#remote } but the server is now ${expected#remote }. Share it again (menu 4) first."
+        warn "This file points to ${current_remote#remote } but the server is now ${expected#remote }. Share it again (menu 5) first."
     fi
     say
     if [[ -z $DOWNLOAD_SSH_HOST ]]; then
@@ -551,20 +562,6 @@ download_panel() {
     fi
     security_note
     hr
-}
-offer_delete_copy() {
-    # Doubles as the "press Enter" pause after a download panel.
-    local file=$1
-    (( UI_TTY )) || return 0
-    if confirm_choice 'Finished downloading? The server copy can be deleted now.' 'Keep it and return to the menu' 'Delete the server copy' danger; then
-        ca_lock || return 1
-        rm -f -- "$file"
-        if [[ -n $DOWNLOAD_FILE ]]; then rm -f -- "$DOWNLOAD_FILE"; fi
-        ca_unlock
-        ok "Server copy deleted: $file"
-        audit "profile deleted from server: $file"
-        pause
-    fi
 }
 
 # ---------- actions ----------
@@ -599,7 +596,7 @@ set_domain() {
     fi
     audit "server address changed: ${old:-unset} -> $value"
     ok 'Saved.'
-    info 'Profiles downloaded earlier still use the old address; share them again (menu 4).'
+    info 'Profiles downloaded earlier still use the old address; share them again (menu 5).'
 }
 list_clients() {
     local cn status expiry serial e now label rank days name_w=6 out line cell color profile shown reason pending
@@ -622,7 +619,7 @@ list_clients() {
     done < <(client_index_rows)
     LIST_HIDDEN=$hidden
     revoked=$hidden
-    if (( ${#rows[@]} == 0 && hidden == 0 )); then info 'No clients yet. Create one with menu 2.'; return 0; fi
+    if (( ${#rows[@]} == 0 && hidden == 0 )); then info 'No clients yet. Create one with menu 1.'; return 0; fi
     (( name_w <= 32 )) || name_w=32
     if (( ${#rows[@]} > 0 )); then
         printf -v out '  %s%-*s  %-8s  %-10s  %5s  %s%s\n' "$C_BOLD" "$name_w" CLIENT STATUS EXPIRES DAYS PROFILE "$C_RESET"
@@ -771,7 +768,7 @@ create_client() {
     if (( reused )); then audit "client created again with a used name: $name"; else audit "client created: $name"; fi
     info "Building the .ovpn profile${S_ELL}"
     if ! write_profile "$name" no; then
-        fail 'The certificate was issued but the .ovpn export failed. Use Share (menu 4) instead of creating it again.'; return 1
+        fail 'The certificate was issued but the .ovpn export failed. Use Share (menu 5) instead of creating it again.'; return 1
     fi
     ca_unlock
     say
@@ -799,22 +796,20 @@ share_profile() {
     if (( SHARED )) && wait_for_connection "$PICKED"; then no_pause; fi
 }
 share_client() {
-    # share_client <name>: asks how the profile travels and shows only that method.
+    # share_client <name>: asks how the profile travels and shows only that method. The QR code of a link is
+    # offered with the link itself, and the download commands come with keeping the file on the server.
     local name=$1 method
     choose_one "How will $name get this profile?" \
         'Temporary link: send it to the user' \
-        'QR code: scan it with the phone' \
-        'My own computer: scp or sftp command' \
-        'Later: keep it on the server for now' || CHOSEN=4
-    method=$CHOSEN
-    if (( method == 4 )); then
-        info "Kept on the server: $OUT_DIR/$name.ovpn. Share it from menu 4, or delete it from menu 6."
+        'Keep it on the server: download it with scp or sftp' || {
+        info "Kept on the server: $OUT_DIR/$name.ovpn. Share it from menu 5, or delete it from menu 6."
         return 0
-    fi
+    }
+    method=$CHOSEN
     SHARED=1
     say
     # The link's certificate is settled first, because a link without a trusted one gets a word about the password.
-    if (( method == 1 || method == 2 )); then
+    if (( method == 1 )); then
         prepare_link || return 1
         if link_cert_is_trusted; then choose_profile_password; else choose_profile_password untrusted; fi
     else
@@ -828,16 +823,54 @@ share_client() {
     say
     case $method in
         # A link that was cancelled (2) or not made shows no password for it.
-        1) share_by_link "$name" no || { (( $? == 2 )) && { SHARED=0; return 0; }; return 1; } ;;
-        2) share_by_link "$name" yes || { (( $? == 2 )) && { SHARED=0; return 0; }; return 1; } ;;
-        3) share_by_download "$name" ;;
+        1) share_by_link "$name" || return 1 ;;
+        *) share_by_download "$name"; if [[ -n $PROFILE_PASSWORD ]]; then share_password; fi ;;
     esac
-    if [[ -n $PROFILE_PASSWORD ]]; then
-        say
-        printf '%sProfile password, shown only now. Send it another way than the link, for example by SMS or a call:%s\n' "$C_BOLD" "$C_RESET" || true
-        printf '%s\n' "$PROFILE_PASSWORD" || true
-        info 'In OpenVPN Connect, the person can turn on "Save private key password" when importing, so it is asked only once.'
-    fi
+}
+share_text() {
+    # share_text <link> <password> <note>: what goes to the person, each label and value on its own line.
+    local text=''
+    if [[ -n $1 ]]; then text+=$'Link:\n'$1$'\n'; fi
+    if [[ -n $2 ]]; then text+=$'Password:\n'$2$'\n'; fi
+    if [[ -n $3 ]]; then text+=$'Note:\n'$3$'\n'; fi
+    printf '%s' "${text%$'\n'}"
+}
+show_share_block() {
+    # show_share_block <link> <password> <note>: the same lines as share_text, unindented and with no frame, so
+    # one mouse selection from the first label down copies exactly what the copy key copies.
+    say "${C_BOLD}Send this to the person:${C_RESET}"
+    say
+    if [[ -n $1 ]]; then say "${C_BOLD}Link:${C_RESET}"; say "$C_LINK$1$C_RESET"; fi
+    if [[ -n $2 ]]; then say "${C_BOLD}Password:${C_RESET}"; say "$C_SECRET$2$C_RESET"; fi
+    if [[ -n $3 ]]; then say "${C_BOLD}Note:${C_RESET}"; say "$3"; fi
+    say
+}
+offer_copy() {
+    # offer_copy <first label> <extra option or ''> <option> <text> [<option> <text>]...: Enter copies the first
+    # text. Returns 3 when the extra option, placed after the copy options, was chosen. Only a terminal has a
+    # clipboard to reach; a script gets no question, so its answers stay in step.
+    local first=$1 extra=$2 i
+    shift 2
+    (( UI_TTY )) || return 0
+    local -a labels=() texts=()
+    while (( $# >= 2 )); do labels+=("$1"); texts+=("$2"); shift 2; done
+    if [[ -n $extra ]]; then labels+=("$extra"); fi
+    choose_one 'Copy it to your clipboard?' "${labels[@]}" 'Do not copy' || return 0
+    i=$(( CHOSEN - 1 ))
+    if [[ -n $extra ]] && (( i == ${#texts[@]} )); then return 3; fi
+    (( i < ${#texts[@]} )) || return 0
+    copy_to_clipboard "${texts[i]}" || { warn 'Could not copy.'; return 0; }
+    ok 'Copied to your clipboard, if your terminal allows it.'
+    info "If pasting does not give this text, your terminal does not allow it (PuTTY, for example). Select the lines from \"$first:\" down with the mouse instead."
+}
+share_password() {
+    # After a download, the password is all that goes to the person.
+    say
+    info 'The password is shown only now. Send it another way than the file, for example by SMS or a call.'
+    info 'In OpenVPN Connect, the person can turn on "Save private key password" when importing, so it is asked only once.'
+    hr
+    show_share_block '' "$PROFILE_PASSWORD" ''
+    offer_copy Password '' 'Copy the password' "$(share_text '' "$PROFILE_PASSWORD" '')"
 }
 make_password() {
     # Nine characters in one piece: nothing that might or might not belong to it, easy to type on a phone, and
@@ -906,13 +939,11 @@ delete_home_copy() {
     if rm -f -- "$1"; then ok "Copy for $DOWNLOAD_SSH_USER deleted: $1"; audit "profile deleted from server: $1"; else warn "Could not delete the copy for $DOWNLOAD_SSH_USER: $1"; fi
 }
 share_by_download() {
-    local name=$1 only
-    choose_one 'Where will you download it?' 'Windows (PowerShell)' 'macOS or Linux' 'WinSCP or FileZilla (SFTP)' || CHOSEN=1
-    case $CHOSEN in 1) only=windows ;; 2) only=unix ;; *) only=sftp ;; esac
+    # The file stays on the server, with every way to fetch it, now or later.
+    local name=$1
     prepare_download_copy "$OUT_DIR/$name.ovpn"
-    say
-    download_panel "$OUT_DIR/$name.ovpn" "Profile for \"$name\" rebuilt" "$only"
-    offer_delete_copy "$OUT_DIR/$name.ovpn"
+    download_panel "$OUT_DIR/$name.ovpn" "Profile for \"$name\" rebuilt"
+    info "Kept on the server: $OUT_DIR/$name.ovpn. After downloading it, delete it from menu 6."
 }
 tcp_port_open() { timeout 1 bash -c 'exec 3<>"/dev/tcp/127.0.0.1/$0"' "$1" 2>/dev/null; }
 tcp_port_taken() {
@@ -940,7 +971,7 @@ choose_link_port() {
     local candidate
     if [[ -n $LINK_PORT ]]; then
         if tcp_port_taken "$LINK_PORT"; then
-            fail "TCP $LINK_PORT, the port for links, is now used by $(safe_text "$(tcp_port_program "$LINK_PORT")"). Choose another one: Settings $S_CRUMB Advanced $S_CRUMB Share link port."
+            fail "TCP $LINK_PORT, the port for links, is now used by $(safe_text "$(tcp_port_program "$LINK_PORT")"). Choose another one: Settings $S_CRUMB Link port."
             return 1
         fi
         return 0
@@ -952,14 +983,14 @@ choose_link_port() {
             return 0
         fi
     done
-    fail "Ports ${LINK_PORT_CHOICES// /, } are all used by other programs. Choose one: Settings $S_CRUMB Advanced $S_CRUMB Share link port."
+    fail "Ports ${LINK_PORT_CHOICES// /, } are all used by other programs. Choose one: Settings $S_CRUMB Link port."
     return 1
 }
 host_is_ip() { [[ $1 =~ ^[0-9.]+$ ]]; }
 link_cert_usable() {
-    # link_cert_usable <host> [seconds]: valid that much longer, by default longer than the longest link
-    # (24 hours), and for the address clients will open.
-    local host=$1 seconds=${2:-90000} check
+    # link_cert_usable <host> [seconds]: valid that much longer, by default an hour longer than a link lasts,
+    # and for the address clients will open.
+    local host=$1 seconds=${2:-$(( ($(link_hours) + 1) * 3600 ))} check
     [[ -s $LINK_CERT && -s $LINK_KEY ]] || return 1
     openssl x509 -in "$LINK_CERT" -noout -checkend "$seconds" >/dev/null 2>&1 || return 1
     if host_is_ip "$host"; then check=-checkip; else check=-checkhost; fi
@@ -1290,33 +1321,24 @@ prepare_link() {
     ensure_link_cert "$host"
 }
 share_by_link() {
-    local name=$1 want_qr=$2 host minutes label token key now expires url temp
+    local name=$1 host hours minutes label token key now expires url temp note='' qr='Show a QR code' rc
     host=$(domain)
     if link_sees_connections; then
-        info "The link stops working when its time is up, or about 10 seconds after a connection with this profile is seen, whichever comes first. Until then it can be opened again."
+        info "The link stops working after $(hours_label "$(link_hours)"), or about 10 seconds after a connection with this profile is seen, whichever comes first. Until then it can be opened again. To change the time: Settings $S_CRUMB Link lifetime."
     else
-        warn 'This server has no local management interface, so the link cannot see a connection: it works until its time is up.'
+        warn "This server has no local management interface, so the link cannot see a connection: it works for $(hours_label "$(link_hours)")."
     fi
-    while :; do
-        # Esc means no link at all: nothing is created, and the profile stays on the server.
-        choose_one 'At most, how long should the link work?' '24 hours' '1 hour' '15 minutes' || {
-            cancelled
-            info "The client $name still exists. Share it later from menu 4, or revoke it from menu 3."
-            return 2
-        }
-        case $CHOSEN in
-            2) minutes=60 label='1 hour' ;;
-            3) minutes=15 label='15 minutes' ;;
-            *) minutes=1440 label='24 hours' ;;
-        esac
-        # A link must not outlive its certificate. That can only happen with a trusted one that could not be renewed.
-        if link_cert_usable "$host" $(( minutes * 60 )); then break; fi
-        if ! link_cert_usable "$host" 900; then
-            fail 'The link certificate ends in less than 15 minutes, so no link was made. Open TCP 80 in your provider firewall, and share again for a new certificate.'
-            return 1
-        fi
-        warn "The link certificate ends before $label are over. Choose a shorter time."
-    done
+    # A link must not outlive its certificate. That can only happen with a trusted one that could not be renewed:
+    # the link then gets the whole hours the certificate has left.
+    hours=$(link_hours)
+    while (( hours > 0 )) && ! link_cert_usable "$host" $(( hours * 3600 )); do hours=$(( hours - 1 )); done
+    if (( hours == 0 )); then
+        fail 'The link certificate ends in less than an hour, so no link was made. Open TCP 80 in your provider firewall, and share again for a new certificate.'
+        return 1
+    fi
+    label=$(hours_label "$hours")
+    minutes=$(( hours * 60 ))
+    if (( hours < $(link_hours) )); then warn "The link certificate ends sooner than $(hours_label "$(link_hours)"), so this link works for at most $label."; fi
     ca_lock || return 1
     # The answers above took time: this client may have been revoked since.
     client_valid "$name" || { warn "\"$name\" no longer has a valid certificate, so no link was made."; return 1; }
@@ -1345,24 +1367,46 @@ share_by_link() {
     ok "Temporary link for \"$name\""
     hr
     if link_sees_connections; then kv Valid "$label, or until a connection with this profile is seen"; else kv Valid "$label"; fi
-    kv Cancel 'menu 5'
+    kv Cancel 'menu 6'
     say
-    printf '%s%s%s\n' "$C_LINK" "$url" "$C_RESET" || true
-    say
-    if [[ $want_qr == yes ]]; then show_qr "$url"; fi
     warn "TCP $LINK_PORT must be open in your provider firewall."
     if ! link_cert_is_trusted; then
-        warn 'This server has no trusted certificate, so the browser shows a warning for this link.'
+        warn 'This server has no trusted certificate, so the browser shows a warning for this link. The note below tells the person what to do.'
         info "Certificate fingerprint: $(openssl x509 -in "$LINK_CERT" -noout -fingerprint -sha256 | sed 's/^.*=//')"
-        say
         # English only: a terminal shows right-to-left text backwards. The guides have the note in Persian.
-        say 'Send this note with the link:'
-        say 'Your browser will warn that this connection is not private, because this server has no trusted certificate. Only for this link, which came to you straight from me: choose Advanced, then Continue. Never do this for other sites.'
-        if [[ -n $PROFILE_PASSWORD ]]; then say 'The file is locked. Its password comes to you separately.'; fi
-        say
+        note='Your browser will warn that this connection is not private, because this server has no trusted certificate. Only for this link, which came to you straight from me: choose Advanced, then Continue. Never do this for other sites.'
+    fi
+    if [[ -n $PROFILE_PASSWORD ]]; then
+        info 'The password is shown only now. To send it another way than the link, for example by SMS or a call, copy without it.'
+        info 'In OpenVPN Connect, the person can turn on "Save private key password" when importing, so it is asked only once.'
     fi
     info "Until the link ends, anyone who has it can get this profile. If a connection you did not expect shows up, revoke the client and issue a new one."
     hr
+    show_share_block "$url" "$PROFILE_PASSWORD" "$note"
+    hr
+    # The QR code holds the same link, for a phone in front of you; once drawn, the question comes back without it.
+    while :; do
+        rc=0
+        if [[ -n $PROFILE_PASSWORD ]]; then
+            offer_copy Link "$qr" \
+                "$(copy_label "$note" password)" "$(share_text "$url" "$PROFILE_PASSWORD" "$note")" \
+                'Copy without the password' \
+                "$(share_text "$url" '' "${note:+$note }The file is locked. Its password comes to you separately.")" || rc=$?
+        else
+            offer_copy Link "$qr" "$(copy_label "$note")" "$(share_text "$url" '' "$note")" || rc=$?
+        fi
+        (( rc == 3 )) || break
+        say
+        show_qr "$url"
+        qr=''
+    done
+}
+copy_label() {
+    # copy_label <note> [password]: names what the first copy option holds.
+    if [[ -n ${2:-} && -n $1 ]]; then printf 'Copy link, password and note'
+    elif [[ -n ${2:-} ]]; then printf 'Copy link and password'
+    elif [[ -n $1 ]]; then printf 'Copy link and note'
+    else printf 'Copy the link'; fi
 }
 show_qr() {
     local marker=$CONFIG_DIR/.server-setup-started
@@ -1378,9 +1422,11 @@ show_qr() {
         say
     fi
 }
-active_links() {
-    local meta name state expires now minutes i
-    local -a files=()
+pending_shares() {
+    # What was shared but may not be picked up yet: links still open, and profile files left on the server.
+    # Each row has one action: a link is cancelled, a file is deleted.
+    local meta name state expires now minutes left i cn path serial
+    local -a kinds=() refs=() names=() whats=() states=()
     now=$(date -u +%s)
     if [[ -d $LINK_DIR ]]; then
         for meta in "$LINK_DIR"/*.meta; do
@@ -1390,42 +1436,52 @@ active_links() {
                 rm -f -- "$meta" "${meta%.meta}.ovpn"
                 continue
             fi
-            files+=("$meta")
+            name=$(awk -F= '$1=="name" {print $2}' "$meta")
+            state=$(awk -F= '$1=="downloads" {print $2}' "$meta")
+            if [[ $state =~ ^[1-9][0-9]*$ ]]; then state=downloaded; else state='not downloaded'; fi
+            minutes=$(( (expires - now + 59) / 60 ))
+            left="$minutes min"
+            if (( minutes >= 60 )); then left="$(( minutes / 60 )) h"; fi
+            if (( minutes >= 60 && minutes % 60 )); then left+=" $(( minutes % 60 )) min"; fi
+            kinds+=(link) refs+=("$meta") names+=("$name") whats+=("link, $left left") states+=("$state")
         done
     fi
-    if (( ${#files[@]} == 0 )); then info 'No active links. Create one from menu 4.'; return 0; fi
-    printf '  %s%3s  %-24s %-16s %s%s\n' "$C_BOLD" '' CLIENT STATUS 'TIME LEFT' "$C_RESET"
-    for i in "${!files[@]}"; do
-        name=$(awk -F= '$1=="name" {print $2}' "${files[i]}")
-        state=$(awk -F= '$1=="downloads" {print $2}' "${files[i]}")
-        expires=$(awk -F= '$1=="expires" {print $2}' "${files[i]}")
-        minutes=$(( (expires - now + 59) / 60 ))
-        if [[ $state =~ ^[1-9][0-9]*$ ]]; then state=downloaded; else state='not downloaded'; fi
-        printf '  %s%3d%s  %-24s %-16s %d min\n' "$C_KEY" $((i + 1)) "$C_RESET" "$(safe_text "$name")" "$state" "$minutes"
+    while IFS=$'\t' read -r cn _ _ serial; do
+        if is_server_serial "$serial"; then continue; fi
+        path=$(profile_path "$cn") || continue
+        kinds+=(file) refs+=("$path") names+=("$cn") whats+=('file on the server') states+=("$path")
+    done < <(client_effective_rows)
+    if (( ${#kinds[@]} == 0 )); then info 'Nothing is waiting to be picked up. Share a profile from menu 5.'; return 0; fi
+    printf '  %s%3s  %-20s %-24s %s%s\n' "$C_BOLD" '' CLIENT 'WAITING AS' STATUS "$C_RESET"
+    for i in "${!kinds[@]}"; do
+        printf '  %s%3d%s  %-20s %-24s %s\n' "$C_KEY" $((i + 1)) "$C_RESET" "$(safe_text "${names[i]}")" "${whats[i]}" "${states[i]}"
     done
     say
     while :; do
-        if ! ask 'Number to cancel (Enter = back): ' || [[ -z $REPLY ]]; then return 0; fi
-        if [[ $REPLY =~ ^[0-9]+$ ]] && (( 10#$REPLY >= 1 && 10#$REPLY <= ${#files[@]} )); then
-            meta=${files[10#$REPLY - 1]}
-            name=$(awk -F= '$1=="name" {print $2}' "$meta")
-            rm -f -- "$meta" "${meta%.meta}.ovpn"
-            audit "temporary link cancelled: $name"
-            ok "Link for \"$(safe_text "$name")\" cancelled."
-            return 0
+        if ! ask 'Number to cancel the link or delete the file (Enter = back): ' || [[ -z $REPLY ]]; then return 0; fi
+        if [[ $REPLY =~ ^[0-9]+$ ]] && (( 10#$REPLY >= 1 && 10#$REPLY <= ${#kinds[@]} )); then
+            i=$(( 10#$REPLY - 1 ))
+            if [[ ${kinds[i]} == link ]]; then
+                rm -f -- "${refs[i]}" "${refs[i]%.meta}.ovpn"
+                audit "temporary link cancelled: ${names[i]}"
+                ok "Link for \"$(safe_text "${names[i]}")\" cancelled."
+            else
+                delete_server_copy "${names[i]}"
+            fi
+            return
         fi
         warn "\"$REPLY\" is not in the list above."
     done
 }
-delete_export() {
-    local path home_copy
-    pick_client 'Delete the server-side .ovpn copy of which client?' can_delete_export || return 0
-    path=$OUT_DIR/$PICKED.ovpn
-    home_copy=$(home_copy_of "$PICKED") || home_copy=''
-    info 'The certificate stays valid and the profile can be re-exported later.'
+delete_server_copy() {
+    # delete_server_copy <name>: the .ovpn file kept on the server, and the copy made for the SSH user.
+    local name=$1 path home_copy
+    path=$OUT_DIR/$name.ovpn
+    home_copy=$(home_copy_of "$name") || home_copy=''
+    info 'The certificate stays valid, and the profile can be shared again later.'
     info 'Copies already downloaded to devices are not affected.'
     if [[ -n $home_copy ]]; then info "The copy made for $DOWNLOAD_SSH_USER is deleted too: $home_copy"; fi
-    confirm_choice "Delete $path?" 'No, keep it' 'Delete the server copy' danger || { cancelled; return 0; }
+    confirm_choice "Delete $path?" 'No, keep it' 'Delete the file' danger || { cancelled; return 0; }
     ca_lock || return 1
     rm -f -- "$path"
     audit "profile deleted from server: $path"
@@ -1503,7 +1559,7 @@ wait_for_connection() {
             return 0
         fi
         if IFS= read -r -t 3 key; then
-            info 'Stopped waiting. Later, check: Maintenance › Connected now.'
+            info 'Stopped waiting. Later, check: menu 3, Connected now.'
             return 0
         fi
     done
@@ -1788,7 +1844,7 @@ change_port() {
     printf '%sWhat happens next:%s\n' "$C_BOLD" "$C_RESET"
     bullet 'OpenVPN restarts: all VPN users are disconnected for a few seconds'
     bullet "if UDP $new is not up within 5 seconds, the previous configuration is restored"
-    bullet 'every downloaded .ovpn must be shared again (menu 4)'
+    bullet 'every downloaded .ovpn must be shared again (menu 5)'
     warn "Open UDP $new in your provider firewall BEFORE continuing; this tool cannot check it."
     say
     confirm_choice "Apply UDP port $new now?" 'No, keep the current port' "Apply port $new" caution "$new" || { cancelled; return 0; }
@@ -1807,7 +1863,7 @@ change_port() {
     say
     ok "OpenVPN is running and listening on UDP $new."
     info 'Test from a real remote client: local checks cannot prove the provider firewall lets traffic through.'
-    info 'Share profiles again (menu 4) so clients use the new port.'
+    info 'Share profiles again (menu 5) so clients use the new port.'
 }
 # ---------- advanced settings ----------
 conf_value() { awk -v k="$1" '$1==k {$1=""; sub(/^ /,""); v=$0} END {print v}' "$DARBAN_SERVER_CONF"; }
@@ -1974,7 +2030,7 @@ set_ciphers() {
     local value=$REPLY
     say
     restart_notice
-    warn 'Clients whose .ovpn has no cipher in common with the new list cannot connect until shared again (menu 4).'
+    warn 'Clients whose .ovpn has no cipher in common with the new list cannot connect until shared again (menu 5).'
     say
     confirm_choice "Use $value?" 'No, keep the current ciphers' 'Apply and restart OpenVPN' caution "$value" || { cancelled; return 0; }
     new_conf_file || return 1
@@ -2027,11 +2083,12 @@ save_config() {
     temp=$(mktemp "$CONFIG_DIR/.config.XXXXXXXX") || return 1
     darban_tmp_register "$temp"
     if [[ -f $CONFIG_FILE ]]; then
-        awk -F= '$1!="DOWNLOAD_SSH_HOST" && $1!="DOWNLOAD_SSH_PORT" && $1!="DOWNLOAD_SSH_USER" && $1!="CLIENT_CERT_DAYS" && $1!="LINK_PORT" && $1!="UPDATE_CHECK"' "$CONFIG_FILE" >"$temp" || return 1
+        awk -F= '$1!="DOWNLOAD_SSH_HOST" && $1!="DOWNLOAD_SSH_PORT" && $1!="DOWNLOAD_SSH_USER" && $1!="CLIENT_CERT_DAYS" && $1!="LINK_PORT" && $1!="LINK_HOURS" && $1!="UPDATE_CHECK"' "$CONFIG_FILE" >"$temp" || return 1
     fi
     printf 'DOWNLOAD_SSH_HOST=%s\nDOWNLOAD_SSH_PORT=%s\nDOWNLOAD_SSH_USER=%s\n' "$DOWNLOAD_SSH_HOST" "$DOWNLOAD_SSH_PORT" "$DOWNLOAD_SSH_USER" >>"$temp" || return 1
     if [[ -n $CLIENT_CERT_DAYS ]]; then printf 'CLIENT_CERT_DAYS=%s\n' "$CLIENT_CERT_DAYS" >>"$temp" || return 1; fi
     if [[ -n $LINK_PORT ]]; then printf 'LINK_PORT=%s\n' "$LINK_PORT" >>"$temp" || return 1; fi
+    if [[ -n $LINK_HOURS ]]; then printf 'LINK_HOURS=%s\n' "$LINK_HOURS" >>"$temp" || return 1; fi
     if [[ $UPDATE_CHECK == no ]]; then printf 'UPDATE_CHECK=no\n' >>"$temp" || return 1; fi
     chmod 600 "$temp" && mv -f -- "$temp" "$CONFIG_FILE" || return 1
     if (( ! held )); then ca_unlock; fi
@@ -2083,6 +2140,16 @@ set_client_days() {
     save_config || { fail 'Could not save the settings.'; return 1; }
     audit "new client lifetime changed: ${CLIENT_CERT_DAYS:-default}"
     ok "New clients last: ${CLIENT_CERT_DAYS:-Easy-RSA default} ${CLIENT_CERT_DAYS:+days}"
+}
+set_link_hours() {
+    kv Current "$(hours_label "$(link_hours)")"
+    info 'The longest time a temporary link works. It usually ends sooner, about 10 seconds after a connection with its profile is seen.'
+    say
+    prompt_valid 'Hours, 1 to 72 (Enter = cancel): ' valid_link_hours 'Enter a whole number of hours from 1 to 72.' || return 0
+    LINK_HOURS=$((10#$REPLY))
+    save_config || { fail 'Could not save the setting.'; return 1; }
+    audit "link lifetime changed: $LINK_HOURS hours"
+    ok "Saved: links work for at most $(hours_label "$LINK_HOURS"). It applies from the next link."
 }
 set_link_port() {
     kv Current "${LINK_PORT:-chosen when needed}"
@@ -2529,21 +2596,22 @@ menu_item() {
 }
 menu_group() { printf ' %s%s%s\n' "$C_GROUP" "$1" "$C_RESET" || true; }
 draw_main() {
+    # Ordered by use: creating a client comes first, and revoking, which cannot be undone, ends its group.
     clear_screen
     title_bar
     status_block
     hr
     menu_group CLIENTS
-    menu_item 1 'List clients'
-    menu_item 2 'Create client'
-    menu_item 3 'Revoke client (permanent)' danger
-    menu_group SHARE
-    menu_item 4 'Share a profile (link, QR, download)'
-    menu_item 5 'Active links'
-    menu_item 6 'Delete server copy'
+    menu_item 1 'Create client'
+    menu_item 2 'List clients'
+    menu_item 3 'Connected now'
+    menu_item 4 'Revoke client (permanent)' danger
+    menu_group SHARING
+    menu_item 5 'Share a profile'
+    menu_item 6 'Waiting to be picked up (links and files)'
     menu_group SERVER
     menu_item 7 'Settings'
-    menu_item 8 'Maintenance & diagnostics'
+    menu_item 8 'Maintenance'
     menu_item 9 'Setup (update, uninstall, remove all)'
     menu_item 0 'Exit'
     hr
@@ -2556,10 +2624,15 @@ draw_settings() {
     port=$(server_port 2>/dev/null || printf '?')
     clear_screen
     title_bar Settings
+    menu_group SERVER
     menu_item 1 "$(printf '%-24s %s' 'Server address' "${host:-not set}")"
     menu_item 2 "$(printf '%-24s %s' 'OpenVPN UDP port' "$port")"
-    menu_item 3 'Advanced'
-    menu_item 4 "$(printf '%-24s %s' 'Link certificate' "$(link_cert_summary | cut -d, -f1)")"
+    menu_group LINKS
+    menu_item 3 "$(printf '%-24s %s' 'Link lifetime' "$(hours_label "$(link_hours)")")"
+    menu_item 4 "$(printf '%-24s %s' 'Link port' "${LINK_PORT:-chosen when needed}")"
+    menu_item 5 "$(printf '%-24s %s' 'Link certificate' "$(link_cert_summary | cut -d, -f1)")"
+    menu_group MORE
+    menu_item 6 'Advanced'
     menu_item 0 'Back'
     hr
 }
@@ -2576,15 +2649,16 @@ draw_advanced() {
     days=${CLIENT_CERT_DAYS:-Easy-RSA default}
     clear_screen
     title_bar "Settings $S_CRUMB Advanced"
+    menu_group VPN
     menu_item 1 "$(printf '%-24s %s' 'Traffic routing' "$routing")"
     menu_item 2 "$(printf '%-24s %s' 'DNS for clients' "${dns:-none pushed}")"
     menu_item 3 "$(printf '%-24s %s' 'VPN network' "${network:-not set}")"
     menu_item 4 "$(printf '%-24s %s' 'Data ciphers' "${ciphers:-OpenVPN default}")"
     menu_item 5 "$(printf '%-24s %s' 'Keepalive' "${keepalive:-not set}")"
     menu_item 6 "$(printf '%-24s %s' 'Log detail' "${verb:-OpenVPN default}")"
-    menu_item 7 "$(printf '%-24s %s' 'Download access' "$download")"
-    menu_item 8 "$(printf '%-24s %s' 'New client lifetime' "$days")"
-    menu_item 9 "$(printf '%-24s %s' 'Share link port' "${LINK_PORT:-chosen when needed}")"
+    menu_group CLIENTS
+    menu_item 7 "$(printf '%-24s %s' 'New client lifetime' "$days")"
+    menu_item 8 "$(printf '%-24s %s' 'Download access' "$download")"
     menu_item 0 'Back'
     hr
     printf ' %sItems 1-6 restart OpenVPN; a change that fails is rolled back.%s\n' "$C_DIM" "$C_RESET" || true
@@ -2594,7 +2668,7 @@ advanced_menu() {
     while :; do
         if (( redraw )); then draw_advanced || true; fi
         redraw=1
-        ask 'Choose [0-9, Enter = back]: ' || return 0
+        ask 'Choose [0-8, Enter = back]: ' || return 0
         case $REPLY in
             1) menu_action 'Traffic routing' set_routing ;;
             2) menu_action 'DNS for clients' set_dns ;;
@@ -2602,11 +2676,10 @@ advanced_menu() {
             4) menu_action 'Data ciphers' set_ciphers ;;
             5) menu_action 'Keepalive' set_keepalive ;;
             6) menu_action 'Log detail' set_verb ;;
-            7) menu_action 'Download access' set_download_access ;;
-            8) menu_action 'New client lifetime' set_client_days ;;
-            9) menu_action 'Share link port' set_link_port ;;
+            7) menu_action 'New client lifetime' set_client_days ;;
+            8) menu_action 'Download access' set_download_access ;;
             0|'') return 0 ;;
-            *) warn "Unknown option \"$REPLY\". Enter a number from 0 to 9."; redraw=0 ;;
+            *) warn "Unknown option \"$REPLY\". Enter a number from 0 to 8."; redraw=0 ;;
         esac
     done
 }
@@ -2615,14 +2688,16 @@ settings_menu() {
     while :; do
         if (( redraw )); then draw_settings || true; fi
         redraw=1
-        ask 'Choose [0-4, Enter = back]: ' || return 0
+        ask 'Choose [0-6, Enter = back]: ' || return 0
         case $REPLY in
             1) menu_action 'Change server address' set_domain ;;
             2) menu_action 'Change OpenVPN UDP port' change_port ;;
-            3) advanced_menu ;;
-            4) menu_action 'Link certificate' change_link_cert ;;
+            3) menu_action 'Link lifetime' set_link_hours ;;
+            4) menu_action 'Link port' set_link_port ;;
+            5) menu_action 'Link certificate' change_link_cert ;;
+            6) advanced_menu ;;
             0|'') return 0 ;;
-            *) warn "Unknown option \"$REPLY\". Enter a number from 0 to 4."; redraw=0 ;;
+            *) warn "Unknown option \"$REPLY\". Enter a number from 0 to 6."; redraw=0 ;;
         esac
     done
 }
@@ -2632,7 +2707,6 @@ draw_maintenance() {
     menu_item 1 'Diagnostics (read-only)'
     menu_item 2 'Repair CRL / finish a revocation'
     menu_item 3 'Restart OpenVPN'
-    menu_item 4 'Connected now'
     menu_item 0 'Back'
     hr
 }
@@ -2641,14 +2715,13 @@ maintenance_menu() {
     while :; do
         if (( redraw )); then draw_maintenance || true; fi
         redraw=1
-        ask 'Choose [0-4, Enter = back]: ' || return 0
+        ask 'Choose [0-3, Enter = back]: ' || return 0
         case $REPLY in
             1) menu_action 'Diagnostics' health ;;
             2) menu_action 'Repair CRL' repair_crl ;;
             3) menu_action 'Restart OpenVPN' restart_openvpn ;;
-            4) menu_action 'Connected now' connected_clients ;;
             0|'') return 0 ;;
-            *) warn "Unknown option \"$REPLY\". Enter a number from 0 to 4."; redraw=0 ;;
+            *) warn "Unknown option \"$REPLY\". Enter a number from 0 to 3."; redraw=0 ;;
         esac
     done
 }
@@ -2784,12 +2857,12 @@ main_menu() {
         redraw=1
         ask 'Choose [0-9]: ' || program_exit
         case $REPLY in
-            1) menu_action 'Clients' list_menu ;;
-            2) menu_action 'Create client' create_client ;;
-            3) menu_action 'Revoke client (permanent)' revoke_client ;;
-            4) menu_action 'Share a profile' share_profile ;;
-            5) menu_action 'Active links' active_links ;;
-            6) menu_action 'Delete server copy' delete_export ;;
+            1) menu_action 'Create client' create_client ;;
+            2) menu_action 'Clients' list_menu ;;
+            3) menu_action 'Connected now' connected_clients ;;
+            4) menu_action 'Revoke client (permanent)' revoke_client ;;
+            5) menu_action 'Share a profile' share_profile ;;
+            6) menu_action 'Waiting to be picked up' pending_shares ;;
             7) settings_menu ;;
             8) maintenance_menu ;;
             9) setup_menu ;;

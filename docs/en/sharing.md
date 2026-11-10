@@ -2,37 +2,54 @@
 
 [Back to README](../../README.md) · [فارسی](../fa/sharing.md)
 
-A profile (`.ovpn` file) holds a private key: whoever has it can connect as that client. After creating a client, or from menu `4`, choose one way to send it:
+A profile (`.ovpn` file) holds a private key: whoever has it can connect as that client. After creating a client, or from menu `5`, choose one way to send it:
 
 | Way | Best for |
 |---|---|
-| **Temporary link** | Sending it to someone else. This is the usual choice |
-| **QR code** | A phone in front of you |
-| **My own computer** | Fetching the file yourself with `scp` or `sftp` |
-| **Later** | Leaving the file on the server for now |
+| **Temporary link** | Sending it to someone else. This is the usual choice. It can also show a QR code |
+| **Keep it on the server** | Fetching the file yourself with `scp` or `sftp`, now or later |
 
 ## Temporary link
 
 1. Choose **Temporary link**.
-2. Choose the longest time it may work: 24 hours, 1 hour or 15 minutes. Enter means 24 hours.
+2. The link works for at most the time set in **Settings › Link lifetime**: 24 hours, unless you set another whole number of hours from 1 to 72. If the link's certificate ends sooner, the link gets the whole hours the certificate has left, and the tool says so.
 3. Open the TCP port the tool shows in your provider's firewall.
-4. Send the link, and the note if the tool shows one.
+4. Send what the tool shows under **Send this to the person**: the link, and the password and the note when there are any. Enter copies them all; see [Copying what you send](#copying-what-you-send).
 
 The link stops working when its time is up, or about 10 seconds after a connection with this profile is seen, whichever comes first. Until then, the person can open it and download the file again, so a mistake on the phone costs nothing. The person follows [Connect a device](connect-devices.md). There are no permanent links, because a link stays in chat histories.
 
 **If the link stopped working before the person connected:** someone else may have connected with it. Revoke the client and create a new one.
 
-To cancel a link, use menu `5`.
+To cancel a link, use menu `6`.
 
-## QR code
+### Copying what you send
 
-Choose **QR code**, and scan it with the phone. It holds the same temporary link, because a whole profile is usually too large for a readable QR code. The tool offers to install the small `qrencode` package the first time.
+The tool shows the link, the password and the note together, each under its own label:
 
-## My own computer
+```text
+Link:
+https://203.0.113.10:9347/l/…
+Password:
+k7m3xt9vw
+Note:
+Your browser will warn that this connection is not private, …
+```
 
-1. Choose **My own computer**, then your operating system.
-2. Copy the command the tool shows, and run it on your computer.
-3. Choose to delete the server copy when you are done.
+Then it asks **Copy it to your clipboard?**, and Enter copies all of them in this order. With a password, the second option, **Copy without the password**, leaves it out, so you can send it another way.
+
+The text goes over SSH to the clipboard of your own computer. Windows Terminal, kitty, WezTerm and Alacritty allow it, and iTerm2 when its settings allow applications to use the clipboard. PuTTY and the macOS Terminal do not, and neither does tmux unless its `set-clipboard` option is on. The tool cannot see whether it worked. If pasting does not give the text, select the lines from `Link:` down with the mouse: they have no frame and no indent, so the selection holds only that text.
+
+### QR code
+
+For a phone in front of you, choose **Show a QR code** in the copy question, and scan it with the phone. It holds the same temporary link, because a whole profile is usually too large for a readable QR code. The tool offers to install the small `qrencode` package the first time. The copy question then comes back without this option.
+
+## Keep it on the server
+
+Use this when a link cannot be used, for example when your provider does not let you open a TCP port, or to fetch the file to your own computer over SSH.
+
+1. Choose **Keep it on the server**.
+2. The tool shows a command for Windows, one for macOS and Linux, and an address for WinSCP or FileZilla. Run the one for your computer, now or later.
+3. After downloading, delete the server copy from menu `6`.
 
 If you log in with a user other than `root`, that user gets a private copy of the file in its home folder. The address, port and user come from **Settings › Advanced › Download access**.
 
@@ -40,7 +57,7 @@ If you log in with a user other than `root`, that user gets a private copy of th
 
 Usually no password is needed, and Enter means **No password**. A password helps most when the link has no trusted certificate: the browser then cannot tell the real server from one placed in between. A password sent by another route keeps the file useless to anyone who only has the link.
 
-Answer **Yes, make a password**, and the tool suggests a short random password of 9 characters in one piece, such as `k7m3xt9vw`, easy to type on a phone. Press Enter to use it, or type your own of at least 9 characters. It cannot be shown again later. Send it by another route than the link, for example by SMS or a call, so one leak is not enough.
+Answer **Yes, make a password**, and the tool suggests a short random password of 9 characters in one piece, such as `k7m3xt9vw`, easy to type on a phone. Press Enter to use it, or type your own of at least 9 characters. It is shown with the link, and cannot be shown again later. It is safer to send it by another route than the link, for example by SMS or a call, so one leak is not enough: choose **Copy without the password**, and send the password separately.
 
 The app asks for it when connecting. So that it asks only once, turn on **Save private key password** in OpenVPN Connect when importing the profile, or later in the profile's settings.
 
@@ -48,7 +65,7 @@ The key is locked so that each guess takes a long time, which makes a short pass
 
 ## After changing the address or port
 
-Profiles keep the address they were made with. Send them again from menu `4`.
+Profiles keep the address they were made with. Send them again from menu `5`.
 
 ## The browser warning
 
@@ -67,21 +84,21 @@ A **Cloudflare Origin certificate** is not used, and the tool says so. Browsers 
 If a new certificate cannot be had while the current trusted one still works, the current one stays, and the tool says when it ends. Otherwise, if you choose No, or the request fails, the tool makes a self-signed certificate. The link is still encrypted, but the browser cannot confirm that it reaches this server, so it warns. In that case:
 
 - The tool shows the certificate fingerprint. A person who knows how to view certificate details in the browser can compare it with a fingerprint you send another way.
-- Put a password on the key, and send it separately. If the person cannot receive the profile with confidence, use **My own computer** or a trusted certificate.
-- The tool shows a short note to send with the link. It asks the person to go past the warning only for this link, which came straight from you.
+- Put a password on the key, and send it separately. If the person cannot receive the profile with confidence, use **Keep it on the server** or a trusted certificate.
+- The tool adds a short note for the person under `Note:`, and copies it with the link. It asks the person to go past the warning only for this link, which came straight from you.
 
 The tool shows the note in English, because a terminal shows Persian backwards. In Persian, send this:
 
 > مرورگر هشدار می‌دهد که این اتصال خصوصی نیست، چون این سرور گواهی معتبر ندارد. فقط برای همین لینک که مستقیم از من به دستت رسیده، Advanced و بعد Continue را بزن. این کار را برای سایت‌های دیگر نکن.
 
-If you locked the key, add:
+If you send the password separately, add:
 
 > فایل قفل است و رمز آن جداگانه به دستت می‌رسد.
 
 ## How links are protected
 
 - Opening a link or downloading the file does not use it up, so a messenger's preview or a mistake costs nothing.
-- The link ends when a connection with the profile is seen after the link was made. The link service asks OpenVPN's management interface about this every 10 seconds, so a connection shorter than that can be missed. A server without a local management interface, such as one this tool did not set up, cannot see connections: its links work until their time is up, and the tool says so when it makes one. Menu `5` shows whether the file was downloaded.
+- The link ends when a connection with the profile is seen after the link was made. The link service asks OpenVPN's management interface about this every 10 seconds, so a connection shorter than that can be missed. A server without a local management interface, such as one this tool did not set up, cannot see connections: its links work until their time is up, and the tool says so when it makes one. Menu `6` shows whether the file was downloaded.
 - The page is in Persian when the device's language is Persian, and in English otherwise.
 - Only a hash of the link's token stays on the server, so a lost link cannot be shown again.
 - The copy of the profile is kept in `/run/darban-links`, which a reboot clears.

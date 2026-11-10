@@ -1,4 +1,4 @@
-<img src="docs/assets/hero.png" alt="Darban OVPN: your own OpenVPN server, run from one terminal menu. One-time links for sharing profiles, verified revocation and automatic rollback on Ubuntu 24.04 and 26.04." width="100%">
+<img src="docs/assets/hero.png" alt="Darban OVPN: your own OpenVPN server, run from one terminal menu. Temporary links that end at the first connection, verified revocation and automatic rollback on Ubuntu 24.04 and 26.04." width="100%">
 
 <div align="center">
 
@@ -51,7 +51,7 @@ sudo darban
 - See who is connected, and end one client's session without touching the others, when OpenVPN's management interface is available
 
 **Sharing**
-- Temporary links valid for at most 24 hours, 1 hour or 15 minutes, which end sooner once a connection with their profile is seen, and QR codes
+- Temporary links valid for at most 24 hours, or another time from 1 to 72 hours in Settings, which end sooner once a connection with their profile is seen, and QR codes
 - A trusted certificate for links, for a domain name or a public IP address: one already on the server, or a free one from Let's Encrypt
 - Optional short password on the private key, for links without a trusted certificate
 - `scp` and `sftp` commands for your own operating system
@@ -69,7 +69,7 @@ sudo darban
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/assets/how-it-works-dark.png">
-  <img src="docs/assets/how-it-works-light.png" alt="Architecture diagram. An admin reaches the darban tool over SSH. The tool issues and revokes certificates in the Easy-RSA PKI, which produces a verified CRL in crl.pem; a daily timer renews that file. The tool also edits server.conf and rolls back on failure. OpenVPN reads both files. For sharing, the tool creates a one-time link in the link service, and the VPN user downloads the profile over HTTPS. The VPN user connects to OpenVPN through a UDP tunnel, and traffic reaches the internet through NAT." width="100%">
+  <img src="docs/assets/how-it-works-light.png" alt="Architecture diagram. An admin reaches the darban tool over SSH. The tool issues and revokes certificates in the Easy-RSA PKI, which produces a verified CRL in crl.pem; a daily timer renews that file. The tool also edits server.conf and rolls back on failure. OpenVPN reads both files. For sharing, the tool creates a temporary link in the link service, and the VPN user downloads the profile over HTTPS; the link ends at the first connection. The VPN user connects to OpenVPN through a UDP tunnel, and traffic reaches the internet through NAT." width="100%">
 </picture>
 
 Green is management, blue is profile delivery and orange is VPN traffic. The tool is written in Bash, with a small standard-library Python service that runs only while a link exists. See [the case study](docs/case-study.md) for the reasoning behind the main decisions.

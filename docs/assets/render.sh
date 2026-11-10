@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 # Renders the images from their HTML sources with a Chromium browser: docs/assets/render.sh [browser]
 # hero.png and the diagrams are drawn at double size and have transparent corners; the social preview does not.
+# Each image is then kept under 150 KB as a palette PNG made with libimagequant (pngquant, or Pillow's
+# LIBIMAGEQUANT method): 256 colours, and 144 for hero.png, which shows no visible banding at that size.
 set -euo pipefail
 cd -- "$(dirname -- "${BASH_SOURCE[0]}")"
 browser=${1:-${BROWSER_BIN:-chromium}}

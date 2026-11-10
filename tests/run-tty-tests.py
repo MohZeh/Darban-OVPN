@@ -102,7 +102,7 @@ class Manager:
 
     def to_revoke_prompt(self):
         assert self.wait_for('Choose [0-9]'), self.seen[-400:]
-        self.press('3', ENTER)
+        self.press('4', ENTER)
         assert self.wait_for('Number or name'), self.seen[-400:]
         self.press('alice', ENTER)
         assert self.wait_for('Esc: Cancel'), self.seen[-400:]
@@ -214,7 +214,7 @@ def unknown_keys_ignored(m):
 
 def typed_ahead_keys_do_not_answer(m):
     assert m.wait_for('Choose [0-9]')
-    m.press('3', ENTER)
+    m.press('4', ENTER)
     assert m.wait_for('Number or name')
     # 2 and Enter arrive together with the name, before the question has been shown.
     os.write(m.master, ('alice' + ENTER + '2' + ENTER).encode())
@@ -258,7 +258,7 @@ def rows_redraw_in_place(m):
 def restart_needs_two_key_presses(m):
     assert m.wait_for('Choose [0-9]')
     m.press('8', ENTER)
-    assert m.wait_for('Choose [0-4')
+    assert m.wait_for('Choose [0-3')
     m.press('3', ENTER)
     assert m.wait_for('Esc: Cancel')
     check('the option is yellow', '\x1b[33mRestart OpenVPN' in m.seen, repr(m.seen[-400:]))
@@ -268,7 +268,7 @@ def restart_needs_two_key_presses(m):
     with open(m.env_dir + '/stub.log') as handle:
         check('no restart was issued', 'systemctl restart' not in handle.read())
     m.press(ENTER)
-    assert m.wait_for('Choose [0-4')
+    assert m.wait_for('Choose [0-3')
     m.press('3', ENTER)
     assert m.wait_for('Esc: Cancel')
     m.drain()
@@ -290,7 +290,7 @@ def revoke_alice(m):
 
 def list_offers_revoked_history(m):
     revoke_alice(m)
-    m.press('1', ENTER)
+    m.press('2', ENTER)
     assert m.wait_for('Esc: Cancel')
     check('the question is asked', 'Show revoked clients too?' in plain(m.seen), m.seen)
     check('the first view hides the revoked client', 'REVOKED' not in plain(m.seen), m.seen)
@@ -308,7 +308,7 @@ def name_reuse_asks_when_server_settings_exist(m):
         handle.write('ifconfig-push 10.8.0.50 255.255.255.0\n')
     with open(m.env_dir + '/server/server.conf', 'a') as handle:
         handle.write('client-config-dir ccd\n')
-    m.press('2', ENTER)
+    m.press('1', ENTER)
     assert m.wait_for('New client name')
     m.press('alice', ENTER)
     assert m.wait_for('Esc: Cancel')
@@ -326,29 +326,29 @@ def name_reuse_asks_when_server_settings_exist(m):
 
 def share_chooser_moves_with_keys(m):
     assert m.wait_for('Choose [0-9]')
-    m.press('4', ENTER)
+    m.press('5', ENTER)
     assert m.wait_for('Number or name')
     m.press('alice', ENTER)
     assert m.wait_for('Esc: Cancel')
     screen = plain(m.seen)
     check('it asks how to share', 'How will alice get this profile?' in screen, screen)
+    check('with two answers', '2  Keep it on the server' in screen and '3  ' not in screen.split('How will alice')[-1], screen)
     m.drain()
-    m.press(DOWN, DOWN, ENTER)
+    m.press(DOWN, ENTER)
     assert m.wait_for('Esc: Cancel')
     check('it asks about a password', 'Lock the private key' in plain(m.seen), m.seen)
     m.drain()
     m.press(ENTER)
-    assert m.wait_for('Esc: Cancel')
-    check('it asks where to download', 'Where will you download it?' in plain(m.seen), m.seen)
-    m.drain()
-    m.press('2', ENTER)
-    check('only the chosen command is shown', m.wait_for('~/Downloads/'), m.seen)
-    check('the Windows command is not shown', 'USERPROFILE' not in plain(m.seen), m.seen)
+    check('it shows where the file is', m.wait_for('Kept on the server'), m.seen)
+    screen = plain(m.seen)
+    check('with the Windows command', 'USERPROFILE' in screen, screen)
+    check('the macOS and Linux command', '~/Downloads/' in screen, screen)
+    check('and the sftp address', 'sftp://' in screen, screen)
 
 
 def share_esc_means_later(m):
     assert m.wait_for('Choose [0-9]')
-    m.press('4', ENTER)
+    m.press('5', ENTER)
     assert m.wait_for('Number or name')
     m.press('alice', ENTER)
     assert m.wait_for('Esc: Cancel')
