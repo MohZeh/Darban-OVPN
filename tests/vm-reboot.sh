@@ -87,7 +87,7 @@ else
     if in_vm 'sudo darban welcome </dev/null' | grep 'Reboot once' >/dev/null; then echo 'FAIL: a reboot was asked for without a need.'; exit 1; fi
     echo "PASS: kernel $before already has the ovpn module, so nothing was added and no reboot is asked for."
 fi
-in_vm "printf '2\nvmclient\n0\n' | sudo darban" >/dev/null
+in_vm "printf '1\nvmclient\n0\n' | sudo darban" >/dev/null
 in_vm 'sudo cat /root/openvpn-clients/vmclient.ovpn' | sed "s/^remote .*/remote 127.0.0.1 $UDP_PORT/" > "$WORK/client.ovpn"
 
 in_vm 'sudo reboot' || true
