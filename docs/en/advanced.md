@@ -9,7 +9,7 @@ You do not need this page for normal use.
 Download it, read it, then run it:
 
 ```bash
-curl -fsSL https://github.com/MohZeh/Darban-OVPN/releases/download/v1.0.0-rc.5/get.sh -o get.sh
+curl -fsSL https://github.com/MohZeh/Darban-OVPN/releases/download/v1.0.0-rc.6/get.sh -o get.sh
 ```
 
 ```bash
@@ -25,19 +25,19 @@ The one-line command runs `curl` inside `sudo` on purpose. In the form `curl ...
 Use the address of that release. It installs its own version:
 
 ```bash
-sudo bash -c 'curl -fsSL https://github.com/MohZeh/Darban-OVPN/releases/download/v1.0.0-rc.5/get.sh | bash'
+sudo bash -c 'curl -fsSL https://github.com/MohZeh/Darban-OVPN/releases/download/v1.0.0-rc.6/get.sh | bash'
 ```
 
 To go back to an older version on an installed server, name it:
 
 ```bash
-sudo bash -c 'curl -fsSL https://github.com/MohZeh/Darban-OVPN/releases/download/v1.0.0-rc.5/get.sh | bash -s -- --version v1.0.0-rc.4'
+sudo bash -c 'curl -fsSL https://github.com/MohZeh/Darban-OVPN/releases/download/v1.0.0-rc.6/get.sh | bash -s -- --version v1.0.0-rc.5'
 ```
 
 ## Install without questions
 
 ```bash
-sudo bash -c 'set -o pipefail; curl -fsSL https://github.com/MohZeh/Darban-OVPN/releases/download/v1.0.0-rc.5/get.sh | bash -s -- --yes --host vpn.example.com --port 1194'
+sudo bash -c 'set -o pipefail; curl -fsSL https://github.com/MohZeh/Darban-OVPN/releases/download/v1.0.0-rc.6/get.sh | bash -s -- --yes --host vpn.example.com --port 1194'
 ```
 
 `set -o pipefail` makes the command fail when the download fails, so a script that runs it sees the error. Without it, a failed download still ends with status 0, although nothing is installed.
