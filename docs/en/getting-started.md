@@ -68,9 +68,9 @@ A client is one person or device. The tool asks right after the install:
 3. **How will the client get this profile?** Press Enter for **Temporary link**.
 4. **Get a free Let's Encrypt certificate?** This comes only on a public address. Open TCP port 80 in your provider's firewall for a moment, then press Enter for **Yes, get a certificate**: the link then opens without a browser warning. If this server already has a trusted certificate for its address, the tool offers that one first; press Enter to use it. Until you have one, the question comes back with each link. See [The browser warning](sharing.md#the-browser-warning).
 5. **Lock the private key with a password?** Press Enter for no password. See [A password on the key](sharing.md#a-password-on-the-key) for when one helps.
-6. **At most, how long should the link work?** Press Enter for 24 hours. The link usually stops sooner, about 10 seconds after a connection with this profile is seen.
+6. **Copy it to your clipboard?** Press Enter to copy the link, and the password and the note when there are any.
 
-**You should see:** a link that starts with `https://`, and the TCP port it uses.
+**You should see:** under `Send this to the person`, a link that starts with `https://`, and above it the TCP port the link uses. The link works for at most 24 hours, and usually stops sooner, about 10 seconds after a connection with this profile is seen. **Settings › Link lifetime** changes the 24 hours.
 
 **If not:** see [Troubleshooting](troubleshooting.md#the-link-does-not-open).
 
@@ -78,9 +78,9 @@ Open that TCP port in your provider's firewall too, as in step 5. The tool shows
 
 ## Step 7: Send the link
 
-Send the link in any messenger. A link preview does not use it up. It works until its time is up, or until a connection with this profile is seen, and until then the person can open it again.
+Paste what you copied in any messenger, and send it. If nothing was copied, select the lines from `Link:` down with the mouse; see [Copying what you send](sharing.md#copying-what-you-send). A link preview does not use the link up. It works until its time is up, or until a connection with this profile is seen, and until then the person can open it again.
 
-If the link has no trusted certificate, the browser shows a security warning when it is opened. The tool then shows a short note for the person; send it with the link. The same note in Persian is in [The browser warning](sharing.md#the-browser-warning). If you chose a password, send it another way, for example by SMS or a call.
+If the link has no trusted certificate, the browser shows a security warning when it is opened. The tool then adds a short note for the person under `Note:`, and it is copied with the link. The same note in Persian is in [The browser warning](sharing.md#the-browser-warning). If you chose a password, it is safer to send it another way, for example by SMS or a call: choose **Copy without the password**.
 
 ## Step 8: Connect the device
 

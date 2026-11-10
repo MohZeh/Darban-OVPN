@@ -4,6 +4,14 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## [Unreleased]
 
+### Changed
+- The menus are ordered by use and grouped. The main menu: 1 Create client, 2 List clients, 3 Connected now (moved from Maintenance), 4 Revoke client, 5 Share a profile, 6 Waiting to be picked up, 7 Settings, 8 Maintenance, 9 Setup. Settings groups the server address and port, then the link lifetime, port and certificate, then Advanced; the link port moved there from Advanced.
+- "Active links" and "Delete server copy" are one item, **Waiting to be picked up**: open links, with the time left and whether the file was downloaded, then profile files kept on the server. A row's number cancels the link or deletes the file.
+- Sharing a profile asks one question with two answers: a temporary link, or keeping the file on the server with every command to download it, which replaces "My own computer" and "Later". The QR code is no longer a way of its own: it holds the same link, so it is an option of the link's copy question.
+- How long a temporary link works is a setting, **Settings › Link lifetime**: 24 hours by default, or any whole number of hours from 1 to 72. Sharing no longer asks for it. When the link's certificate ends sooner, the link gets the whole hours left, and the tool says so.
+- A temporary link is shown with its password and its note in one block, under `Link:`, `Password:` and `Note:`, with no frame or indent, so one mouse selection takes all of it. The password is bold and colored.
+- After a link, Enter copies that block to the clipboard of your own computer, over SSH, where the terminal allows it (OSC 52). A second option copies it without the password, to send that another way. After a download, the password can be copied the same way.
+
 ## [1.0.0-rc.4] - 2026-11-09
 
 Release candidate for `v1.0.0`, for testing on a server that is not in use. It replaces `v1.0.0-rc.3`, whose setup stopped on a public IP address.

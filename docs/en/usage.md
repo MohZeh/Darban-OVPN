@@ -20,40 +20,36 @@ Risky questions start on the safe answer. Persian digits work too.
 
 ## Add a person or device
 
-1. Press `2` **Create client**, and type a name such as `ali-phone`.
+1. Press `1` **Create client**, and type a name such as `ali-phone`.
 2. Choose how to send the profile. See [Sharing a profile](sharing.md).
 
 Each device should have its own client, so you can remove one without affecting the others.
 
 ## See who is connected
 
-Open **8 Maintenance & diagnostics**, then `4` **Connected now**. The top of the menu also counts them.
+Press `3` **Connected now**. The top of the menu also counts them.
 
 ## See all clients
 
-Press `1` **List clients**. It shows who is valid, and when each certificate expires. Revoked clients are hidden, and the tool offers to show them.
+Press `2` **List clients**. It shows who is valid, and when each certificate expires. Revoked clients are hidden, and the tool offers to show them.
 
 ## Send a profile again
 
 For example, after a new phone or a changed server address:
 
-1. Press `4` **Share a profile**.
+1. Press `5` **Share a profile**.
 2. Choose the client and the way to send it.
 
 ## Remove a person or device
 
-1. Press `3` **Revoke client (permanent)**, and choose the client.
+1. Press `4` **Revoke client (permanent)**, and choose the client.
 2. Press `2` to move to the revoke option, then Enter.
 
 The old profile stops working everywhere, and the current connection of that client ends, while other users stay connected. If ending that one connection is not possible, for example on a server this tool did not set up, the tool says so and asks whether to restart OpenVPN, which drops everyone for a few seconds. If you answer No, the open connection can last up to an hour. This cannot be undone, but you can later create a new client with the same name.
 
-## Cancel a link that was not used
+## Cancel a link, or delete a file left on the server
 
-Press `5` **Active links** and choose the link.
-
-## Delete a profile left on the server
-
-Press `6` **Delete server copy**. The client keeps working. Only the file on the server goes away.
+Press `6` **Waiting to be picked up**. It lists what was shared but may not be picked up yet: open links first, with the time left and whether the file was downloaded, then profile files kept on the server. Type the number of a row: a link is cancelled, and a file is deleted after you confirm. The client keeps working either way.
 
 ## Change the server address or port
 
@@ -63,6 +59,8 @@ Open **7 Settings**:
 - `2` **OpenVPN UDP port**
 
 After changing either one, send the profiles again, because each profile holds the address it was made with. A new port must also be open in your provider's firewall.
+
+The same menu holds the link settings: `3` **Link lifetime**, `4` **Link port** and `5` **Link certificate**. `6` **Advanced** holds the VPN settings; see [Advanced settings](advanced.md#advanced-settings).
 
 ## Update the tool
 
@@ -76,7 +74,7 @@ Only the tool changes. OpenVPN does not restart, and clients stay as they are. I
 
 ## Check the server
 
-Open **8 Maintenance & diagnostics**, then `1` **Diagnostics**, or run:
+Open **8 Maintenance**, then `1` **Diagnostics**, or run:
 
 ```bash
 sudo darban status

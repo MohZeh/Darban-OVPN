@@ -29,7 +29,7 @@ li svg{width:24px;height:24px;flex:none}
 .bar b{width:12px;height:12px;border-radius:50%;margin-right:8px;background:#39424d}
 .bar span{position:absolute;left:0;right:0;text-align:center;font:500 14px "JetBrains Mono",Consolas,monospace;color:var(--dim)}
 pre{margin:0;padding:15px 24px 17px;font:400 16px/1.5 "JetBrains Mono",Consolas,monospace;color:#d9e0e7;font-variant-ligatures:none}
-pre .t{font-weight:700;color:#fff}.d{color:var(--dim)}.r{color:#39434e}.g{color:var(--mint)}.n{color:var(--cyan)}.h{font-weight:700;color:#fff}
+pre .t{font-weight:700;color:#fff}.d{color:var(--dim)}.r{color:#39434e}.g{color:var(--mint)}.n{color:var(--cyan)}.x{color:#ff7b72}.h{font-weight:700;color:#fff}
 .cursor{display:inline-block;width:9px;height:19px;background:var(--mint);vertical-align:-3px}
 </style>
 <script>if(location.hash==='#rounded')document.documentElement.classList.add('rounded')</script>
@@ -46,7 +46,7 @@ pre .t{font-weight:700;color:#fff}.d{color:var(--dim)}.r{color:#39434e}.g{color:
   </div>
   <p class="tag">Your own OpenVPN server,<br><em>run from one terminal menu.</em></p>
   <ul>
-    <li><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="11" fill="rgba(61,220,151,.15)"/><path d="m7 12.4 3.3 3.3L17 9" fill="none" stroke="#3ddc97" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></svg>One-time links for sharing profiles</li>
+    <li><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="11" fill="rgba(61,220,151,.15)"/><path d="m7 12.4 3.3 3.3L17 9" fill="none" stroke="#3ddc97" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></svg>Temporary links that end at the first connection</li>
     <li><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="11" fill="rgba(61,220,151,.15)"/><path d="m7 12.4 3.3 3.3L17 9" fill="none" stroke="#3ddc97" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></svg>Revocation that is verified, not assumed</li>
     <li><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="11" fill="rgba(61,220,151,.15)"/><path d="m7 12.4 3.3 3.3L17 9" fill="none" stroke="#3ddc97" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></svg>Automatic rollback when a change fails</li>
   </ul>
@@ -56,21 +56,21 @@ pre .t{font-weight:700;color:#fff}.d{color:var(--dim)}.r{color:#39434e}.g{color:
   <div class="bar"><b></b><b></b><b></b><span>sudo darban</span></div>
 <pre><span class="t"> Darban OVPN</span>
 <span class="r">──────────────────────────────────────────────────────</span>
-  Server    <span class="g">● active</span> <span class="d">·</span> vpn.example.com:1194/UDP
+  Server    <span class="g">● active</span> <span class="d">·</span> vpn.example.com:1428/UDP
   Blocklist <span class="g">✓</span> valid <span class="d">·</span> 180 days left
   Clients   12 valid <span class="d">·</span> 2 revoked
 <span class="r">──────────────────────────────────────────────────────</span>
 <span class="h"> CLIENTS</span>
-   <span class="n">1</span>  List clients
-   <span class="n">2</span>  Create client
-   <span class="n">3</span>  Revoke client (permanent)
-<span class="h"> SHARE</span>
-   <span class="n">4</span>  Share a profile (link, QR, download)
-   <span class="n">5</span>  Active links
-   <span class="n">6</span>  Delete server copy
+   <span class="n">1</span>  Create client
+   <span class="n">2</span>  List clients
+   <span class="n">3</span>  Connected now
+   <span class="n">4</span>  <span class="x">Revoke client (permanent)</span>
+<span class="h"> SHARING</span>
+   <span class="n">5</span>  Share a profile
+   <span class="n">6</span>  Waiting to be picked up (links and files)
 <span class="h"> SERVER</span>
    <span class="n">7</span>  Settings
-   <span class="n">8</span>  Maintenance &amp; diagnostics
+   <span class="n">8</span>  Maintenance
    <span class="n">9</span>  Setup (update, uninstall, remove all)
    <span class="n">0</span>  Exit</pre>
 </div>

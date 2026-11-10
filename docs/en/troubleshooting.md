@@ -31,7 +31,7 @@ sudo darban status
 | Possible cause | What to do |
 |---|---|
 | Its TCP port is closed in your provider's firewall | Open the port the tool showed with the link |
-| The link expired, was cancelled, or the device already connected | Create a new one from menu `4` |
+| The link expired, was cancelled, or the device already connected | Create a new one from menu `5` |
 | The service did not start | Run the command below |
 
 ```bash

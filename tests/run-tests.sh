@@ -46,7 +46,7 @@ crl_count() { openssl crl -in "$1" -noout -text | grep -c 'Serial Number'; }
 serial_of() { openssl x509 -in "$1" -noout -serial | sed 's/^serial=//'; }
 crl_lists() { openssl crl -in "$1" -noout -text | grep -q "Serial Number: $2"; }
 state_row() { awk -F '\t' -v cn="/CN=$1" '$6==cn {print $1}' "$PKI/index.txt" | tr -d '\n'; }
-revoke_menu() { menu "3\n$1\n$1\n0\n"; }
+revoke_menu() { menu "4\n$1\n$1\n0\n"; }
 # Restores the index as a backup would, including the files the revocation moved away.
 snapshot_index() { cp "$PKI/index.txt" "$E/index.before"; cp "$PKI/issued/alice.crt" "$E/alice.crt"; cp "$PKI/private/alice.key" "$E/alice.key"; }
 restore_index() { cp "$E/index.before" "$PKI/index.txt"; cp "$E/alice.crt" "$PKI/issued/alice.crt"; cp "$E/alice.key" "$PKI/private/alice.key"; }
@@ -55,7 +55,7 @@ lib_verify() { bash -c 'set -uo pipefail; source "$E/lib/common.sh"; darban_veri
 
 test_create_and_revoke_baseline() {
     local out rc serial
-    out=$(menu '2\nbob\n0\n')
+    out=$(menu '1\nbob\n0\n')
     has 'create prints the download panel' 'created and verified' "$out"
     has 'create prints a scp command' 'scp -P 2222' "$out"
     ok_if 'profile written' test -s "$E/clients/bob.ovpn"
@@ -130,7 +130,7 @@ test_index_rollback_cannot_unrevoke() {
     rc_not0 'repair refuses too' "$rc"
     ok_if 'CRL unchanged after repair' cmp -s "$CRL" "$E/crl.keep"
 
-    out=$(menu '2\nbob\n0\n')
+    out=$(menu '1\nbob\n0\n')
     cp "$PKI/index.txt" "$E/index.mid"
     out=$(revoke_menu bob)
     has 'revoke stops before the permanent step' 'No changes made' "$out"
@@ -181,14 +181,14 @@ test_dotted_name_is_fully_managed() {
     has 'list shows the dotted name (C-02)' 'john.doe' "$out"
     has 'list counts it' '2 valid' "$out"
     has 'header agrees with the list' '2 valid' "$(menu '0\n')"
-    out=$(menu '4\njohn.doe\n3\n1\n1\n0\n')
+    out=$(menu '5\njohn.doe\n2\n1\n0\n')
     has 're-export works' 'Profile for "john.doe" rebuilt' "$out"
     ok_if 'profile written' test -s "$E/clients/john.doe.ovpn"
-    has 'download offers it' 'john.doe' "$(menu '4\n\n0\n')"
+    has 'download offers it' 'john.doe' "$(menu '5\n\n0\n')"
     out=$(revoke_menu john.doe)
     has 'revoke works' 'john.doe is revoked.' "$out"
     ok_if 'CRL lists it' crl_lists "$CRL" "$serial"
-    out=$(menu '2\nnew.dotted\n\n0\n')
+    out=$(menu '1\nnew.dotted\n\n0\n')
     has 'new names stay strict' 'Use 1-64 letters' "$out"
 }
 
@@ -202,7 +202,7 @@ test_reissued_name_revokes_the_valid_certificate() {
     has 'list shows the valid certificate (C-02)' 'VALID' "$out"
     lacks 'the default list leaves the history out' 'REVOKED' "$out"
     has 'list --all shows the revoked history' 'REVOKED' "$(mgr list --all)"
-    out=$(menu '4\nalice\n3\n1\n1\n0\n')
+    out=$(menu '5\nalice\n2\n1\n0\n')
     has 're-export works' 'Profile for "alice" rebuilt' "$out"
     grep -q "$(openssl x509 -in "$PKI/issued/alice.crt" -outform PEM | sed -n 2p)" "$E/clients/alice.ovpn"
     rc_is 'the profile holds the new certificate' 0 "$?"
@@ -211,7 +211,7 @@ test_reissued_name_revokes_the_valid_certificate() {
     ok_if 'CRL lists the new serial' crl_lists "$CRL" "$new_serial"
     ok_if 'CRL keeps the old serial' crl_lists "$CRL" "$old_serial"
     rc_is 'both records are revoked' RR "$(state_row alice)"
-    out=$(menu '3\n0\n')
+    out=$(menu '4\n0\n')
     has 'nothing left to revoke' 'No clients are available' "$out"
 }
 
@@ -222,9 +222,9 @@ test_stale_certificate_file_is_refused_with_a_reason() {
     easyrsa build-client-full alice nopass
     # The file on disk is the OLD, revoked certificate, while the index lists a new valid one.
     cp "$E/old.crt" "$PKI/issued/alice.crt"
-    out=$(menu '3\n0\n')
-    has 'revoke explains (C-02)' 'is not the certificate the CA lists as valid' "$out"
     out=$(menu '4\n0\n')
+    has 'revoke explains (C-02)' 'is not the certificate the CA lists as valid' "$out"
+    out=$(menu '5\n0\n')
     has 're-export explains' 'is not the certificate the CA lists as valid' "$out"
     ok_if 'no profile built from the revoked certificate' test ! -e "$E/clients/alice.ovpn"
     has 'list explains' 'cannot be revoked here' "$(mgr list)"
@@ -253,20 +253,20 @@ test_blocked_valid_certificates_are_visible() {
     has 'server-capable: explained' 'spare cannot be revoked here: this certificate can act as a server' "$out"
     has 'list count matches every valid record' '6 valid' "$out"
     has 'header count matches the list' '6 valid' "$(menu '0\n')"
-    out=$(menu '3\n\n0\n')
+    out=$(menu '4\n\n0\n')
     has 'picker still offers alice' 'alice' "$out"
     has 'picker gives the reasons apart' 'Valid, but not available for this action:' "$out"
     has 'picker explains bob' 'bob: pki/issued/bob.crt is missing' "$out"
-    out=$(menu '3\nbob\n\n0\n')
+    out=$(menu '4\nbob\n\n0\n')
     has 'a blocked name cannot be picked' 'is not in the list above' "$out"
 }
 
 test_failed_crl_after_revoke_can_be_finished() {
     local out rc serial
-    menu '4\nalice\n3\n1\n1\n0\n' >/dev/null
+    menu '5\nalice\n2\n1\n0\n' >/dev/null
     ok_if 'export exists' test -s "$E/clients/alice.ovpn"
     serial=$(serial_of "$PKI/issued/alice.crt")
-    out=$(printf '3\nalice\nalice\n0\n' | FAIL_GENCRL=1 bash "$E/manager.sh" 2>&1)
+    out=$(printf '4\nalice\nalice\n0\n' | FAIL_GENCRL=1 bash "$E/manager.sh" 2>&1)
     has 'the failure is urgent (R-03)' 'OpenVPN can still accept it' "$out"
     has 'the next step is named' 'sudo darban repair-crl' "$out"
     lacks 'no false success' 'alice is revoked.' "$out"
@@ -276,7 +276,7 @@ test_failed_crl_after_revoke_can_be_finished() {
     has 'header names the client after a restart' 'NOT blocked yet: alice' "$out"
     has 'list names the client' 'NOT blocked yet: alice' "$(mgr list)"
     has 'status names the client' 'NOT blocked yet: alice' "$(mgr status)"
-    has 'revoke menu points to the repair' 'Finish this first' "$(menu '3\n0\n')"
+    has 'revoke menu points to the repair' 'Finish this first' "$(menu '4\n0\n')"
 
     out=$(FAIL_GENCRL=1 mgr repair-crl); rc=$?
     rc_not0 'a failed repair reports failure' "$rc"
@@ -299,7 +299,7 @@ test_failed_crl_after_revoke_can_be_finished() {
 
 test_repair_runs_from_the_settings_menu() {
     local out
-    printf '3\nalice\nalice\n0\n' | FAIL_GENCRL=1 bash "$E/manager.sh" >/dev/null 2>&1
+    printf '4\nalice\nalice\n0\n' | FAIL_GENCRL=1 bash "$E/manager.sh" >/dev/null 2>&1
     out=$(menu '8\n2\n\n0\n')
     has 'menu item exists' 'Repair CRL / finish a revocation' "$out"
     has 'menu item repairs' 'The CRL is repaired.' "$out"
@@ -307,8 +307,8 @@ test_repair_runs_from_the_settings_menu() {
 
 test_timer_repair_leaves_a_visible_unfinished_revocation() {
     local out rc
-    menu '4\nalice\n3\n1\n1\n0\n' >/dev/null
-    printf '3\nalice\nalice\n0\n' | FAIL_GENCRL=1 bash "$E/manager.sh" >/dev/null 2>&1
+    menu '5\nalice\n2\n1\n0\n' >/dev/null
+    printf '4\nalice\nalice\n0\n' | FAIL_GENCRL=1 bash "$E/manager.sh" >/dev/null 2>&1
     out=$(maintain --auto); rc=$?
     rc_is 'timer repairs the CRL' 0 "$rc"
     ok_if 'export is still there' test -s "$E/clients/alice.ovpn"
@@ -347,7 +347,7 @@ test_revoked_name_can_be_issued_again() {
     old=$(serial_of "$PKI/issued/alice.crt")
     revoke_menu alice >/dev/null
 
-    out=$(menu '2\nalice\n0\n')
+    out=$(menu '1\nalice\n0\n')
     has 'no question is asked: one line explains it' 'old .ovpn files stay blocked' "$out"
     lacks 'nothing to confirm without per-client settings' 'Choose [1-2' "$out"
     has 'the new certificate is issued' 'Client "alice" created and verified' "$out"
@@ -360,7 +360,7 @@ test_revoked_name_can_be_issued_again() {
     out=$(maintain --check); rc_is 'the CRL stays healthy' 0 "$?"
     grep -q 'client created again with a used name: alice' "$STUB_LOG"; rc_is 'reuse is audited' 0 "$?"
 
-    out=$(menu '2\nalice\n\n0\n')
+    out=$(menu '1\nalice\n\n0\n')
     has 'a name with a valid certificate is refused' 'it still has a valid certificate' "$out"
 
     out=$(revoke_menu alice)
@@ -371,23 +371,23 @@ test_revoked_name_can_be_issued_again() {
 
 test_name_reuse_requires_a_finished_revocation() {
     local out
-    menu '4\nalice\n3\n1\n1\n0\n' >/dev/null
-    printf '3\nalice\nalice\n0\n' | FAIL_GENCRL=1 bash "$E/manager.sh" >/dev/null 2>&1
-    out=$(menu '2\nalice\n\n0\n')
+    menu '5\nalice\n2\n1\n0\n' >/dev/null
+    printf '4\nalice\nalice\n0\n' | FAIL_GENCRL=1 bash "$E/manager.sh" >/dev/null 2>&1
+    out=$(menu '1\nalice\n\n0\n')
     has 'refused while the old certificate is not blocked' 'the published CRL has a problem' "$out"
     ok_if 'nothing issued' test ! -e "$PKI/issued/alice.crt"
 
     maintain --auto >/dev/null
-    out=$(menu '2\nalice\n\n0\n')
+    out=$(menu '1\nalice\n\n0\n')
     has 'refused while the revocation is unfinished' 'its revocation is unfinished' "$out"
     mgr repair-crl >/dev/null
 
     mkdir -p "$PKI/reqs"; : > "$PKI/reqs/alice.req"
-    out=$(menu '2\nalice\n\n0\n')
+    out=$(menu '1\nalice\n\n0\n')
     has 'refused while an old request file exists' 'pki/reqs/alice.req is still there' "$out"
     rm "$PKI/reqs/alice.req"
 
-    out=$(menu '2\nalice\n0\n')
+    out=$(menu '1\nalice\n0\n')
     has 'allowed once everything is finished' 'Client "alice" created and verified' "$out"
 }
 
@@ -396,29 +396,29 @@ test_name_reuse_asks_only_when_server_settings_exist() {
     revoke_menu alice >/dev/null
     mkdir -p "$E/server/ccd"; echo 'ifconfig-push 10.8.0.50 255.255.255.0' > "$E/server/ccd/alice"
     echo 'client-config-dir ccd' >> "$SERVER_CONF"
-    out=$(menu '2\nalice\n1\n\n0\n')
+    out=$(menu '1\nalice\n1\n\n0\n')
     has 'the settings file is named' 'ccd/alice and will apply to the new certificate' "$out"
     ok_if 'answering No issues nothing' test ! -e "$PKI/issued/alice.crt"
     rc_is 'answering No leaves the index alone' R "$(state_row alice)"
-    out=$(menu '2\nalice\n2\n0\n')
+    out=$(menu '1\nalice\n2\n0\n')
     has 'answering Yes issues it' 'Client "alice" created and verified' "$out"
 }
 
 test_case_warning_only_for_valid_clients() {
     local out
     if [[ ! -e "$PKI/issued/ALICE.crt" ]]; then
-        out=$(menu '2\nALICE\n1\n\n0\n')
+        out=$(menu '1\nALICE\n1\n\n0\n')
         has 'warns about a valid client with the same letters' 'differing only in letter case: alice' "$out"
     fi
     revoke_menu alice >/dev/null
-    out=$(menu '2\nAlice\n0\n')
+    out=$(menu '1\nAlice\n0\n')
     lacks 'a revoked client does not cause the warning' 'letter case' "$out"
     has 'the client is created' 'Client "Alice" created and verified' "$out"
 }
 
 test_list_hides_revoked_unless_asked() {
     local out rc
-    menu '2\nbob\n0\n' >/dev/null
+    menu '1\nbob\n0\n' >/dev/null
     revoke_menu bob >/dev/null
     out=$(mgr list)
     lacks 'default list hides the revoked client' 'REVOKED' "$out"
@@ -440,16 +440,39 @@ test_list_hides_revoked_unless_asked() {
 test_menu_groups_profile_files_together() {
     local out
     out=$(menu '0\n')
-    has 'revoke sits with clients' '3  Revoke client' "$out"
-    has 'sharing has its own group' 'SHARE' "$out"
-    has 'sharing is in that group' '4  Share a profile' "$out"
-    has 'active links are in that group' '5  Active links' "$out"
-    has 'delete is in that group' '6  Delete server copy' "$out"
+    has 'creating a client comes first' '1  Create client' "$out"
+    has 'who is connected sits with clients' '3  Connected now' "$out"
+    has 'revoke ends the clients group' '4  Revoke client' "$out"
+    has 'sharing has its own group' 'SHARING' "$out"
+    has 'sharing is in that group' '5  Share a profile' "$out"
+    has 'links and files waiting are one item' '6  Waiting to be picked up (links and files)' "$out"
     out=$(menu '7\n0\n0\n')
     has 'settings holds the address' 'Server address' "$out"
+    has 'settings groups the links' $'LINKS\n    3  Link lifetime' "$out"
+    has 'the link port is there' '4  Link port' "$out"
+    has 'advanced comes last' '6  Advanced' "$out"
     lacks 'settings no longer holds maintenance' 'Restart OpenVPN' "$out"
+    lacks 'advanced no longer holds the link port' 'Share link port' "$(menu '7\n6\n0\n0\n0\n')"
     out=$(menu '8\n1\n0\n0\n')
     has 'maintenance runs diagnostics' 'Revocation (CRL)' "$out"
+    lacks 'maintenance no longer lists who is connected' '4  Connected now' "$(menu '8\n0\n0\n')"
+}
+
+test_waiting_lists_links_and_files() {
+    # Menu 6 holds what was shared but may not be picked up yet: open links first, then files on the server.
+    local out
+    start_links_stub
+    menu '1\nbob\n0\n' >/dev/null
+    menu '5\nalice\n1\n1\n0\n' >/dev/null
+    out=$(menu '6\n\n0\n')
+    has 'the link is listed first' '1  alice                link, 24 h left          not downloaded' "$out"
+    has 'then the file on the server' "2  bob                  file on the server       $E/clients/bob.ovpn" "$out"
+    out=$(menu '6\n2\n2\n0\n')
+    has 'a file is deleted after asking' "Deleted: $E/clients/bob.ovpn" "$out"
+    ok_if 'it is gone' test ! -e "$E/clients/bob.ovpn"
+    has 'a link is cancelled' 'Link for "alice" cancelled.' "$(menu '6\n1\n0\n')"
+    has 'then nothing is waiting' 'Nothing is waiting to be picked up' "$(menu '6\n0\n')"
+    stop_links_stub
 }
 
 test_setup_menu_and_commands() {
@@ -699,7 +722,7 @@ test_server_setup_builds_a_server_the_manager_accepts() {
     out=$(bash -c 'set -uo pipefail; source "$E/lib/common.sh"; darban_preflight && darban_crl_configured && darban_verify_crl "$DARBAN_CRL" && darban_server_serial >/dev/null' 2>&1); rc=$?
     rc_is 'the checks the installer runs accept this server' 0 "$rc"
     out=$(maintain --check); rc_is 'the CRL maintainer accepts it' 0 "$?"
-    out=$(menu '2\nfirst\n0\n')
+    out=$(menu '1\nfirst\n0\n')
     has 'the manager creates a client on it' 'Client "first" created and verified' "$out"
     lacks 'the server certificate is not listed' 'darban-server' "$(mgr list)"
     has 'the profile uses the chosen address and port' 'remote vpn.example.com 21194' "$(cat "$E/clients/first.ovpn")"
@@ -921,7 +944,7 @@ built_server() {
     # nftables was already on this server, so the setup must not count it as its own.
     INSTALLED_PKGS=nftables setup_run --port 21194 --yes >/dev/null
     install_removal_scripts
-    menu '2\nfirst\n0\n' >/dev/null
+    menu '1\nfirst\n0\n' >/dev/null
 }
 
 test_remove_everything_removes_only_what_setup_added() {
@@ -1065,69 +1088,69 @@ STUB
 test_advanced_settings_are_applied_and_rolled_back() {
     local out before
     built_server
-    out=$(menu '7\n3\n0\n0\n0\n')
-    has 'settings offers Advanced' '3  Advanced' "$out"
+    out=$(menu '7\n6\n0\n0\n0\n')
+    has 'settings offers Advanced' '6  Advanced' "$out"
     has 'it shows the routing' 'full tunnel' "$out"
     has 'it shows the DNS' '1.1.1.1 8.8.8.8' "$out"
     has 'it shows the network' '10.8.0.0/24' "$out"
     has 'it shows the ciphers' 'AES-256-GCM' "$out"
 
     : > "$STUB_LOG"
-    out=$(menu '7\n3\n2\n9.9.9.9 8.8.4.4\n1\n0\n0\n0\n')
+    out=$(menu '7\n6\n2\n9.9.9.9 8.8.4.4\n1\n0\n0\n0\n')
     has 'option 1 changes nothing' 'Cancelled; nothing changed' "$out"
     if conf_has 'DNS 9.9.9.9'; then result 0 'the DNS stays after No'; else result 1 'the DNS stays after No'; fi
     if grep -q 'systemctl restart' "$STUB_LOG"; then result 0 'no restart after No'; else result 1 'no restart after No'; fi
-    out=$(menu '7\n3\n2\nnot-an-ip\n\n0\n0\n0\n')
+    out=$(menu '7\n6\n2\nnot-an-ip\n\n0\n0\n0\n')
     has 'a bad DNS is asked again' 'Enter one or two IPv4 addresses' "$out"
 
-    out=$(menu '7\n3\n2\n9.9.9.9 8.8.4.4\n2\n0\n0\n0\n')
+    out=$(menu '7\n6\n2\n9.9.9.9 8.8.4.4\n2\n0\n0\n0\n')
     has 'the DNS change is confirmed' 'Applied: DNS 9.9.9.9 8.8.4.4' "$out"
     conf_has 'dhcp-option DNS 9.9.9.9'; rc_is 'the new DNS is in server.conf' 0 "$?"
     if conf_has 'dhcp-option DNS 1.1.1.1'; then result 0 'the old DNS is gone'; else result 1 'the old DNS is gone'; fi
     grep -q 'systemctl restart' "$STUB_LOG"; rc_is 'OpenVPN was restarted' 0 "$?"
     grep -q 'server.conf changed: DNS' "$STUB_LOG"; rc_is 'the change is audited' 0 "$?"
 
-    out=$(menu '7\n3\n1\n2\n0\n0\n0\n')
+    out=$(menu '7\n6\n1\n2\n0\n0\n0\n')
     has 'split tunnel is applied' 'Applied: split tunnel' "$out"
     if conf_has 'redirect-gateway'; then result 0 'split: no redirect'; else result 1 'split: no redirect'; fi
     if conf_has 'dhcp-option DNS'; then result 0 'split: no DNS push'; else result 1 'split: no DNS push'; fi
-    out=$(menu '7\n3\n2\n0\n0\n0\n')
+    out=$(menu '7\n6\n2\n0\n0\n0\n')
     has 'split: DNS is explained, not asked' 'keep their own DNS' "$out"
-    out=$(menu '7\n3\n1\n2\n0\n0\n0\n')
+    out=$(menu '7\n6\n1\n2\n0\n0\n0\n')
     has 'full tunnel is applied' 'Applied: full tunnel' "$out"
     conf_has 'redirect-gateway'; rc_is 'full: redirect is back' 0 "$?"
     conf_has 'dhcp-option DNS 1.1.1.1'; rc_is 'full: default DNS is back' 0 "$?"
 
-    out=$(menu '7\n3\n3\n8.8.8.0\n\n0\n0\n0\n')
+    out=$(menu '7\n6\n3\n8.8.8.0\n\n0\n0\n0\n')
     has 'a public network is asked again' 'Enter a private network' "$out"
-    out=$(menu '7\n3\n3\n172.20.5.0\n0\n0\n0\n')
+    out=$(menu '7\n6\n3\n172.20.5.0\n0\n0\n0\n')
     has 'an overlapping network is refused' 'overlaps the existing route 172.20.0.0/16' "$out"
-    out=$(menu '7\n3\n3\n10.50.0.0\n2\n0\n0\n0\n')
+    out=$(menu '7\n6\n3\n10.50.0.0\n2\n0\n0\n0\n')
     has 'the network change is confirmed' 'Applied: VPN network 10.50.0.0/24' "$out"
     conf_has '^server 10.50.0.0 255.255.255.0'; rc_is 'server.conf has the new network' 0 "$?"
     grep -q 'ip saddr 10.50.0.0/24' "$E/cfg/nat.nft"; rc_is 'NAT follows the new network' 0 "$?"
 
-    out=$(menu '7\n3\n4\nBF-CBC\n\n0\n0\n0\n')
+    out=$(menu '7\n6\n4\nBF-CBC\n\n0\n0\n0\n')
     has 'a non-AEAD cipher is refused' 'Use only the allowed names' "$out"
-    out=$(menu '7\n3\n4\nAES-256-GCM\n2\n0\n0\n0\n')
+    out=$(menu '7\n6\n4\nAES-256-GCM\n2\n0\n0\n0\n')
     has 'the ciphers change' 'Applied: data ciphers AES-256-GCM' "$out"
     conf_has '^data-ciphers AES-256-GCM$'; rc_is 'one data-ciphers line remains' 0 "$?"
-    out=$(menu '7\n3\n5\n10 5\n\n0\n0\n0\n')
+    out=$(menu '7\n6\n5\n10 5\n\n0\n0\n0\n')
     has 'a too short timeout is refused' 'at least twice the first' "$out"
-    out=$(menu '7\n3\n5\n15 90\n2\n0\n0\n0\n')
+    out=$(menu '7\n6\n5\n15 90\n2\n0\n0\n0\n')
     conf_has '^keepalive 15 90$'; rc_is 'keepalive changes' 0 "$?"
-    out=$(menu '7\n3\n6\n4\n2\n0\n0\n0\n')
+    out=$(menu '7\n6\n6\n4\n2\n0\n0\n0\n')
     conf_has '^verb 4$'; rc_is 'log detail changes' 0 "$?"
 
     before=$(cat "$SERVER_CONF")
     cp "$E/cfg/nat.nft" "$E/nat.before"
     fail_restart_when 'keepalive 20 120'
-    out=$(menu '7\n3\n5\n20 120\n2\n0\n0\n0\n')
+    out=$(menu '7\n6\n5\n20 120\n2\n0\n0\n0\n')
     has 'a service that does not come back is rolled back' 'Rolled back' "$out"
     has 'it says nothing changed' 'Nothing was changed' "$out"
     [[ $before == "$(cat "$SERVER_CONF")" ]]; rc_is 'server.conf is exactly as before' 0 "$?"
     fail_restart_when '^server 10.60.0.0'
-    out=$(menu '7\n3\n3\n10.60.0.0\n2\n0\n0\n0\n')
+    out=$(menu '7\n6\n3\n10.60.0.0\n2\n0\n0\n0\n')
     [[ $before == "$(cat "$SERVER_CONF")" ]]; rc_is 'a failed network change restores server.conf' 0 "$?"
     cmp -s "$E/cfg/nat.nft" "$E/nat.before"; rc_is 'a failed network change restores NAT' 0 "$?"
 }
@@ -1135,35 +1158,35 @@ test_advanced_settings_are_applied_and_rolled_back() {
 test_advanced_network_needs_nat_from_this_tool() {
     local out
     echo 'server 10.8.0.0 255.255.255.0' >> "$SERVER_CONF"
-    out=$(menu '7\n3\n3\n0\n0\n0\n')
+    out=$(menu '7\n6\n3\n0\n0\n0\n')
     has 'an existing server keeps its own NAT' 'was not set up by this tool' "$out"
     sed -i '/^server /d' "$SERVER_CONF"
-    out=$(menu '7\n3\n3\n0\n0\n0\n')
+    out=$(menu '7\n6\n3\n0\n0\n0\n')
     has 'another layout is refused' 'another layout' "$out"
 }
 
 test_advanced_download_access_and_client_lifetime() {
     local out end days
     echo '# my note' >> "$E/cfg/config"
-    out=$(menu '7\n3\n7\nsrv.example.com\n2200\n\n0\n0\n0\n')
+    out=$(menu '7\n6\n8\nsrv.example.com\n2200\n\n0\n0\n0\n')
     has 'download access is saved' 'Saved: root@srv.example.com:2200' "$out"
     grep -q '^DOWNLOAD_SSH_HOST=srv.example.com$' "$E/cfg/config"; rc_is 'the host is in the file' 0 "$?"
     grep -q '^DOWNLOAD_SSH_PORT=2200$' "$E/cfg/config"; rc_is 'the port is in the file' 0 "$?"
     grep -q '^# my note$' "$E/cfg/config"; rc_is 'other lines stay' 0 "$?"
-    out=$(menu '7\n3\n7\nbad_host!\n\n99999\n\nBAD USER\n\n0\n0\n0\n')
+    out=$(menu '7\n6\n8\nbad_host!\n\n99999\n\nBAD USER\n\n0\n0\n0\n')
     has 'a bad host is asked again' 'Enter a hostname or an IPv4 address' "$out"
     has 'a bad port is asked again' 'from 1 to 65535' "$out"
     has 'a bad user is asked again' 'valid Linux user name' "$out"
-    out=$(menu '7\n3\n8\n5000\n0\n0\n0\n')
+    out=$(menu '7\n6\n7\n5000\n0\n0\n0\n')
     has 'a bad lifetime is refused' 'Nothing changed' "$out"
-    out=$(menu '7\n3\n8\n100\n0\n0\n0\n')
+    out=$(menu '7\n6\n7\n100\n0\n0\n0\n')
     has 'the lifetime is saved' 'New clients last: 100 days' "$out"
-    out=$(menu '2\nshortlived\n0\n')
+    out=$(menu '1\nshortlived\n0\n')
     has 'a client is created' 'Client "shortlived" created' "$out"
     end=$(openssl x509 -in "$PKI/issued/shortlived.crt" -noout -enddate | sed 's/notAfter=//')
     days=$(( ($(date -u -d "$end" +%s) - $(date -u +%s)) / 86400 ))
     (( days >= 98 && days <= 100 )); rc_is "the new client lasts 100 days (got $days)" 0 "$?"
-    out=$(menu '7\n3\n8\n0\n0\n0\n0\n')
+    out=$(menu '7\n6\n7\n0\n0\n0\n0\n')
     has 'the default can be restored' 'Easy-RSA default' "$out"
     if grep -q CLIENT_CERT_DAYS "$E/cfg/config"; then result 0 'the setting is removed'; else result 1 'the setting is removed'; fi
     has 'status still works' 'Revocation (CRL)' "$(mgr status)"
@@ -1193,12 +1216,12 @@ STUB
 }
 stop_links_stub() { if [[ -s ${LINKS_PIDFILE:-/nonexistent} ]]; then kill "$(cat "$LINKS_PIDFILE")" 2>/dev/null; fi; }
 web() { /usr/bin/curl -ks --max-time 10 "$@"; }
-new_link() { menu "4\n${1:-alice}\n1\n1\n${2:-1}\n0\n" | grep -oE 'https://[^ ]+/l/[0-9a-f]{64}'; }
+new_link() { menu "5\n${1:-alice}\n1\n1\n${2:-1}\n0\n" | grep -oE 'https://[^ ]+/l/[0-9a-f]{64}'; }
 
 test_temporary_link_end_to_end() {
     local url base out head code
     start_links_stub
-    out=$(menu '4\nalice\n1\n1\n1\n0\n')
+    out=$(menu '5\nalice\n1\n1\n0\n')
     has 'the link is shown' "https://127.0.0.1:$LINK_TEST_PORT/l/" "$out"
     has 'it says how long it works' 'Valid     24 hours' "$out"
     has 'without a management interface it says a connection cannot end it' 'the link cannot see a connection' "$out"
@@ -1220,13 +1243,14 @@ test_temporary_link_end_to_end() {
     has 'responses are not cached' 'no-store' "$head"
     has 'responses keep the address private' 'no-referrer' "$head"
 
-    has 'active links shows it not downloaded' 'not downloaded' "$(menu '5\n\n0\n')"
+    has 'active links shows it not downloaded' 'not downloaded' "$(menu '6\n\n0\n')"
+    has 'and the time left in hours and minutes' 'link, 24 h left          not downloaded' "$(menu '6\n\n0\n')"
     head=$(web -D - -o "$E/got.ovpn" "$url/file")
     has 'the file type is what OpenVPN clients expect' 'application/x-openvpn-profile' "$head"
     has 'it downloads under the client name' 'alice.ovpn' "$head"
     grep -q '<key>' "$E/got.ovpn"; rc_is 'the real profile arrives' 0 "$?"
     grep -qx 'setenv FRIENDLY_NAME "alice"' "$E/got.ovpn"; rc_is 'the profile carries the client name for the app' 0 "$?"
-    out=$(menu '5\n\n0\n')
+    out=$(menu '6\n\n0\n')
     lacks 'active links shows it downloaded' 'not downloaded' "$out"
     has 'and still lists it' 'alice' "$out"
     web -o /dev/null "$url/file"; web -o /dev/null "$url/file"
@@ -1276,7 +1300,7 @@ test_link_ends_at_the_first_connection() {
     local url meta created attempt out
     link_mgmt_server
     start_links_stub
-    out=$(menu '4\nalice\n1\n1\n1\n0\n')
+    out=$(menu '5\nalice\n1\n1\n0\n')
     has 'with a management interface it says a connection ends it' 'or about 10 seconds after a connection with this profile is seen' "$out"
     has 'and so does the validity line' 'or until a connection with this profile is seen' "$out"
     url=$(grep -oE 'https://[^ ]+/l/[0-9a-f]{64}' <<<"$out")
@@ -1306,10 +1330,10 @@ test_temporary_link_expiry_cancel_and_revoke() {
     sed -i 's/^expires=.*/expires=1000/' "$meta"
     [[ $(web -o /dev/null -w '%{http_code}' "$url") == 410 ]]; rc_is 'an expired link is refused' 0 "$?"
     [[ $(web -o /dev/null -w '%{http_code}' "$url/file") == 410 ]]; rc_is 'and gives no file' 0 "$?"
-    has 'active links drops an expired link' 'No active links' "$(menu '5\n0\n')"
+    has 'active links drops an expired link' 'Nothing is waiting to be picked up' "$(menu '6\n0\n')"
 
     url=$(new_link alice 2)
-    out=$(menu '5\n1\n0\n')
+    out=$(menu '6\n1\n0\n')
     has 'a link can be cancelled' 'cancelled' "$out"
     [[ $(web -o /dev/null -w '%{http_code}' "$url") == 410 ]]; rc_is 'a cancelled link is refused' 0 "$?"
     ok_if 'a cancelled link leaves no copy' test -z "$(find "$E/links" -name '*.ovpn')"
@@ -1321,28 +1345,26 @@ test_temporary_link_expiry_cancel_and_revoke() {
     stop_links_stub
 }
 
-test_link_time_question_esc_makes_no_link() {
-    # Esc on the time question cancels: no link, no link service, and no password shown for a link.
-    local script=$E/script out rc
+test_link_lifetime_setting() {
+    # The time a link works is a setting, in whole hours from 1 to 72, and sharing no longer asks for it.
+    local out expires now
     start_links_stub
-    cat > "$script" <<'EOF'
-Choose [0-9] => 4\r
-Number or name => alice\r
-Enter: Temporary link => \r
-Enter: No password => \r
-Enter: 24 hours => \e
-Press Enter to return => \r
-Choose [0-9] => 0\r
-EOF
-    out=$(NO_COLOR=1 python3 "$HERE/pty-drive.py" --timeout 30 "$script" -- bash "$E/manager.sh" 2>&1); rc=$?
-    rc_is 'Esc on the time question returns to the menu' 0 "$rc"
-    has 'it says nothing changed' 'Cancelled; nothing changed.' "$out"
-    has 'and that the client still exists' 'The client alice still exists. Share it later from menu 4' "$out"
-    lacks 'no link is shown' '/l/' "$out"
-    ok_if 'no link is stored' test -z "$(find "$E/links" -name '*.meta' 2>/dev/null)"
-    if grep -q 'restart darban-links.service' "$STUB_LOG" 2>/dev/null; then result 0 'the link service is not started'; else result 1 'the link service is not started'; fi
-    ok_if 'the profile stays on the server' test -s "$E/clients/alice.ovpn"
-    if (( rc != 0 )); then printf '%s\n' "$out" | tail -n 25 | cut -c1-150 | sed 's/^/    | /'; fi
+    has 'Settings shows the default' 'Link lifetime            24 hours' "$(menu '7\n0\n0\n')"
+    out=$(menu '7\n3\n73\nabc\n\n0\n0\n')
+    has 'more than three days is refused' 'from 1 to 72' "$out"
+    if grep -q '^LINK_HOURS=' "$E/cfg/config"; then result 0 'nothing is saved then'; else result 1 'nothing is saved then'; fi
+    out=$(menu '7\n3\n6\n0\n0\n')
+    has 'a lifetime is saved' 'Saved: links work for at most 6 hours.' "$out"
+    grep -q '^LINK_HOURS=6$' "$E/cfg/config"; rc_is 'it is in the file' 0 "$?"
+    out=$(menu '5\nalice\n1\n1\n0\n')
+    lacks 'sharing does not ask how long' 'At most, how long' "$out"
+    has 'the link takes the setting' 'Valid     6 hours' "$out"
+    now=$(date -u +%s)
+    expires=$(sed -n 's/^expires=//p' "$E"/links/*.meta | head -n 1)
+    (( expires > now + 6 * 3600 - 120 && expires <= now + 6 * 3600 )); rc_is 'and expires after 6 hours' 0 "$?"
+    menu '6\n1\n0\n' >/dev/null
+    printf 'LINK_HOURS=100\n' >> "$E/cfg/config"
+    has 'a bad value in the file falls back to 24 hours' 'Invalid LINK_HOURS' "$(menu '7\n0\n0\n')"
     stop_links_stub
 }
 
@@ -1364,7 +1386,7 @@ test_link_server_ends_when_idle() {
     kill -0 "$pid"; rc_is 'the server runs while a link exists' 0 "$?"
     sleep 2
     kill -0 "$pid"; rc_is 'it stays up while the link is waiting' 0 "$?"
-    menu '5\n1\n0\n' >/dev/null
+    menu '6\n1\n0\n' >/dev/null
     for attempt in 1 2 3 4 5 6 7 8 9 10; do kill -0 "$pid" 2>/dev/null || break; sleep 0.5; done
     if kill -0 "$pid" 2>/dev/null; then result 0 'it ends when no link is left'; else result 1 'it ends when no link is left'; fi
     stop_links_stub
@@ -1372,27 +1394,26 @@ test_link_server_ends_when_idle() {
 
 test_share_questions() {
     local out
-    out=$(menu '4\nalice\n4\n0\n')
-    has 'Later keeps the file' 'Kept on the server' "$out"
+    out=$(menu '5\nalice\n2\n1\n0\n')
+    has 'the question has two options' '  2  Keep it on the server: download it with scp or sftp' "$out"
+    lacks 'the QR code is not one of them' 'QR code: scan it' "$out"
+    has 'keeping it says where the file is' 'Kept on the server' "$out"
     ok_if 'the file is on the server' test -s "$E/clients/alice.ovpn"
-    out=$(menu '4\nalice\n3\n1\n2\n0\n')
+    has 'with the Windows command' 'USERPROFILE' "$out"
     # shellcheck disable=SC2088  # The literal text the tool prints.
-    has 'only the chosen command is shown' '~/Downloads/' "$out"
-    lacks 'other commands are not shown' 'USERPROFILE' "$out"
-    lacks 'sftp is not shown' 'sftp://' "$out"
-    out=$(menu '4\nalice\n3\n1\n3\n0\n')
-    has 'sftp can be chosen' 'sftp://root@' "$out"
-    lacks 'scp is not shown then' 'scp -P' "$out"
-    out=$(menu '2\nbob\n0\n')
+    has 'the macOS and Linux command' '~/Downloads/' "$out"
+    has 'and the sftp address' 'sftp://root@' "$out"
+    lacks 'and no question about deleting it now' 'Finished downloading?' "$out"
+    out=$(menu '1\nbob\n0\n')
     has 'a script still gets every command' 'USERPROFILE' "$out"
     has 'a script gets every command, sftp too' 'sftp://' "$out"
 }
 
 test_share_password() {
     local out password
-    out=$(menu '4\nalice\n3\n2\n1\n0\n')
+    out=$(menu '5\nalice\n2\n2\n0\n')
     has 'the password is shown once' 'shown only now' "$out"
-    password=$(grep -A1 'shown only now' <<<"$out" | tail -n 1)
+    password=$(grep -A1 '^Password:$' <<<"$out" | tail -n 1)
     [[ $password =~ ^[a-km-np-z2-9]{9}$ ]]; rc_is 'the password is nine characters in one piece, without look-alike characters' 0 "$?"
     grep -q 'ENCRYPTED PRIVATE KEY' "$E/clients/alice.ovpn"; rc_is 'the key in the profile is locked' 0 "$?"
     if grep -q 'BEGIN PRIVATE KEY' "$E/clients/alice.ovpn"; then result 0 'no open key in the profile'; else result 1 'no open key in the profile'; fi
@@ -1413,7 +1434,7 @@ test_first_link_takes_an_uncommon_port() {
 s = socket.socket(); s.bind(("127.0.0.1", 9347)); s.listen(); time.sleep(60)' &
     pid=$!
     sleep 0.5
-    out=$(menu '4\nalice\n1\n1\n1\n0\n')
+    out=$(menu '5\nalice\n1\n1\n0\n')
     has 'a busy first choice is passed over for the next one' 'https://127.0.0.1:9563/l/' "$out"
     grep -qx 'LINK_PORT=9563' "$E/cfg/config"; rc_is 'and it is remembered' 0 "$?"
     kill "$pid" 2>/dev/null
@@ -1429,27 +1450,47 @@ s = socket.socket(); s.bind(("127.0.0.1", int(sys.argv[1]))); s.listen(); time.s
     sleep 0.5
     echo 127.0.0.1 > "$E/cfg/domain"
     printf 'LINK_PORT=%s\n' "$port" >> "$E/cfg/config"
-    out=$(menu '4\nalice\n1\n1\n1\n0\n')
+    out=$(menu '5\nalice\n1\n1\n0\n')
     has 'a link port another program took is named' "TCP $port, the port for links, is now used by python3" "$out"
     lacks 'and no link is made' '/l/' "$out"
-    out=$(menu "7\n3\n9\n$port\n0\n0\n0\n")
+    out=$(menu "7\n4\n$port\n0\n0\n0\n")
     has 'the setting refuses a port in use, and names the program' "TCP $port is already used by python3" "$out"
     kill "$pid" 2>/dev/null
 }
 
-test_share_qr_and_link_port() {
-    local out
+test_share_qr_code_in_a_real_terminal() {
+    # The QR code is one option of the copy question; once drawn, the question comes back without it.
+    local script=$E/script out rc
     start_links_stub
     printf '#!/usr/bin/env bash\necho "qrencode $*" >> "$STUB_LOG"; echo QRCODE-DRAWN\n' > "$E/bin/qrencode"
     chmod +x "$E/bin/qrencode"
-    out=$(menu '4\nalice\n2\n1\n1\n0\n')
+    cat > "$script" <<'EOF'
+Choose [0-9] => 5\r
+Number or name => alice\r
+Enter: Temporary link => \r
+Enter: No password => \r
+Enter: Copy link and note => 2\r
+QRCODE-DRAWN
+Enter: Copy link and note => 2\r
+Press Enter to return => \r
+Choose [0-9] => 0\r
+EOF
+    out=$(NO_COLOR=1 python3 "$HERE/pty-drive.py" --timeout 30 "$script" -- bash "$E/manager.sh" 2>&1); rc=$?
+    rc_is 'the QR code comes from the copy question' 0 "$rc"
+    has 'it is offered there' '2  Show a QR code' "$out"
     has 'the QR code is drawn' 'QRCODE-DRAWN' "$out"
     grep -q 'qrencode -t ANSIUTF8 https://127.0.0.1' "$STUB_LOG"; rc_is 'the QR holds the link' 0 "$?"
+    lacks 'and is not offered again' 'Show a QR code' "${out#*QRCODE-DRAWN}"
+    lacks 'Do not copy copies nothing' 'Copied to your clipboard' "$out"
+    if (( rc != 0 )); then printf '%s\n' "$out" | tail -n 25 | cut -c1-150 | sed 's/^/    | /'; fi
     stop_links_stub
+}
 
-    out=$(menu '7\n3\n9\nabc\n\n0\n0\n0\n')
+test_link_port_setting() {
+    local out
+    out=$(menu '7\n4\nabc\n\n0\n0\n0\n')
     has 'a bad link port is asked again' 'from 1 to 65535' "$out"
-    out=$(menu '7\n3\n9\n30123\n0\n0\n0\n')
+    out=$(menu '7\n4\n30123\n0\n0\n0\n')
     has 'the link port is saved' 'Saved: TCP 30123' "$out"
     grep -q '^LINK_PORT=30123$' "$E/cfg/config"; rc_is 'it is in the file' 0 "$?"
 }
@@ -1458,18 +1499,18 @@ test_link_certificate_for_a_hostname() {
     local out before
     start_links_stub
     echo vpn.example.com > "$E/cfg/domain"
-    out=$(menu '4\nalice\n1\n2\n1\n1\n0\n')
+    out=$(menu '5\nalice\n1\n2\n1\n0\n')
     has 'a hostname offers a trusted certificate' "Let's Encrypt" "$out"
     has 'declining falls back to a self-signed certificate' 'no trusted certificate' "$out"
     has 'the link uses the hostname' "https://vpn.example.com:$LINK_TEST_PORT/l/" "$out"
     openssl x509 -in "$E/cfg/link-cert.pem" -noout -checkhost vpn.example.com | grep -q 'does match'; rc_is 'the certificate fits the hostname' 0 "$?"
-    menu '5\n1\n0\n' >/dev/null
+    menu '6\n1\n0\n' >/dev/null
     before=$(sha256sum < "$E/cfg/link-cert.pem")
-    out=$(menu '4\nalice\n1\n2\n1\n1\n0\n')
+    out=$(menu '5\nalice\n1\n2\n1\n0\n')
     has 'a self-signed certificate is offered a trusted one again' "Let's Encrypt" "$out"
     [[ $(sha256sum < "$E/cfg/link-cert.pem") == "$before" ]]; rc_is 'declining keeps the current self-signed certificate' 0 "$?"
     has 'and the link is made' "https://vpn.example.com:$LINK_TEST_PORT/l/" "$out"
-    menu '5\n1\n0\n' >/dev/null
+    menu '6\n1\n0\n' >/dev/null
 
     # A trusted certificate valid for weeks is not asked about again.
     mkdir -p "$E/le"
@@ -1477,21 +1518,21 @@ test_link_certificate_for_a_hostname() {
         -days 30 -subj /CN=vpn.example.com -addext subjectAltName=DNS:vpn.example.com >/dev/null 2>&1
     mv "$E/cfg/link-cert.pem" "$E/cfg/link-cert.self"; mv "$E/cfg/link-key.pem" "$E/cfg/link-key.self"
     ln -s "$E/le/fullchain.pem" "$E/cfg/link-cert.pem"; ln -s "$E/le/privkey.pem" "$E/cfg/link-key.pem"
-    out=$(menu '4\nalice\n1\n1\n1\n0\n')
+    out=$(menu '5\nalice\n1\n1\n0\n')
     lacks 'a usable trusted certificate is not asked about again' "Let's Encrypt" "$out"
     has 'and the link is made with it' "https://vpn.example.com:$LINK_TEST_PORT/l/" "$out"
-    menu '5\n1\n0\n' >/dev/null
+    menu '6\n1\n0\n' >/dev/null
     rm -f "$E/cfg/link-cert.pem" "$E/cfg/link-key.pem"
     mv "$E/cfg/link-cert.self" "$E/cfg/link-cert.pem"; mv "$E/cfg/link-key.self" "$E/cfg/link-key.pem"
 
     rm -f "$E/cfg/link-cert.pem" "$E/cfg/link-key.pem"
     printf '#!/usr/bin/env bash\nif [[ $1 == --version ]]; then echo "certbot 2.9.0"; exit 0; fi\necho "certbot $*" >> "$STUB_LOG"; exit 1\n' > "$E/bin/certbot"
     chmod +x "$E/bin/certbot"
-    out=$(menu '4\nalice\n1\n1\n1\n1\n0\n')
+    out=$(menu '5\nalice\n1\n1\n1\n0\n')
     has 'a failed request explains itself' 'certbot could not get a certificate' "$out"
     has 'and still gives a working link' "https://vpn.example.com:$LINK_TEST_PORT/l/" "$out"
     grep -q 'certbot certonly --standalone' "$STUB_LOG"; rc_is 'certbot was asked' 0 "$?"
-    menu '5
+    menu '6
 1
 0
 ' >/dev/null
@@ -1501,31 +1542,13 @@ test_link_certificate_for_a_hostname() {
     openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes -keyout "$E/le/privkey.pem" -out "$E/le/fullchain.pem"         -days 1 -subj /CN=vpn.example.com -addext subjectAltName=DNS:vpn.example.com >/dev/null 2>&1
     rm -f "$E/cfg/link-cert.pem" "$E/cfg/link-key.pem"
     ln -s "$E/le/fullchain.pem" "$E/cfg/link-cert.pem"; ln -s "$E/le/privkey.pem" "$E/cfg/link-key.pem"
-    out=$(menu '4
-alice
-1
-1
-1
-2
-0
-')
+    out=$(menu '5\nalice\n1\n1\n1\n0\n')
     has 'a trusted certificate that still works stays' 'The current trusted certificate stays' "$out"
-    menu '5
-1
-0
-' >/dev/null
-    out=$(menu '4
-alice
-1
-1
-1
-1
-2
-0
-')
-    has 'a link longer than the certificate is refused' 'The link certificate ends before 24 hours are over' "$out"
+    menu '6\n1\n0\n' >/dev/null
+    out=$(menu '5\nalice\n1\n1\n1\n0\n')
+    has 'a link does not outlive the certificate' 'The link certificate ends sooner than 24 hours, so this link works for at most 23 hours.' "$out"
     has 'and a shorter one is made' "https://vpn.example.com:$LINK_TEST_PORT/l/" "$out"
-    has 'for the time chosen after it' 'Valid     1 hour' "$out"
+    has 'for the whole hours left' 'Valid     23 hours' "$out"
     ok_if 'it is not replaced by a self-signed one' test -L "$E/cfg/link-cert.pem"
     has 'and the link is made' "https://vpn.example.com:$LINK_TEST_PORT/l/" "$out"
     stop_links_stub
@@ -1925,7 +1948,7 @@ test_management_is_only_reported_when_it_works() {
 test_disconnect_advice_is_not_an_open_port() {
     local out
     sed -i '/^management /d' "$SERVER_CONF"
-    out=$(printf '3\nalice\nalice\n1\n\n0\n' | bash "$E/manager.sh" 2>&1)
+    out=$(printf '4\nalice\nalice\n1\n\n0\n' | bash "$E/manager.sh" 2>&1)
     has 'it advises a local socket' 'darban.sock unix' "$out"
     lacks 'it does not advise a TCP port' '7505' "$out"
 }
@@ -1933,14 +1956,14 @@ test_disconnect_advice_is_not_an_open_port() {
 test_lock_is_held_only_for_changes() {
     local out
     : > "$STUB_LOG"
-    out=$(printf '3\nalice\n1\n\n0\n' | bash "$E/manager.sh" 2>&1)
+    out=$(printf '4\nalice\n1\n\n0\n' | bash "$E/manager.sh" 2>&1)
     has 'the revoke was cancelled' 'Cancelled' "$out"
     if grep -q '^flock' "$STUB_LOG"; then result 0 'no lock while waiting for an answer'; else result 1 'no lock while waiting for an answer'; fi
     : > "$STUB_LOG"
-    out=$(printf '2\n\n\n0\n' | bash "$E/manager.sh" 2>&1)
+    out=$(printf '1\n\n\n0\n' | bash "$E/manager.sh" 2>&1)
     if grep -q '^flock' "$STUB_LOG"; then result 0 'a cancelled create takes no lock'; else result 1 'a cancelled create takes no lock'; fi
     : > "$STUB_LOG"
-    out=$(printf '3\nalice\nalice\n1\n\n0\n' | bash "$E/manager.sh" 2>&1)
+    out=$(printf '4\nalice\nalice\n1\n\n0\n' | bash "$E/manager.sh" 2>&1)
     has 'a confirmed revoke finishes' 'alice is revoked' "$out"
     grep -q '^flock -n' "$STUB_LOG"; rc_is 'the change takes the lock' 0 "$?"
     grep -q '^flock -u' "$STUB_LOG"; rc_is 'and gives it back before asking about the session' 0 "$?"
@@ -1948,21 +1971,21 @@ test_lock_is_held_only_for_changes() {
 
 test_changes_made_during_a_question_are_noticed() {
     local out
-    out=$(printf '3\nalice\nalice\n\n0\n' | FLOCK_HOOK='easyrsa revoke alice' bash "$E/manager.sh" 2>&1)
+    out=$(printf '4\nalice\nalice\n\n0\n' | FLOCK_HOOK='easyrsa revoke alice' bash "$E/manager.sh" 2>&1)
     has 'a client revoked meanwhile is not revoked again' 'changed while this question was open' "$out"
-    out=$(printf '2\nbob\n\n0\n' | FLOCK_HOOK='easyrsa build-client-full bob nopass' bash "$E/manager.sh" 2>&1)
+    out=$(printf '1\nbob\n\n0\n' | FLOCK_HOOK='easyrsa build-client-full bob nopass' bash "$E/manager.sh" 2>&1)
     has 'a name taken meanwhile is refused' 'created by another session' "$out"
 }
 
 test_a_number_is_never_mistaken_for_a_name() {
     local out
-    out=$(printf '2\n123\n\n\n0\n' | bash "$E/manager.sh" 2>&1)
+    out=$(printf '1\n123\n\n\n0\n' | bash "$E/manager.sh" 2>&1)
     has 'a name of digits only is refused' 'only digits' "$out"
     ok_if 'no such client was made' test ! -e "$PKI/issued/123.crt"
     easyrsa build-client-full 2 nopass >/dev/null 2>&1
-    out=$(printf '3\n2\n1\n\n0\n' | bash "$E/manager.sh" 2>&1)
+    out=$(printf '4\n2\n1\n\n0\n' | bash "$E/manager.sh" 2>&1)
     has 'the exact name wins over the list number' 'Revoke 2 permanently' "$out"
-    out=$(printf '3\n1\n1\n\n0\n' | bash "$E/manager.sh" 2>&1)
+    out=$(printf '4\n1\n1\n\n0\n' | bash "$E/manager.sh" 2>&1)
     has 'other numbers still pick from the list' 'Revoke 2 permanently' "$out"
 }
 
@@ -2181,7 +2204,7 @@ STUB
 test_advanced_menu_prints_only_itself() {
     # An unquoted 'download=not set' ran the set builtin, which printed every shell variable.
     local out
-    out=$(menu '7\n3\n0\n0\n0\n')
+    out=$(menu '7\n6\n0\n0\n0\n')
     has 'the Advanced menu opens' 'Download access' "$out"
     lacks 'and prints no shell variables' 'BASH_VERSION=' "$out"
 }
@@ -2219,7 +2242,7 @@ test_connected_clients() {
     has 'with its address, without the port' '198.51.100.7 ' "$out"
     lacks 'a half-open session is not counted' 'UNDEF' "$out"
     has 'the header counts it' '1 connected' "$(menu '0\n')"
-    has 'the menu offers it' 'Connected now' "$(menu '8\n4\n\n0\n0\n')"
+    has 'the menu offers it' 'Connected now' "$(menu '3\n\n0\n0\n')"
     sed -i '/^management /d' "$SERVER_CONF"
     has 'without the interface it says so' 'Not available' "$(mgr connected)"
 }
@@ -2235,14 +2258,15 @@ Enter: Create a client => \r
 Client name [client1] => \r
 Enter: Temporary link => \r
 Enter: No password => \r
-Enter: 24 hours => \r
+Enter: Copy link and note => \r
 client1 is connected from 198.51.100.7 => \r
 Choose [0-9] => 0\r
 EOF
     out=$(NO_COLOR=1 python3 "$HERE/pty-drive.py" --timeout 30 "$script" -- bash "$E/manager.sh" welcome 2>&1); rc=$?
     rc_is 'the whole path takes only Enter' 0 "$rc"
     has 'it ends with a link' "/l/" "$out"
-    has 'and a note for the person receiving it' 'Send this note with the link' "$out"
+    has 'and a note for the person receiving it' $'\nNote:\nYour browser will warn' "${out//$'\r'/}"
+    has 'Enter copies the link and the note' 'Copied to your clipboard, if your terminal allows it.' "$out"
     has 'which says what a password would do' 'A password on the key protects the profile' "$out"
     lacks 'Enter makes no password' 'shown only now' "$out"
     if grep -q 'ENCRYPTED PRIVATE KEY' "$E/clients/client1.ovpn"; then result 0 'the key stays open without a password'; else result 1 'the key stays open without a password'; fi
@@ -2268,7 +2292,7 @@ Client name [client1] => \r
 Enter: Temporary link => \r
 Enter: Yes, get a certificate => 2\r
 Enter: No password => \r
-Enter: 24 hours => \r
+Enter: Copy link and note => \r
 client1 is connected from 198.51.100.7 => \r
 Choose [0-9] => 0\r
 EOF
@@ -2278,6 +2302,39 @@ EOF
     has 'and Enter would take it' 'Enter: Yes, get a certificate' "$out"
     has 'it ends with a link on that IP' 'https://203.0.113.9:' "$out"
     if grep -q '^certbot certonly' "$STUB_LOG" 2>/dev/null; then result 0 'choosing No gets no certificate'; else result 1 'choosing No gets no certificate'; fi
+    if (( rc != 0 )); then printf '%s\n' "$out" | tail -n 25 | cut -c1-150 | sed 's/^/    | /'; fi
+}
+
+test_link_block_and_copy_in_a_real_terminal() {
+    # Link, password and note in one block, in the order the copy key copies them; the second option leaves
+    # the password out, for sending it another way.
+    local script=$E/script out rc copied link password
+    start_links_stub
+    mgmt_stub
+    printf 'TITLE\tOpenVPN\nCLIENT_LIST\tclient1\t198.51.100.7:1\t10.8.0.2\t\t1\t1\t2026-11-07 10:00:00\nEND\n' > "$E/mgmt-reply"
+    cat > "$script" <<'EOF'
+Enter: Create a client => \r
+Client name [client1] => \r
+Enter: Temporary link => \r
+Enter: No password => 2\r
+Password [ => \r
+Enter: Copy link, password and note => 2\r
+client1 is connected from 198.51.100.7 => \r
+Choose [0-9] => 0\r
+EOF
+    out=$(NO_COLOR=1 python3 "$HERE/pty-drive.py" --timeout 30 "$script" -- bash "$E/manager.sh" welcome 2>&1); rc=$?
+    rc_is 'a link with a password' 0 "$rc"
+    out=${out//$'\r'/}
+    link=$(grep -A1 '^Link:$' <<<"$out" | tail -n 1)
+    password=$(grep -A1 '^Password:$' <<<"$out" | tail -n 1)
+    [[ $link == https://*/l/* ]]; rc_is 'the link is on the line under Link:' 0 "$?"
+    [[ $password =~ ^[a-km-np-z2-9]{9}$ ]]; rc_is 'the password is on the line under Password:' 0 "$?"
+    has 'the three come in one block, in this order' "Link:"$'\n'"$link"$'\n'"Password:"$'\n'"$password"$'\n'"Note:"$'\n' "$out"
+    has 'the first option says what it copies' 'Copy link, password and note' "$out"
+    copied=$(grep -o $'\e]52;c;[A-Za-z0-9+/=]*' <<<"$out" | tail -n 1 | sed 's/^.*;//' | base64 -d 2>/dev/null)
+    has 'the second option copies the link' "Link:"$'\n'"$link" "$copied"
+    lacks 'without the password' "$password" "$copied"
+    has 'and the note says it comes separately' 'Its password comes to you separately.' "$copied"
     if (( rc != 0 )); then printf '%s\n' "$out" | tail -n 25 | cut -c1-150 | sed 's/^/    | /'; fi
 }
 
@@ -2304,21 +2361,21 @@ test_download_uses_a_copy_the_user_can_read() {
     mkdir -p "$home"
     printf '#!/usr/bin/env bash\nif [[ ${1:-} == passwd ]]; then echo "ali:x:1000:1000::%s:/bin/bash"; exit 0; fi\nexec /usr/bin/getent "$@"\n' "$home" > "$E/bin/getent"; chmod +x "$E/bin/getent"
     sed -i 's/^DOWNLOAD_SSH_USER=.*/DOWNLOAD_SSH_USER=ali/' "$E/cfg/config"
-    out=$(printf '4\nalice\n3\n1\n2\n\n0\n' | bash "$E/manager.sh" 2>&1)
+    out=$(printf '5\nalice\n2\n1\n\n0\n' | bash "$E/manager.sh" 2>&1)
     has 'the command fetches the copy' "ali@" "$out"
     has 'from the user home' "$home/alice.ovpn" "$out"
     ok_if 'the copy exists' test -s "$home/alice.ovpn"
-    out=$(menu '6\nalice\n2\n0\n')
+    out=$(menu '6\n1\n2\n0\n')
     has 'deleting the server copy names the user copy' "The copy made for ali is deleted too" "$out"
     ok_if 'and deletes it' test ! -e "$home/alice.ovpn"
     # A file of the same name that is not this client's profile stays.
     echo 'not a profile' > "$home/alice.ovpn"
-    menu '4\nalice\n3\n1\n2\n\n0\n' >/dev/null
+    menu '5\nalice\n2\n1\n\n0\n' >/dev/null
     echo 'not a profile' > "$home/alice.ovpn"
-    menu '6\nalice\n2\n0\n' >/dev/null
+    menu '6\n1\n2\n0\n' >/dev/null
     grep -q 'not a profile' "$home/alice.ovpn"; rc_is 'a file that is not the profile stays' 0 "$?"
-    menu '2\nbob\n0\n' >/dev/null
-    printf '4\nbob\n3\n1\n2\n\n0\n' | bash "$E/manager.sh" >/dev/null 2>&1
+    menu '1\nbob\n0\n' >/dev/null
+    printf '5\nbob\n2\n1\n\n0\n' | bash "$E/manager.sh" >/dev/null 2>&1
     ok_if 'bob has a user copy' test -s "$home/bob.ovpn"
     revoke_menu bob >/dev/null
     ok_if 'revoking deletes the user copy' test ! -e "$home/bob.ovpn"
@@ -2327,7 +2384,7 @@ test_download_uses_a_copy_the_user_can_read() {
 test_link_page_guides_the_person_receiving_it() {
     local url base out
     start_links_stub
-    url=$(menu '4\nalice\n1\n1\n1\n0\n' | grep -oE 'https://[^ ]+/l/[0-9a-f]{64}')
+    url=$(menu '5\nalice\n1\n1\n0\n' | grep -oE 'https://[^ ]+/l/[0-9a-f]{64}')
     base=${url%/l/*}
     out=$(web -A 'Mozilla/5.0 (Linux; Android 14)' -H 'Accept-Language: fa-IR,fa;q=0.9,en-US;q=0.8' "$url")
     has 'Android gets the store link' 'play.google.com/store/apps/details?id=net.openvpn.openvpn' "$out"
@@ -2360,21 +2417,21 @@ test_link_certificate_for_a_public_ip() {
     : > "$E/cfg/.server-setup-started"
     printf '#!/usr/bin/env bash\nif [[ $1 == --version ]]; then echo "certbot 5.9.0"; exit 0; fi\necho "certbot $*" >> "$STUB_LOG"; exit 1\n' > "$E/bin/certbot"
     chmod +x "$E/bin/certbot"
-    out=$(menu '4\nalice\n1\n1\n1\n1\n0\n')
+    out=$(menu '5\nalice\n1\n1\n1\n0\n')
     has 'a public IP is offered a trusted certificate' 'For an IP address it lasts six days' "$out"
     grep -q -- '--preferred-profile shortlived --ip-address 203.0.113.9' "$STUB_LOG"; rc_is 'certbot asks for a six-day IP certificate' 0 "$?"
     grep -q -- '--cert-name darban-ovpn-links' "$STUB_LOG"; rc_is 'under a name of its own' 0 "$?"
     if grep -q '^certbot_cert' "$E/cfg/.server-setup-started"; then result 0 'a failed request is not recorded'; else result 1 'a failed request is not recorded'; fi
     has 'it still gives a working link' "https://203.0.113.9:$LINK_TEST_PORT/l/" "$out"
     has 'and says what a password would protect' 'A password on the key protects the profile' "$out"
-    menu '5\n1\n0\n' >/dev/null
+    menu '6\n1\n0\n' >/dev/null
     rm -f "$E/cfg/link-cert.pem" "$E/cfg/link-key.pem"
     printf '#!/usr/bin/env bash\nif [[ $1 == --version ]]; then echo "certbot 5.9.0"; exit 0; fi\necho "certbot $*" >> "$STUB_LOG"; exit 0\n' > "$E/bin/certbot"
-    menu '4\nalice\n1\n1\n1\n1\n0\n' >/dev/null
+    menu '5\nalice\n1\n1\n1\n0\n' >/dev/null
     grep -qx 'certbot_cert darban-ovpn-links' "$E/cfg/.server-setup-started"; rc_is 'a certificate it got is recorded' 0 "$?"
     echo 10.0.0.9 > "$E/cfg/domain"
     rm -f "$E/cfg/link-cert.pem" "$E/cfg/link-key.pem"
-    lacks 'a private IP is not offered one' "Let's Encrypt" "$(menu '4\nalice\n1\n1\n1\n0\n')"
+    lacks 'a private IP is not offered one' "Let's Encrypt" "$(menu '5\nalice\n1\n1\n0\n')"
     stop_links_stub
 }
 
@@ -2398,39 +2455,40 @@ test_link_uses_a_certificate_already_on_the_server() {
     start_links_stub
     echo vpn.example.com > "$E/cfg/domain"
     make_test_ca vpn.example.com "$E/panel-cert/vpn.example.com" fullchain.pem privkey.pem
-    out=$(menu '4\nalice\n1\n1\n1\n1\n0\n')
+    out=$(menu '5\nalice\n1\n1\n1\n0\n')
     has 'a trusted certificate already here is offered first' 'This server already has a trusted certificate for vpn.example.com' "$out"
     has 'and the link is made with it' "https://vpn.example.com:$LINK_TEST_PORT/l/" "$out"
     cmp -s "$E/cfg/link-cert.pem" "$E/panel-cert/vpn.example.com/fullchain.pem"; rc_is 'the link service gets a copy it can read' 0 "$?"
     ok_if 'and a link certificate is no longer self-signed' test -s "$E/cfg/link-cert.source"
-    lacks 'no browser warning note' 'Send this note with the link' "$out"
+    lacks 'no browser warning note' 'The note below tells the person' "$out"
+    lacks 'and no note in the block' $'\nNote:\n' "$out"
     has 'Settings names where it came from' 'trusted' "$(menu '7\n0\n0\n')"
-    menu '5\n1\n0\n' >/dev/null
+    menu '6\n1\n0\n' >/dev/null
 
     # Renewed where it lives: the next link takes the new one, without a question.
     make_test_ca vpn.example.com "$E/panel-cert/vpn.example.com" fullchain.pem privkey.pem
-    out=$(menu '4\nalice\n1\n1\n1\n0\n')
+    out=$(menu '5\nalice\n1\n1\n0\n')
     has 'a renewal there reaches the links' 'links use the new one' "$out"
     cmp -s "$E/cfg/link-cert.pem" "$E/panel-cert/vpn.example.com/fullchain.pem"; rc_is 'the new one is copied' 0 "$?"
-    menu '5\n1\n0\n' >/dev/null
+    menu '6\n1\n0\n' >/dev/null
 
     # A renewal seen half way, a new certificate but still the old key, is refused, and the pair in use stays.
     before=$(sha256sum < "$E/cfg/link-cert.pem")
     make_test_ca vpn.example.com "$E/half" fullchain.pem privkey.pem
     cp "$E/half/fullchain.pem" "$E/panel-cert/vpn.example.com/fullchain.pem"
-    out=$(menu '4\nalice\n1\n1\n1\n0\n')
+    out=$(menu '5\nalice\n1\n1\n0\n')
     lacks 'a certificate without its new key is not taken' 'links use the new one' "$out"
     [[ $(sha256sum < "$E/cfg/link-cert.pem") == "$before" ]]; rc_is 'and the pair in use stays as it was' 0 "$?"
     cert_key_pair_ok() { [[ $(openssl x509 -in "$E/cfg/link-cert.pem" -noout -pubkey) == "$(openssl pkey -in "$E/cfg/link-key.pem" -pubout)" ]]; }
     cert_key_pair_ok; rc_is 'its certificate and key still belong together' 0 "$?"
-    menu '5\n1\n0\n' >/dev/null
+    menu '6\n1\n0\n' >/dev/null
     cp "$E/half/privkey.pem" "$E/panel-cert/vpn.example.com/privkey.pem"
 
     # A file chosen by hand: a key that does not belong is refused.
     make_test_ca vpn.example.com "$E/other" cert.pem cert.key
-    out=$(menu "7\n4\n2\n$E/other/cert.pem\n$E/panel-cert/vpn.example.com/privkey.pem\n0\n0\n")
+    out=$(menu "7\n5\n2\n$E/other/cert.pem\n$E/panel-cert/vpn.example.com/privkey.pem\n0\n0\n")
     has 'a key from another certificate is refused' 'does not belong to that certificate' "$out"
-    out=$(menu "7\n4\n2\n$E/other/cert.pem\n\n0\n0\n")
+    out=$(menu "7\n5\n2\n$E/other/cert.pem\n\n0\n0\n")
     has 'the key next to it is suggested and used' 'Links use the trusted certificate from' "$out"
     cmp -s "$E/cfg/link-cert.pem" "$E/other/cert.pem"; rc_is 'the chosen file is used' 0 "$?"
     stop_links_stub
@@ -2445,7 +2503,7 @@ test_link_names_a_cloudflare_origin_certificate() {
         -out "$E/acme/other.example.com_ecc/fullchain.cer" -days 300 \
         -subj '/O=CloudFlare, Inc./OU=CloudFlare Origin SSL Certificate Authority/CN=CloudFlare Origin Certificate' \
         -addext subjectAltName=DNS:other.example.com >/dev/null 2>&1
-    out=$(menu '4\nalice\n1\n2\n1\n1\n0\n')
+    out=$(menu '5\nalice\n1\n2\n1\n0\n')
     has 'a Cloudflare Origin certificate is named, with the reason it is not used' 'is a Cloudflare Origin certificate' "$out"
     has "and Let's Encrypt is offered instead" "Get a free Let's Encrypt certificate?" "$out"
     if [[ -s $E/cfg/link-cert.source ]]; then result 0 'it is not used'; else result 1 'it is not used'; fi
@@ -2485,11 +2543,11 @@ test_old_certbot_is_not_used_for_an_ip() {
     printf '#!/usr/bin/env bash\nif [[ $1 == --version ]]; then echo "certbot 4.0.0"; exit 0; fi\necho "certbot $*" >> "$STUB_LOG"; exit 0\n' > "$E/bin/certbot"
     printf '#!/usr/bin/env bash\necho "snap $*" >> "$STUB_LOG"; exit 1\n' > "$E/bin/snap"
     chmod +x "$E/bin/certbot" "$E/bin/snap"
-    out=$(menu '4\nalice\n1\n1\n1\n1\n0\n')
+    out=$(menu '5\nalice\n1\n1\n1\n0\n')
     if grep -q '^certbot certonly' "$STUB_LOG"; then result 0 'certbot 4.0 is never asked for an IP'; else result 1 'certbot 4.0 is never asked for an IP'; fi
     grep -q 'snap install --classic certbot' "$STUB_LOG"; rc_is 'the Certbot snap is tried instead' 0 "$?"
     has 'a failed install falls back to a working link' "https://203.0.113.9:$LINK_TEST_PORT/l/" "$out"
-    menu '5
+    menu '6
 1
 0
 ' >/dev/null
@@ -2497,7 +2555,7 @@ test_old_certbot_is_not_used_for_an_ip() {
     rm -f "$E/cfg/link-cert.pem" "$E/cfg/link-key.pem"
     sed -i 's/^have_snap() {.*/have_snap() { false; }/' "$E/manager.sh"
     : > "$STUB_LOG"
-    out=$(menu '4
+    out=$(menu '5
 alice
 1
 1
@@ -2520,19 +2578,19 @@ test_vpn_network_change_is_all_or_nothing() {
 
     : > "$STUB_LOG"
     chmod 555 "$E/server"
-    out=$(menu '7\n3\n3\n10.77.0.0\n2\n0\n0\n0\n')
+    out=$(menu '7\n6\n3\n10.77.0.0\n2\n0\n0\n0\n')
     chmod 755 "$E/server"
     if grep -q '^nft -f' "$STUB_LOG"; then result 0 'a server.conf that cannot be prepared leaves NAT alone'; else result 1 'a server.conf that cannot be prepared leaves NAT alone'; fi
     [[ $before == "$(cat "$E/cfg/nat.nft" "$SERVER_CONF" | sha256sum)" ]]; rc_is 'and both files unchanged' 0 "$?"
 
-    out=$(FAIL_NFT=1 menu '7\n3\n3\n10.77.0.0\n2\n0\n0\n0\n')
+    out=$(FAIL_NFT=1 menu '7\n6\n3\n10.77.0.0\n2\n0\n0\n0\n')
     has 'a refused NAT rule changes nothing' 'Nothing was changed' "$out"
     [[ $before == "$(cat "$E/cfg/nat.nft" "$SERVER_CONF" | sha256sum)" ]]; rc_is 'both files unchanged after a refused rule' 0 "$?"
 
-    out=$(FAIL_RESTART=1 menu '7\n3\n3\n10.77.0.0\n2\n0\n0\n0\n')
+    out=$(FAIL_RESTART=1 menu '7\n6\n3\n10.77.0.0\n2\n0\n0\n0\n')
     grep -q '10.8.0.0/24' "$E/cfg/nat.nft"; rc_is 'a failed restart puts NAT back' 0 "$?"
 
-    out=$(menu '7\n3\n3\n10.77.0.0\n2\n0\n0\n0\n')
+    out=$(menu '7\n6\n3\n10.77.0.0\n2\n0\n0\n0\n')
     grep -q '^server 10.77.0.0 255.255.255.0' "$SERVER_CONF"; rc_is 'a good change is applied' 0 "$?"
     [[ $(grep -o '10.77.0.0/24' "$E/cfg/nat.nft" | wc -l) == 3 ]]; rc_is 'every rule follows the new network' 0 "$?"
 }
@@ -2566,7 +2624,7 @@ STUB
     grep -q 'ufw route allow in on tun0' "$STUB_LOG"; rc_is 'the missing rule is added' 0 "$?"
     grep -qx out_dir_existed "$E/cfg/.server-setup-started"; rc_is 'a folder that held files is recorded' 0 "$?"
     install_removal_scripts
-    menu '2\nfirst\n0\n' >/dev/null
+    menu '1\nfirst\n0\n' >/dev/null
     echo later > "$E/clients/later.txt"
     : > "$STUB_LOG"
     out=$(bash "$E/lib/remove-server.sh" --yes 2>&1 </dev/null); rc=$?
