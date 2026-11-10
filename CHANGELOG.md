@@ -4,6 +4,10 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## [Unreleased]
 
+## [1.0.0-rc.5] - 2026-11-10
+
+Release candidate for `v1.0.0`, for testing on a server that is not in use. It replaces `v1.0.0-rc.4`, with the changes asked for after its test on a real server: easier sharing, a link lifetime setting, and menus ordered by use. The main menu numbers changed.
+
 ### Changed
 - The menus are ordered by use and grouped. The main menu: 1 Create client, 2 List clients, 3 Connected now (moved from Maintenance), 4 Revoke client, 5 Share a profile, 6 Waiting to be picked up, 7 Settings, 8 Maintenance, 9 Setup. Settings groups the server address and port, then the link lifetime, port and certificate, then Advanced; the link port moved there from Advanced.
 - "Active links" and "Delete server copy" are one item, **Waiting to be picked up**: open links, with the time left and whether the file was downloaded, then profile files kept on the server. A row's number cancels the link or deletes the file.
