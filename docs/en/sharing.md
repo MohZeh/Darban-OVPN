@@ -108,4 +108,4 @@ If you send the password separately, add:
 - A copy left behind by a crash is removed after a minute.
 - The link service runs only while a link exists, and tokens never reach the logs. Creating a link and each download are recorded with the client's name and IP address.
 
-The page has no button that opens the app directly. In tests on Android, OpenVPN Connect opened but did not import the profile from such a button, even with a trusted certificate. Opening the downloaded file works on every device.
+The page has no button that opens the app directly. In tests on Android, OpenVPN Connect opened but did not import the profile from such a button, even with a trusted certificate. Opening the downloaded file worked on every device tested, Android and Windows.

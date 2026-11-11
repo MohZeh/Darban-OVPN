@@ -1031,6 +1031,9 @@ link_cert_usable() {
     local host=$1 seconds=${2:-$(( ($(link_hours) + 1) * 3600 ))} check
     [[ -s $LINK_CERT && -s $LINK_KEY ]] || return 1
     openssl x509 -in "$LINK_CERT" -noout -checkend "$seconds" >/dev/null 2>&1 || return 1
+    # A key and a certificate that do not belong together, whatever left them so, are replaced like any
+    # unusable pair, instead of stopping every link until the certificate is changed by hand.
+    cert_key_matches "$LINK_CERT" "$LINK_KEY" || return 1
     if host_is_ip "$host"; then check=-checkip; else check=-checkhost; fi
     openssl x509 -in "$LINK_CERT" -noout "$check" "$host" 2>/dev/null | grep -q 'does match'
 }
@@ -1109,18 +1112,36 @@ get_trusted_cert() {
     }
     # Recorded only once it exists, so a removal never deletes a certificate this tool did not get.
     record_added "certbot_cert $CERT_NAME"
-    rm -f -- "$LINK_CERT" "$LINK_KEY" "$LINK_CERT_SOURCE"
-    ln -s "/etc/letsencrypt/live/$CERT_NAME/fullchain.pem" "$LINK_CERT"
-    ln -s "/etc/letsencrypt/live/$CERT_NAME/privkey.pem" "$LINK_KEY"
-    ok 'Trusted certificate installed.'
+    # The new links are made beside the current pair and then renamed over it, so a failure keeps the old one.
+    local new_cert new_key
+    new_cert=$CONFIG_DIR/.link-cert.new new_key=$CONFIG_DIR/.link-key.new
+    rm -f -- "$new_cert" "$new_key"
+    if ln -s "/etc/letsencrypt/live/$CERT_NAME/fullchain.pem" "$new_cert" \
+        && ln -s "/etc/letsencrypt/live/$CERT_NAME/privkey.pem" "$new_key" \
+        && mv -fT -- "$new_key" "$LINK_KEY" && mv -fT -- "$new_cert" "$LINK_CERT"; then
+        rm -f -- "$LINK_CERT_SOURCE"
+        ok 'Trusted certificate installed.'
+        return 0
+    fi
+    rm -f -- "$new_cert" "$new_key"
+    warn 'The certificate was issued, but could not be put in place; the current one stays.'
+    return 1
 }
 make_self_signed_cert() {
-    local host=$1 san
+    # Made beside the current pair and then renamed over it, so a failure keeps the old one.
+    local host=$1 san new_cert=$CONFIG_DIR/.link-cert.new new_key=$CONFIG_DIR/.link-key.new
     if host_is_ip "$host"; then san=IP:$host; else san=DNS:$host; fi
-    rm -f -- "$LINK_CERT" "$LINK_KEY" "$LINK_CERT_SOURCE"
-    openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes -keyout "$LINK_KEY" -out "$LINK_CERT" -days 90 \
-        -subj "/CN=$host" -addext "subjectAltName=$san" >/dev/null 2>&1 || { fail 'Could not create a certificate for the link.'; return 1; }
-    chmod 600 "$LINK_KEY" "$LINK_CERT"
+    rm -f -- "$new_cert" "$new_key"
+    if openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes -keyout "$new_key" -out "$new_cert" -days 90 \
+        -subj "/CN=$host" -addext "subjectAltName=$san" >/dev/null 2>&1 \
+        && chmod 600 "$new_key" "$new_cert" \
+        && mv -fT -- "$new_key" "$LINK_KEY" && mv -fT -- "$new_cert" "$LINK_CERT"; then
+        rm -f -- "$LINK_CERT_SOURCE"
+        return 0
+    fi
+    rm -f -- "$new_cert" "$new_key"
+    fail 'Could not create a certificate for the link.'
+    return 1
 }
 
 # ---------- a certificate that is already on this server ----------
@@ -1209,8 +1230,9 @@ explain_untrusted_certs() {
 }
 copy_cert_pair() {
     # copy_cert_pair <cert> <key> <host>: both files are copied beside the current pair and checked there as a
-    # pair, then put in place. Any failure leaves the current pair as it was. A renewal elsewhere between the
-    # two copies gives a pair that does not match, and is refused the same way.
+    # pair, then put in place. A failure before that leaves the current pair as it was. A renewal elsewhere
+    # between the two copies gives a pair that does not match, and is refused the same way. The two renames
+    # cannot be one step; if only the first is done, link_cert_usable sees the pair does not match.
     local cert=$1 key=$2 host=$3 new_cert new_key
     new_cert=$(mktemp "$CONFIG_DIR/.link-cert.XXXXXX") || return 1
     new_key=$(mktemp "$CONFIG_DIR/.link-key.XXXXXX") || { rm -f -- "$new_cert"; return 1; }
@@ -1340,10 +1362,19 @@ start_link_service() {
     done
     return 1
 }
+links_locked() {
+    # links_locked <command>...: changes the link files while holding the lock the link service takes too, so a
+    # download in progress never writes back a link that is being removed.
+    [[ -d $LINK_DIR ]] || { "$@"; return; }
+    ( flock -w 10 8 || { warn 'The link service did not let go of its files; try again.'; exit 1; }; "$@" ) 8>"$LINK_DIR/.lock"
+}
 remove_links_for() {
     # A revoked client must not stay reachable through a link that is still open.
-    local meta
     [[ -d $LINK_DIR ]] || return 0
+    links_locked drop_links_of "$1"
+}
+drop_links_of() {
+    local meta
     for meta in "$LINK_DIR"/*.meta; do
         [[ -e $meta ]] || continue
         if grep -qx "name=$1" "$meta"; then rm -f -- "$meta" "${meta%.meta}.ovpn"; fi
@@ -1471,7 +1502,7 @@ pending_shares() {
             [[ -e $meta ]] || continue
             expires=$(awk -F= '$1=="expires" {print $2}' "$meta")
             if [[ ! $expires =~ ^[0-9]+$ ]] || (( expires <= now )); then
-                rm -f -- "$meta" "${meta%.meta}.ovpn"
+                links_locked rm -f -- "$meta" "${meta%.meta}.ovpn" || true
                 continue
             fi
             name=$(awk -F= '$1=="name" {print $2}' "$meta")
@@ -1500,7 +1531,7 @@ pending_shares() {
         if [[ $REPLY =~ ^[0-9]+$ ]] && (( 10#$REPLY >= 1 && 10#$REPLY <= ${#kinds[@]} )); then
             i=$(( 10#$REPLY - 1 ))
             if [[ ${kinds[i]} == link ]]; then
-                rm -f -- "${refs[i]}" "${refs[i]%.meta}.ovpn"
+                links_locked rm -f -- "${refs[i]}" "${refs[i]%.meta}.ovpn" || return 1
                 audit "temporary link cancelled: ${names[i]}"
                 ok "Link for \"$(safe_text "${names[i]}")\" cancelled."
             else
