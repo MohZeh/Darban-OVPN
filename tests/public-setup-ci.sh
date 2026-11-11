@@ -16,9 +16,16 @@ echo "PASS: the setup on a public IP address finished."
 
 # certbot 5.3 or newer is needed for an IP address; Ubuntu's is older, so it comes from the snap.
 if command -v snap >/dev/null; then
-    grep -qx 'snap certbot' "$MARKER"
-    [[ -x /snap/bin/certbot ]]
-    echo 'PASS: the setup installed certbot from the snap, and recorded it for removal.'
+    if grep -qx 'snap certbot' "$MARKER"; then
+        [[ -x /snap/bin/certbot ]]
+        echo 'PASS: the setup installed certbot from the snap, and recorded it for removal.'
+    elif ! timeout 60 snap info certbot >/dev/null 2>&1; then
+        # The Snap Store itself is down, which no change here can fix: the setup must still finish, and did.
+        echo 'NOTE: the Snap Store does not answer, so the setup could not install certbot; this check is skipped.'
+    else
+        echo 'FAIL: the Snap Store answers, but the setup did not install certbot.'
+        exit 1
+    fi
 else
     echo 'NOTE: this runner has no snap, so the setup could only skip certbot.'
 fi
