@@ -5,7 +5,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 ## [Unreleased]
 
 ### Removed
-- The install no longer moves settings and files from the tool's earlier name, `mzx-openvpn-manager`. The servers that used it have been moved.
+- The install no longer moves settings and files from the tool's earlier name, `mzx-openvpn-manager`, and the diagnostics no longer accept its NAT table, `mzx_openvpn`. No server uses that name any more.
 
 ## [1.0.0-rc.6] - 2026-11-10
 
