@@ -20,7 +20,7 @@ The link stops working when its time is up, or about 10 seconds after a connecti
 
 **If the link stopped working before the person connected:** someone else may have connected with it. Revoke the client and create a new one.
 
-To cancel a link, use menu `6`.
+To see a link again, copy it or cancel it, use menu `6`.
 
 ### Copying what you send
 
@@ -82,6 +82,8 @@ A **Cloudflare Origin certificate** is not used, and the tool says so. Browsers 
 
 - **Domain name:** the certificate comes from Ubuntu's `certbot` package, and certbot renews it by itself. If a renewal fails, for example because port 80 is closed, the tool asks again when a link needs a new one.
 - **IP address:** Let's Encrypt gives a six-day certificate, and a new one is requested when a link needs it. This needs `certbot` 5.3 or newer, which Ubuntu does not have yet, so the tool uses a certbot that is new enough, or installs it from the Certbot project as a snap. A server with neither is not offered one.
+
+**Let's Encrypt gives at most 5 new certificates a week for the same address**, one more every 34 hours, and deleting one does not give it back. So the tool renews the certificate it got instead of asking for a new one, keeps it when you remove everything, and uses it again after a new install on the same server. It records each certificate it got: **Settings › Link certificate** shows how many of the 5 were used this week. When none is left, the tool says when the next one can be requested, and the link uses a self-signed certificate until then.
 
 If a new certificate cannot be had while the current trusted one still works, the current one stays, and the tool says when it ends. Otherwise, if you choose No, or the request fails, the tool makes a self-signed certificate. The link is still encrypted, but the browser cannot confirm that it reaches this server, so it warns. In that case:
 

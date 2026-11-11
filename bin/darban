@@ -30,6 +30,10 @@ LINK_CERT_SOURCE=$CONFIG_DIR/link-cert.source
 SYSTEM_CA_FILE=/etc/ssl/certs/ca-certificates.crt
 # Where certbot, panels such as 3x-ui and x-ui, and acme.sh keep certificates.
 CERT_SEARCH_DIRS='/etc/letsencrypt/live /root/cert /root/.acme.sh'
+# Where certbot keeps the link certificate this tool gets. It can outlive a removal, for the next install.
+LE_DIR=/etc/letsencrypt
+# Each link certificate Let's Encrypt issued here, so the weekly limit is known before asking. Kept with it.
+LINK_CERT_LOG=/var/lib/darban/link-certificates.log
 CONFIG_FILE=$CONFIG_DIR/config
 TLS_KEY=$DARBAN_SERVER_DIR/tls-crypt.key
 DEFAULT_DATA_CIPHERS=AES-256-GCM:AES-128-GCM
@@ -1104,27 +1108,97 @@ get_trusted_cert() {
         install_certbot "$need" || { warn 'Could not install certbot.'; return 1; }
         certbot=$(find_certbot "$need") || { warn "No certbot $need or newer is available."; return 1; }
     fi
-    info "Requesting a certificate for $host${S_ELL}"
-    "$certbot" certonly --standalone --non-interactive --agree-tos --register-unsafely-without-email --cert-name "$CERT_NAME" \
-        "${target[@]}" --deploy-hook 'systemctl try-restart darban-links.service' >/dev/null 2>&1 || {
-        warn 'certbot could not get a certificate. Check that the address points here and TCP 80 is open in the provider firewall.'
+    local live=$LE_DIR/live/$CERT_NAME/fullchain.pem before after out used next rc=0
+    before=$(cert_fingerprint "$live")
+    out=$(mktemp) || return 1
+    if [[ -s $LE_DIR/renewal/$CERT_NAME.conf ]] && cert_covers "$live" "$host"; then
+        # The certificate of an earlier request is renewed: certbot then tells Let's Encrypt which one it
+        # replaces (ARI), and such a renewal can be exempt from the weekly limit. Nothing is done when it is
+        # not due yet.
+        info "Renewing the certificate for $host${S_ELL}"
+        "$certbot" renew --non-interactive --cert-name "$CERT_NAME" >"$out" 2>&1 || rc=$?
+    else
+        read -r used next <<<"$(issue_budget "$host")"
+        if (( next > 0 )); then
+            warn "Let's Encrypt gives at most 5 new certificates a week for the same address, one more every 34 hours. This server got $used for $host in the last 7 days, so the next one can be requested after $(date -u -d "@$next" '+%Y-%m-%d %H:%M UTC')."
+            rm -f -- "$out"
+            return 1
+        fi
+        info "Requesting a certificate for $host${S_ELL}"
+        "$certbot" certonly --standalone --non-interactive --agree-tos --register-unsafely-without-email --cert-name "$CERT_NAME" \
+            "${target[@]}" --deploy-hook 'systemctl try-restart darban-links.service' >"$out" 2>&1 || rc=$?
+    fi
+    if (( rc != 0 )); then
+        explain_certbot_failure "$out"
+        rm -f -- "$out"
         return 1
-    }
+    fi
+    rm -f -- "$out"
+    after=$(cert_fingerprint "$live")
+    if [[ -n $after && $after != "$before" ]]; then log_link_cert_issue "$host"; fi
+    use_own_cert quiet
+}
+cert_fingerprint() { openssl x509 -in "$1" -noout -fingerprint -sha256 2>/dev/null | sed 's/^.*=//'; }
+explain_certbot_failure() {
+    # explain_certbot_failure <certbot output>: the weekly limit is named with the time Let's Encrypt gave.
+    local retry
+    if grep -qiE 'too many certificates|rateLimited' "$1"; then
+        retry=$(grep -oiE 'retry after [0-9]{4}-[0-9]{2}-[0-9]{2}[ T][0-9:]+( UTC)?' "$1" | head -n 1 | cut -c13-)
+        warn "Let's Encrypt gives at most 5 new certificates a week for the same address, and they are used up${retry:+. The next one can be issued after $retry}."
+    else
+        warn 'certbot could not get a certificate. Check that the address points here and TCP 80 is open in the provider firewall.'
+        info "Details: $(cmd tail -n 20 /var/log/letsencrypt/letsencrypt.log)"
+    fi
+}
+log_link_cert_issue() {
+    # One line per certificate Let's Encrypt issued for the links: the time and the address.
+    install -d -m 700 "${LINK_CERT_LOG%/*}" 2>/dev/null || return 0
+    printf '%s %s\n' "$(date -u +%s)" "$1" >>"$LINK_CERT_LOG" 2>/dev/null || return 0
+    chmod 600 "$LINK_CERT_LOG" 2>/dev/null || true
+    audit "link certificate issued by Let's Encrypt for $1"
+}
+issue_budget() {
+    # issue_budget <host>: "<issued in the last 7 days> <epoch when the next one can be asked for, or 0>", from
+    # this server's own record. Let's Encrypt counts 5 a week for one address, and gives one back every 34 hours.
+    [[ -s $LINK_CERT_LOG ]] || { printf '0 0\n'; return; }
+    awk -v host="$1" -v now="$(date -u +%s)" '
+        $2 == host && $1 ~ /^[0-9]+$/ {
+            if (seen == 0) tokens = 5; else { tokens += ($1 - last) / 122400; if (tokens > 5) tokens = 5 }
+            tokens -= 1; last = $1; seen++
+            if (now - $1 < 604800) week++
+        }
+        END {
+            if (seen == 0) { print 0, 0; exit }
+            tokens += (now - last) / 122400; if (tokens > 5) tokens = 5
+            print week + 0, (tokens >= 1 ? 0 : int(now + (1 - tokens) * 122400 + 1))
+        }' "$LINK_CERT_LOG"
+}
+own_cert_usable() {
+    # own_cert_usable <host>: the certificate this tool got earlier, kept through a removal, still serves host.
+    local dir=$LE_DIR/live/$CERT_NAME
+    [[ -s $dir/fullchain.pem && -s $dir/privkey.pem ]] || return 1
+    [[ -z $(cert_problem "$dir/fullchain.pem" "$dir/privkey.pem" "$1") ]]
+}
+use_own_cert() {
+    # use_own_cert [quiet]: points the links at the certificate this tool got. The new links are made beside the
+    # current pair and then renamed over it, so a failure keeps the old one.
+    local new_cert=$CONFIG_DIR/.link-cert.new new_key=$CONFIG_DIR/.link-key.new
     # Recorded only once it exists, so a removal never deletes a certificate this tool did not get.
     record_added "certbot_cert $CERT_NAME"
-    # The new links are made beside the current pair and then renamed over it, so a failure keeps the old one.
-    local new_cert new_key
-    new_cert=$CONFIG_DIR/.link-cert.new new_key=$CONFIG_DIR/.link-key.new
     rm -f -- "$new_cert" "$new_key"
-    if ln -s "/etc/letsencrypt/live/$CERT_NAME/fullchain.pem" "$new_cert" \
-        && ln -s "/etc/letsencrypt/live/$CERT_NAME/privkey.pem" "$new_key" \
+    if ln -s "$LE_DIR/live/$CERT_NAME/fullchain.pem" "$new_cert" \
+        && ln -s "$LE_DIR/live/$CERT_NAME/privkey.pem" "$new_key" \
         && mv -fT -- "$new_key" "$LINK_KEY" && mv -fT -- "$new_cert" "$LINK_CERT"; then
         rm -f -- "$LINK_CERT_SOURCE"
-        ok 'Trusted certificate installed.'
+        if [[ ${1:-} == quiet ]]; then
+            ok 'Trusted certificate installed.'
+        else
+            ok "Links use the Let's Encrypt certificate this server got earlier, valid until $(cert_end_date "$LINK_CERT"). Nothing was requested."
+        fi
         return 0
     fi
     rm -f -- "$new_cert" "$new_key"
-    warn 'The certificate was issued, but could not be put in place; the current one stays.'
+    warn 'The certificate could not be put in place; the current one stays.'
     return 1
 }
 make_self_signed_cert() {
@@ -1268,6 +1342,8 @@ refresh_copied_cert() {
 offer_trusted_cert() {
     # A trusted certificate already on this server comes first, then Let's Encrypt. Returns 1 when neither.
     local host=$1 found cert key end
+    # The one this tool got before, kept through a removal: taken back without a question or a new request.
+    if own_cert_usable "$host"; then use_own_cert; return; fi
     if found=$(find_existing_cert "$host"); then
         IFS=$'\t' read -r cert key end <<<"$found"
         say
@@ -1318,6 +1394,12 @@ change_link_cert() {
     host=$(domain)
     [[ -n $host ]] && valid_endpoint "$host" || { warn "Set the server address first: Settings $S_CRUMB 1."; return 1; }
     kv Current "$(safe_text "$(link_cert_summary)")"
+    if ! { host_is_ip "$host" && is_private_ip "$host"; }; then
+        local used next
+        read -r used next <<<"$(issue_budget "$host")"
+        kv 'This week' "$used of 5 new Let's Encrypt certificates for $host"
+        if (( next > 0 )); then info "The next one can be requested after $(date -u -d "@$next" '+%Y-%m-%d %H:%M UTC')."; fi
+    fi
     say
     choose_one 'Which certificate should links use?' 'Find a trusted one on this server' 'A certificate file on this server' "A new one from Let's Encrypt" 'Keep the current one' || { cancelled; return 0; }
     case $CHOSEN in
@@ -1377,7 +1459,7 @@ drop_links_of() {
     local meta
     for meta in "$LINK_DIR"/*.meta; do
         [[ -e $meta ]] || continue
-        if grep -qx "name=$1" "$meta"; then rm -f -- "$meta" "${meta%.meta}.ovpn"; fi
+        if grep -qx "name=$1" "$meta"; then rm -f -- "$meta" "${meta%.meta}.ovpn" "${meta%.meta}.url"; fi
     done
 }
 prepare_link() {
@@ -1390,7 +1472,7 @@ prepare_link() {
     ensure_link_cert "$host"
 }
 share_by_link() {
-    local name=$1 host hours minutes label token key now expires url temp note='' qr='Show a QR code' rc
+    local name=$1 host hours minutes label token key now expires url temp note=''
     host=$(domain)
     if link_sees_connections; then
         info "The link stops working after $(hours_label "$(link_hours)"), or about 10 seconds after a connection with this profile is seen, whichever comes first. Until then it can be opened again. To change the time: Settings $S_CRUMB Link lifetime."
@@ -1417,12 +1499,19 @@ share_by_link() {
     now=$(date -u +%s)
     expires=$(( now + minutes * 60 ))
     install -m 600 "$OUT_DIR/$name.ovpn" "$LINK_DIR/$key.ovpn" || return 1
+    url=https://$host
+    if [[ $LINK_PORT != 443 ]]; then url+=:$LINK_PORT; fi
+    url+=/l/$token
+    # The address itself, so menu 6 can show a link again. Only root reads it, and root can read the profile
+    # anyway; the link service never reads it.
+    printf '%s\npassword=%s\n' "$url" "$([[ -n $PROFILE_PASSWORD ]] && echo yes || echo no)" >"$LINK_DIR/$key.url" || return 1
+    chmod 600 "$LINK_DIR/$key.url"
     # The .meta file appears last: until then, the link does not exist for the server.
     temp=$LINK_DIR/$key.tmp
     printf 'name=%s\nexpires=%s\ncreated=%s\ndownloads=0\n' "$name" "$expires" "$now" >"$temp" || return 1
     mv -f -- "$temp" "$LINK_DIR/$key.meta" || return 1
     if ! start_link_service "$host"; then
-        rm -f -- "$LINK_DIR/$key.meta" "$LINK_DIR/$key.ovpn"
+        rm -f -- "$LINK_DIR/$key.meta" "$LINK_DIR/$key.ovpn" "$LINK_DIR/$key.url"
         fail "The link service did not start on TCP $LINK_PORT. Check: $(cmd journalctl -u darban-links.service -n 30 --no-pager)"
         return 1
     fi
@@ -1430,20 +1519,16 @@ share_by_link() {
     rm -f -- "$OUT_DIR/$name.ovpn"
     ca_unlock
     audit "temporary link created: $name, valid for $label"
-    url=https://$host
-    if [[ $LINK_PORT != 443 ]]; then url+=:$LINK_PORT; fi
-    url+=/l/$token
     ok "Temporary link for \"$name\""
     hr
     if link_sees_connections; then kv Valid "$label, or until a connection with this profile is seen"; else kv Valid "$label"; fi
-    kv Cancel 'menu 6'
+    kv Later 'menu 6 shows it again or cancels it'
     say
     warn "TCP $LINK_PORT must be open in your provider firewall."
-    if ! link_cert_is_trusted; then
+    note=$(link_note)
+    if [[ -n $note ]]; then
         warn 'This server has no trusted certificate, so the browser shows a warning for this link. The note below tells the person what to do.'
         info "Certificate fingerprint: $(openssl x509 -in "$LINK_CERT" -noout -fingerprint -sha256 | sed 's/^.*=//')"
-        # English only: a terminal shows right-to-left text backwards. The guides have the note in Persian.
-        note='Your browser will warn that this connection is not private, because this server has no trusted certificate. Only for this link, which came to you straight from me: choose Advanced, then Continue. Never do this for other sites.'
     fi
     if [[ -n $PROFILE_PASSWORD ]]; then
         info 'The password is shown only now. To send it another way than the link, for example by SMS or a call, copy without it.'
@@ -1451,14 +1536,25 @@ share_by_link() {
     fi
     info "Until the link ends, anyone who has it can get this profile. If a connection you did not expect shows up, revoke the client and issue a new one."
     hr
-    show_share_block "$url" "$PROFILE_PASSWORD" "$note"
+    present_link "$url" "$PROFILE_PASSWORD" "$note"
+}
+link_note() {
+    # The note for the person, only when the browser will warn. English only: a terminal shows right-to-left
+    # text backwards. The guides have the note in Persian.
+    link_cert_is_trusted && return 0
+    printf '%s' 'Your browser will warn that this connection is not private, because this server has no trusted certificate. Only for this link, which came to you straight from me: choose Advanced, then Continue. Never do this for other sites.'
+}
+present_link() {
+    # present_link <url> <password> <note>: the block to send, then the copy question with the QR code in it.
+    local url=$1 password=$2 note=$3 qr='Show a QR code' rc
+    show_share_block "$url" "$password" "$note"
     hr
-    # The QR code holds the same link, for a phone in front of you; once drawn, the question comes back without it.
+    # Once drawn, the QR code is not offered again.
     while :; do
         rc=0
-        if [[ -n $PROFILE_PASSWORD ]]; then
+        if [[ -n $password ]]; then
             offer_copy 'the lines from "Link:" down' "$qr" \
-                "$(copy_label "$note" password)" "$(share_text "$url" "$PROFILE_PASSWORD" "$note")" \
+                "$(copy_label "$note" password)" "$(share_text "$url" "$password" "$note")" \
                 'Copy without the password' \
                 "$(share_text "$url" '' "${note:+$note }The file is locked. Its password comes to you separately.")" || rc=$?
         else
@@ -1491,56 +1587,87 @@ show_qr() {
         say
     fi
 }
-pending_shares() {
-    # What was shared but may not be picked up yet: links still open, and profile files left on the server.
-    # Each row has one action: a link is cancelled, a file is deleted.
+links_and_files() {
+    # Menu 6: the links still open and the profile files kept on the server. Choosing a row shows what can be
+    # done with it; nothing is removed by its number alone.
     local meta name state expires now minutes left i cn path serial
-    local -a kinds=() refs=() names=() whats=() states=()
+    local -a kinds=() refs=() names=() details=()
     now=$(date -u +%s)
     if [[ -d $LINK_DIR ]]; then
         for meta in "$LINK_DIR"/*.meta; do
             [[ -e $meta ]] || continue
             expires=$(awk -F= '$1=="expires" {print $2}' "$meta")
             if [[ ! $expires =~ ^[0-9]+$ ]] || (( expires <= now )); then
-                links_locked rm -f -- "$meta" "${meta%.meta}.ovpn" || true
+                links_locked rm -f -- "$meta" "${meta%.meta}.ovpn" "${meta%.meta}.url" || true
                 continue
             fi
             name=$(awk -F= '$1=="name" {print $2}' "$meta")
             state=$(awk -F= '$1=="downloads" {print $2}' "$meta")
-            if [[ $state =~ ^[1-9][0-9]*$ ]]; then state=downloaded; else state='not downloaded'; fi
+            if [[ $state =~ ^[1-9][0-9]*$ ]]; then state='downloaded'; else state='not downloaded yet'; fi
             minutes=$(( (expires - now + 59) / 60 ))
             left="$minutes min"
             if (( minutes >= 60 )); then left="$(( minutes / 60 )) h"; fi
             if (( minutes >= 60 && minutes % 60 )); then left+=" $(( minutes % 60 )) min"; fi
-            kinds+=(link) refs+=("$meta") names+=("$name") whats+=("link, $left left") states+=("$state")
+            kinds+=(link) refs+=("$meta") names+=("$name") details+=("$left left $S_SEP $state")
         done
     fi
     while IFS=$'\t' read -r cn _ _ serial; do
         if is_server_serial "$serial"; then continue; fi
         path=$(profile_path "$cn") || continue
-        kinds+=(file) refs+=("$path") names+=("$cn") whats+=('file on the server') states+=("$path")
+        kinds+=(file) refs+=("$path") names+=("$cn") details+=("$path")
     done < <(client_effective_rows)
-    if (( ${#kinds[@]} == 0 )); then info 'Nothing is waiting to be picked up. Share a profile from menu 5.'; return 0; fi
-    printf '  %s%3s  %-20s %-24s %s%s\n' "$C_BOLD" '' CLIENT 'WAITING AS' STATUS "$C_RESET"
+    info 'A link works until its time is up, or until the client connects.'
+    info 'A file stays on the server until you delete it.'
+    say
+    if (( ${#kinds[@]} == 0 )); then info 'No open links and no files on the server. Share a profile from menu 5.'; return 0; fi
     for i in "${!kinds[@]}"; do
-        printf '  %s%3d%s  %-20s %-24s %s\n' "$C_KEY" $((i + 1)) "$C_RESET" "$(safe_text "${names[i]}")" "${whats[i]}" "${states[i]}"
+        if [[ ${kinds[i]} == link ]] && { (( i == 0 )); }; then menu_group 'OPEN LINKS'; fi
+        if [[ ${kinds[i]} == file ]] && { (( i == 0 )) || [[ ${kinds[i - 1]} == link ]]; }; then menu_group 'FILES ON THE SERVER'; fi
+        printf '  %s%3d%s  %-20s %s\n' "$C_KEY" $((i + 1)) "$C_RESET" "$(safe_text "${names[i]}")" "${details[i]}"
     done
     say
     while :; do
-        if ! ask 'Number to cancel the link or delete the file (Enter = back): ' || [[ -z $REPLY ]]; then return 0; fi
-        if [[ $REPLY =~ ^[0-9]+$ ]] && (( 10#$REPLY >= 1 && 10#$REPLY <= ${#kinds[@]} )); then
-            i=$(( 10#$REPLY - 1 ))
-            if [[ ${kinds[i]} == link ]]; then
-                links_locked rm -f -- "${refs[i]}" "${refs[i]%.meta}.ovpn" || return 1
-                audit "temporary link cancelled: ${names[i]}"
-                ok "Link for \"$(safe_text "${names[i]}")\" cancelled."
-            else
-                delete_server_copy "${names[i]}"
-            fi
-            return
-        fi
+        if ! ask 'Choose one to see what you can do (Enter = back): ' || [[ -z $REPLY ]]; then return 0; fi
+        if [[ $REPLY =~ ^[0-9]+$ ]] && (( 10#$REPLY >= 1 && 10#$REPLY <= ${#kinds[@]} )); then break; fi
         warn "\"$REPLY\" is not in the list above."
     done
+    i=$(( 10#$REPLY - 1 ))
+    say
+    if [[ ${kinds[i]} == link ]]; then link_actions "${refs[i]}" "${names[i]}"; else file_actions "${names[i]}"; fi
+}
+link_actions() {
+    # link_actions <meta> <name>: show the link again, or cancel it.
+    local meta=$1 name=$2 saved=${1%.meta}.url url='' locked=''
+    if [[ -s $saved ]]; then { IFS= read -r url; IFS= read -r locked; } <"$saved" || true; fi
+    if [[ -n $url ]]; then
+        choose_one "The link for $name" 'Show the link again and copy it' 'Cancel the link' 'Back' || return 0
+    else
+        info 'This link was made by an earlier version, which did not keep it, so it cannot be shown again.'
+        choose_one "The link for $name" 'Cancel the link' 'Back' || return 0
+        CHOSEN=$(( CHOSEN + 1 ))
+    fi
+    case $CHOSEN in
+        1)
+            say
+            if [[ $locked == password=yes ]]; then
+                info 'The profile is locked with a password, which is not kept. Send it the way you noted it.'
+            fi
+            hr
+            present_link "$url" '' "$(link_note)" ;;
+        2)
+            links_locked rm -f -- "$meta" "${meta%.meta}.ovpn" "$saved" || return 1
+            audit "temporary link cancelled: $name"
+            ok "Link for \"$(safe_text "$name")\" cancelled." ;;
+    esac
+}
+file_actions() {
+    # file_actions <name>: show the download commands again, or delete the file.
+    local name=$1
+    choose_one "The file for $name" 'Show the download commands and copy one' 'Delete the file' 'Back' || return 0
+    case $CHOSEN in
+        1) say; share_by_download "$name" ;;
+        2) delete_server_copy "$name" ;;
+    esac
 }
 delete_server_copy() {
     # delete_server_copy <name>: the .ovpn file kept on the server, and the copy made for the SSH user.
@@ -2452,6 +2579,16 @@ remove_everything() {
         options+=(--backup)
     fi
     say
+    # Let's Encrypt gives 5 certificates a week for one address, and deleting one does not give it back.
+    if [[ -d $LE_DIR/live/$CERT_NAME ]]; then
+        info "Let's Encrypt gives at most 5 certificates a week for the same address. A kept certificate is used again by a new install here, without a new request."
+        if confirm_choice "Keep the Let's Encrypt certificate of the links?" 'Yes, keep it' 'Delete it' danger; then
+            info 'The certificate will be deleted.'
+        else
+            options+=(--keep-certificate)
+        fi
+        say
+    fi
     status=$(bash "$DARBAN_LIB/remove-server.sh" --kernel-status) || status=none
     case $status in
         running) info 'The Virtual HWE kernel stays: the system is running it now.' ;;
@@ -2694,7 +2831,7 @@ draw_main() {
     menu_item 4 'Revoke client (permanent)' danger
     menu_group SHARING
     menu_item 5 'Share a profile'
-    menu_item 6 'Waiting to be picked up (links and files)'
+    menu_item 6 'Links and files (show, cancel, delete)'
     menu_group SERVER
     menu_item 7 'Settings'
     menu_item 8 'Maintenance'
@@ -2948,7 +3085,7 @@ main_menu() {
             3) menu_action 'Connected now' connected_clients ;;
             4) menu_action 'Revoke client (permanent)' revoke_client ;;
             5) menu_action 'Share a profile' share_profile ;;
-            6) menu_action 'Waiting to be picked up' pending_shares ;;
+            6) menu_action 'Links and files' links_and_files ;;
             7) settings_menu ;;
             8) maintenance_menu ;;
             9) setup_menu ;;

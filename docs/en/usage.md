@@ -47,9 +47,14 @@ For example, after a new phone or a changed server address:
 
 The old profile can no longer connect, on any device. The tool also ends the open connection of that client alone, while other users stay connected. If ending that one connection is not possible, for example on a server this tool did not set up, the tool says so and asks whether to restart OpenVPN, which drops everyone for a few seconds. If you answer No, the open connection can last up to an hour. This cannot be undone, but you can later create a new client with the same name.
 
-## Cancel a link, or delete a file left on the server
+## See a link again, cancel it, or delete a file left on the server
 
-Press `6` **Waiting to be picked up**. It lists what was shared but may not be picked up yet: open links first, with the time left and whether the file was downloaded, then profile files kept on the server. Type the number of a row: a link is cancelled, and a file is deleted after you confirm. The client keeps working either way.
+Press `6` **Links and files**. It lists the open links, with the time left and whether the file was downloaded, and then the profile files kept on the server. Choose one, and the tool shows what you can do with it:
+
+- **A link:** show it again and copy it, if you lost it, or cancel it. A link made before `v1.0.0-rc.8` cannot be shown again.
+- **A file:** show the download commands again and copy one, or delete the file after you confirm.
+
+A number alone never removes anything. The client keeps working either way. A link's password is not kept, so it cannot be shown again.
 
 ## Change the server address or port
 

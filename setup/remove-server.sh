@@ -2,7 +2,7 @@
 # Removes what setup/server-setup.sh created: OpenVPN, the CA, client profiles, NAT, and this tool.
 # It works only from the record that setup left, so a server it did not set up is never touched.
 # Packages are removed only if setup added them and nothing else would be removed along with them.
-#   remove-server.sh --yes [--backup] [--kernel]
+#   remove-server.sh --yes [--backup] [--kernel] [--keep-certificate]
 #   remove-server.sh --kernel-status   prints: removable, running or none
 set -Euo pipefail
 umask 077
@@ -22,6 +22,7 @@ SETUP_LOG=/var/log/darban-setup.log
 LOCK_FILE=/run/darban.lock
 UNIT=openvpn-server@server.service
 MARKER=$CONFIG_DIR/.server-setup-started
+CERT_LOG=/var/lib/darban/link-certificates.log
 export DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=l
 
 FAILED=()
@@ -53,7 +54,7 @@ purge_exact() {
     try apt-get -o DPkg::Lock::Timeout=300 -y -q purge "$@"
 }
 
-ALLOW=0 BACKUP=0 KERNEL=0
+ALLOW=0 BACKUP=0 KERNEL=0 KEEP_CERT=0
 case "$#:${1:-}" in
     1:--kernel-status)
         [[ -r $MARKER ]] || { echo none; exit 0; }
@@ -65,7 +66,8 @@ while (( $# )); do
         --yes) ALLOW=1 ;;
         --backup) BACKUP=1 ;;
         --kernel) KERNEL=1 ;;
-        *) printf 'Usage: remove-server.sh --yes [--backup] [--kernel]\n' >&2; exit 2 ;;
+        --keep-certificate) KEEP_CERT=1 ;;
+        *) printf 'Usage: remove-server.sh --yes [--backup] [--kernel] [--keep-certificate]\n' >&2; exit 2 ;;
     esac
     shift
 done
@@ -122,12 +124,24 @@ if command -v ufw >/dev/null; then
     if [[ $ufw_iface =~ ^[A-Za-z0-9_.@-]+$ ]]; then ufw route delete allow in on tun0 out on "$ufw_iface" >/dev/null 2>&1 || true; fi
 fi
 
-# The certificates for temporary links that this tool got, then the certbot it installed, if any.
-for name in "${certificates[@]}"; do
-    for bin in /snap/bin/certbot "${certbot_venv:+$certbot_venv/bin/certbot}" "$(command -v certbot 2>/dev/null || true)"; do
-        if [[ -n $bin && -x $bin ]]; then "$bin" delete --non-interactive --cert-name "$name" >/dev/null 2>&1 || true; break; fi
+# The certificates for temporary links that this tool got, then the certbot it installed, if any. A kept
+# certificate stays in /etc/letsencrypt with the record of what was issued, and a new install uses it again:
+# Let's Encrypt gives 5 a week for one address, and deleting one does not give it back.
+if (( KEEP_CERT )); then
+    for name in "${certificates[@]}"; do
+        printf 'Kept the Let'"'"'s Encrypt certificate %s in /etc/letsencrypt; a new install here uses it again.\n' "$name"
+        printf 'To delete it: sudo rm -rf /etc/letsencrypt/live/%s /etc/letsencrypt/archive/%s /etc/letsencrypt/renewal/%s.conf %s\n' \
+            "$name" "$name" "$name" "$CERT_LOG"
     done
-done
+else
+    for name in "${certificates[@]}"; do
+        for bin in /snap/bin/certbot "${certbot_venv:+$certbot_venv/bin/certbot}" "$(command -v certbot 2>/dev/null || true)"; do
+            if [[ -n $bin && -x $bin ]]; then "$bin" delete --non-interactive --cert-name "$name" >/dev/null 2>&1 || true; break; fi
+        done
+    done
+    rm -f -- "$CERT_LOG"
+    rmdir -- "${CERT_LOG%/*}" 2>/dev/null || true
+fi
 if grep -qx 'snap certbot' "$MARKER" && command -v snap >/dev/null; then try snap remove certbot; fi
 # Only v1.0.0-beta.1 made this folder, and only under this exact name.
 if [[ $certbot_venv == /opt/darban-certbot ]]; then try rm -rf -- "$certbot_venv"; fi

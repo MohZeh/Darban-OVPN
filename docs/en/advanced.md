@@ -180,7 +180,7 @@ The backup that **Remove everything** offers is a `.tar.gz` file in `/root`, rea
 | Option | Removes | Keeps |
 |---|---|---|
 | **Setup › Uninstall this tool only** | The tool, its timer and open links | OpenVPN, PKI, CRL, `server.conf`, profiles, settings |
-| **Setup › Remove everything** | The tool, OpenVPN, CA, profiles, NAT, the repository, the packages and the certbot the setup added, and the certificate it got | The Virtual HWE kernel unless you choose otherwise, the optional backup, and what was there before: other files in the profile folder, `ufw` rules, and repository files, which are put back |
+| **Setup › Remove everything** | The tool, OpenVPN, CA, profiles, NAT, the repository, the packages and the certbot the setup added | The link certificate it got from Let's Encrypt, unless you choose to delete it, so a new install here uses it without a new request; the Virtual HWE kernel unless you choose otherwise, the optional backup, and what was there before: other files in the profile folder, `ufw` rules, and repository files, which are put back |
 
 **After Uninstall, nothing renews the CRL.** Renew it yourself before it expires, or OpenVPN may refuse clients.
 
