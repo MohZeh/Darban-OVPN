@@ -23,7 +23,8 @@ if command -v snap >/dev/null; then
         # The Snap Store itself is down, which no change here can fix: the setup must still finish, and did.
         echo 'NOTE: the Snap Store does not answer, so the setup could not install certbot; this check is skipped.'
     else
-        echo 'FAIL: the Snap Store answers, but the setup did not install certbot.'
+        echo 'FAIL: the Snap Store answers, but the setup did not install certbot. What the setup logged about it:'
+        grep -iE 'certbot|snap' /var/log/darban-setup.log 2>/dev/null | tail -n 20 || true
         exit 1
     fi
 else
