@@ -4,6 +4,10 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## [Unreleased]
 
+## [1.0.0-rc.7] - 2026-11-10
+
+Release candidate for `v1.0.0`, for testing on a server that is not in use. It replaces `v1.0.0-rc.6`, with the fixes from an audit of its code: safer link certificates, a lock shared by the link service and the menu, and exact guides. A server on `v1.0.0-rc.6` reaches it from the menu (Setup › 2) or with `sudo darban update`; an older one needs the install command.
+
 ### Removed
 - The install no longer moves settings and files from the tool's earlier name, `mzx-openvpn-manager`, and the diagnostics no longer accept its NAT table, `mzx_openvpn`. No server uses that name any more.
 

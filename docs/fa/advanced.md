@@ -13,7 +13,7 @@
 </div>
 
 ```bash
-curl -fsSL https://github.com/MohZeh/Darban-OVPN/releases/download/v1.0.0-rc.6/get.sh -o get.sh
+curl -fsSL https://github.com/MohZeh/Darban-OVPN/releases/download/v1.0.0-rc.7/get.sh -o get.sh
 ```
 
 ```bash
@@ -33,7 +33,7 @@ sudo bash get.sh
 </div>
 
 ```bash
-sudo bash -c 'curl -fsSL https://github.com/MohZeh/Darban-OVPN/releases/download/v1.0.0-rc.6/get.sh | bash'
+sudo bash -c 'curl -fsSL https://github.com/MohZeh/Darban-OVPN/releases/download/v1.0.0-rc.7/get.sh | bash'
 ```
 
 <div dir="rtl">
@@ -43,7 +43,7 @@ sudo bash -c 'curl -fsSL https://github.com/MohZeh/Darban-OVPN/releases/download
 </div>
 
 ```bash
-sudo bash -c 'curl -fsSL https://github.com/MohZeh/Darban-OVPN/releases/download/v1.0.0-rc.6/get.sh | bash -s -- --version v1.0.0-rc.5'
+sudo bash -c 'curl -fsSL https://github.com/MohZeh/Darban-OVPN/releases/download/v1.0.0-rc.7/get.sh | bash -s -- --version v1.0.0-rc.6'
 ```
 
 <div dir="rtl">
@@ -53,7 +53,7 @@ sudo bash -c 'curl -fsSL https://github.com/MohZeh/Darban-OVPN/releases/download
 </div>
 
 ```bash
-sudo bash -c 'set -o pipefail; curl -fsSL https://github.com/MohZeh/Darban-OVPN/releases/download/v1.0.0-rc.6/get.sh | bash -s -- --yes --host vpn.example.com --port 1194'
+sudo bash -c 'set -o pipefail; curl -fsSL https://github.com/MohZeh/Darban-OVPN/releases/download/v1.0.0-rc.7/get.sh | bash -s -- --yes --host vpn.example.com --port 1194'
 ```
 
 <div dir="rtl">
