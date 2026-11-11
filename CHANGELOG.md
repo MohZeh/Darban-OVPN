@@ -4,6 +4,12 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## [Unreleased]
 
+### Fixed
+- A link certificate whose key does not match it, whatever left them so, is replaced at the next link. Before, every link failed until the certificate was changed by hand.
+- A new link certificate, from Let's Encrypt or self-signed, is made beside the current one and then put in place, so a failure keeps the current pair.
+- Cancelling a link, revoking its client, or removing an expired link now waits for a download in progress, so the link service cannot write back the record of a link that is being removed.
+- The guides say that a password the administrator chose may have spaces or symbols, and only the suggested one has none; that revoking ends the client's open connection when it can, and asks what to do when it cannot; and that opening the downloaded profile was tested on Android and Windows.
+
 ## [1.0.0-rc.6] - 2026-11-10
 
 Release candidate for `v1.0.0`, for testing on a server that is not in use. It replaces `v1.0.0-rc.5`, with the fixes and changes from its test on a real server. A server on `v1.0.0-rc.5` or older reaches it with the install command, not with `darban update`; from this version on, `darban update` offers the next test version.

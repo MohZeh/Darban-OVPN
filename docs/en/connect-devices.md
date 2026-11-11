@@ -55,7 +55,7 @@ While connected, open [api.ipify.org](https://api.ipify.org). It should show the
 
 ## If the profile has a password
 
-If the administrator locked the key, the app asks for a password. The administrator sends it separately from the link. Type it exactly as you received it: it has no spaces or dashes.
+If the administrator locked the key, the app asks for a password. The administrator sends it separately from the link. Type it exactly as you received it. The password the tool suggests has no spaces or dashes; one the administrator chose may have spaces or symbols.
 
 So that the app asks only once, turn on **Save private key password** when you import the profile, or later in the profile's settings.
 

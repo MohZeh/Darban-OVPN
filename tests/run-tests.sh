@@ -1218,7 +1218,7 @@ STUB
 }
 stop_links_stub() { if [[ -s ${LINKS_PIDFILE:-/nonexistent} ]]; then kill "$(cat "$LINKS_PIDFILE")" 2>/dev/null; fi; }
 web() { /usr/bin/curl -ks --max-time 10 "$@"; }
-new_link() { menu "5\n${1:-alice}\n1\n1\n${2:-1}\n0\n" | grep -oE 'https://[^ ]+/l/[0-9a-f]{64}'; }
+new_link() { menu "5\n${1:-alice}\n1\n1\n0\n" | grep -oE 'https://[^ ]+/l/[0-9a-f]{64}'; }
 
 test_temporary_link_end_to_end() {
     local url base out head code
@@ -1334,16 +1334,63 @@ test_temporary_link_expiry_cancel_and_revoke() {
     [[ $(web -o /dev/null -w '%{http_code}' "$url/file") == 410 ]]; rc_is 'and gives no file' 0 "$?"
     has 'active links drops an expired link' 'Nothing is waiting to be picked up' "$(menu '6\n0\n')"
 
-    url=$(new_link alice 2)
+    url=$(new_link alice)
     out=$(menu '6\n1\n0\n')
     has 'a link can be cancelled' 'cancelled' "$out"
     [[ $(web -o /dev/null -w '%{http_code}' "$url") == 410 ]]; rc_is 'a cancelled link is refused' 0 "$?"
     ok_if 'a cancelled link leaves no copy' test -z "$(find "$E/links" -name '*.ovpn')"
 
-    url=$(new_link alice 3)
+    url=$(new_link alice)
     revoke_menu alice >/dev/null
     [[ $(web -o /dev/null -w '%{http_code}' "$url") == 410 ]]; rc_is 'revoking a client ends its links' 0 "$?"
     ok_if 'revoking leaves no copy' test -z "$(find "$E/links" -name '*.ovpn')"
+    stop_links_stub
+}
+
+test_link_removal_waits_for_the_link_service() {
+    # A download and a removal take turns on the link files, so the record of a removed link never comes back.
+    local dir=$E/race key started took
+    mkdir -p "$dir"
+    key=$(printf '%s' "$(printf 'a%.0s' {1..64})" | sha256sum | awk '{print $1}')
+    printf 'name=alice\nexpires=%s\ncreated=1\ndownloads=0\n' "$(( $(date -u +%s) + 3600 ))" > "$dir/$key.meta"
+    echo profile > "$dir/$key.ovpn"
+    # darban holds the lock and removes the link while a download is waiting for it. The real flock: the
+    # stand-in in $E/bin does not lock.
+    ( /usr/bin/flock 8; touch "$dir/held"; sleep 2; rm -f -- "$dir/$key.meta" "$dir/$key.ovpn" ) 8>"$dir/.lock" &
+    for started in 1 2 3 4 5 6 7 8 9 10; do [[ -e $dir/held ]] && break; sleep 0.1; done
+    took=$(python3 -I -c 'import sys, time; sys.path.insert(0, sys.argv[1]); import linkd
+start = time.time(); name, data = linkd.Store(sys.argv[2]).take("a" * 64)
+print(f"{time.time() - start:.1f} {name}")' "$REPO/lib" "$dir")
+    wait
+    [[ ${took%% *} != 0.* ]]; rc_is 'the download waits for the removal' 0 "$?"
+    [[ ${took#* } == None ]]; rc_is 'and then finds no link' 0 "$?"
+    ok_if 'and does not write its record back' test ! -e "$dir/$key.meta"
+}
+
+test_link_certificate_heals_and_survives_failures() {
+    # A key and a certificate that do not match are replaced at the next link; a failed replacement keeps the pair.
+    local before
+    start_links_stub
+    openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes -keyout "$E/other.key" -out "$E/other.pem" \
+        -days 30 -subj /CN=127.0.0.1 -addext subjectAltName=IP:127.0.0.1 >/dev/null 2>&1
+    menu '5\nalice\n1\n1\n0\n' >/dev/null
+    menu '6\n1\n0\n' >/dev/null
+    cp "$E/other.key" "$E/cfg/link-key.pem"
+    has 'a pair that does not match is replaced, and the link is made' '/l/' "$(menu '5\nalice\n1\n1\n0\n')"
+    openssl x509 -in "$E/cfg/link-cert.pem" -noout -pubkey > "$E/pub.cert"
+    openssl pkey -in "$E/cfg/link-key.pem" -pubout > "$E/pub.key"
+    cmp -s "$E/pub.cert" "$E/pub.key"; rc_is 'the new pair matches' 0 "$?"
+    menu '6\n1\n0\n' >/dev/null
+
+    # The pair is unusable again, and making a new one fails: the files stay as they were.
+    cp "$E/other.key" "$E/cfg/link-key.pem"
+    before=$(cat "$E/cfg/link-cert.pem" "$E/cfg/link-key.pem" | sha256sum)
+    printf '#!/usr/bin/env bash\nif [[ " $* " == *" req "* ]]; then exit 1; fi\nexec /usr/bin/openssl "$@"\n' > "$E/bin/openssl"
+    chmod +x "$E/bin/openssl"
+    has 'a failed new certificate says so' 'Could not create a certificate for the link.' "$(menu '5\nalice\n1\n1\n0\n')"
+    [[ $(cat "$E/cfg/link-cert.pem" "$E/cfg/link-key.pem" | sha256sum) == "$before" ]]; rc_is 'and leaves the files as they were' 0 "$?"
+    ok_if 'with nothing left over' test -z "$(find "$E/cfg" -name '.link-*.new')"
+    rm -f "$E/bin/openssl"
     stop_links_stub
 }
 

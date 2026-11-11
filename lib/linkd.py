@@ -8,6 +8,8 @@ phone costs nothing. Opening the page never uses anything up: messengers fetch l
 Standard library only. The process ends by itself once no link is left.
 """
 import argparse
+import contextlib
+import fcntl
 import hashlib
 import html
 import http.server
@@ -34,6 +36,18 @@ class Store:
     def __init__(self, directory):
         self.directory = directory
         self.lock = threading.Lock()
+
+    @contextlib.contextmanager
+    def locked(self):
+        """The threads of this service, and darban removing a link, take turns on the link files. Without the
+        file lock, a download could write back the record of a link that darban was removing at that moment."""
+        with self.lock:
+            fd = os.open(os.path.join(self.directory, '.lock'), os.O_RDWR | os.O_CREAT, 0o600)
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX)
+                yield
+            finally:
+                os.close(fd)
 
     def _path(self, key, suffix):
         return os.path.join(self.directory, key + suffix)
@@ -66,13 +80,13 @@ class Store:
                 pass
 
     def find(self, token):
-        with self.lock:
+        with self.locked():
             return self._read(token_hash(token))
 
     def take(self, token):
         """Returns the profile of a link and counts the download. The link stays until the first connection."""
         key = token_hash(token)
-        with self.lock:
+        with self.locked():
             meta = self._read(key)
             if not meta:
                 return None, None
@@ -88,7 +102,7 @@ class Store:
     def end_connected(self, connected):
         """Removes each link whose client has connected since the link was made, and returns their names."""
         ended = []
-        with self.lock:
+        with self.locked():
             for entry in os.listdir(self.directory):
                 if not entry.endswith('.meta'):
                     continue
@@ -101,7 +115,7 @@ class Store:
 
     def purge(self):
         """Removes what has expired and returns how many links remain."""
-        with self.lock:
+        with self.locked():
             remaining = 0
             now = time.time()
             for entry in os.listdir(self.directory):
