@@ -445,7 +445,7 @@ test_menu_groups_profile_files_together() {
     has 'revoke ends the clients group' '4  Revoke client' "$out"
     has 'sharing has its own group' 'SHARING' "$out"
     has 'sharing is in that group' '5  Share a profile' "$out"
-    has 'links and files waiting are one item' '6  Waiting to be picked up (links and files)' "$out"
+    has 'links and files are one item, with what it does' '6  Links and files (show, cancel, delete)' "$out"
     out=$(menu '7\n0\n0\n')
     has 'settings holds the address' 'Server address' "$out"
     has 'settings groups the links' $'LINKS\n    3  Link lifetime' "$out"
@@ -458,20 +458,33 @@ test_menu_groups_profile_files_together() {
     lacks 'maintenance no longer lists who is connected' '4  Connected now' "$(menu '8\n0\n0\n')"
 }
 
-test_waiting_lists_links_and_files() {
-    # Menu 6 holds what was shared but may not be picked up yet: open links first, then files on the server.
-    local out
+test_links_and_files() {
+    # Menu 6: open links, then files on the server. A row opens what can be done with it; its number alone
+    # removes nothing.
+    local out url
     start_links_stub
     menu '1\nbob\n0\n' >/dev/null
-    menu '5\nalice\n1\n1\n0\n' >/dev/null
+    url=$(menu '5\nalice\n1\n1\n0\n' | grep -oE 'https://[^ ]+/l/[0-9a-f]{64}')
     out=$(menu '6\n\n0\n')
-    has 'the link is listed first' '1  alice                link, 24 h left          not downloaded' "$out"
-    has 'then the file on the server' "2  bob                  file on the server       $E/clients/bob.ovpn" "$out"
-    out=$(menu '6\n2\n2\n0\n')
+    has 'it says how long each one stays' 'A link works until its time is up, or until the client connects.' "$out"
+    has 'links have their own group' $'OPEN LINKS\n    1  alice' "$out"
+    has 'with the time left' '24 h left' "$out"
+    has 'and whether it was downloaded' 'not downloaded yet' "$out"
+    has 'files have theirs' $'FILES ON THE SERVER\n    2  bob' "$out"
+    out=$(menu '6\n1\n\n0\n')
+    has 'a row shows what can be done' 'Show the link again and copy it' "$out"
+    ok_if 'and choosing Back removes nothing' test -n "$(find "$E/links" -name '*.meta')"
+    out=$(menu '6\n1\n1\n0\n')
+    has 'the link is shown again' $'Link:\n'"$url" "$out"
+    out=$(menu '6\n2\n1\n0\n')
+    has 'a file shows its download commands again' 'USERPROFILE' "$out"
+    ok_if 'and stays' test -s "$E/clients/bob.ovpn"
+    out=$(menu '6\n2\n2\n2\n0\n')
     has 'a file is deleted after asking' "Deleted: $E/clients/bob.ovpn" "$out"
     ok_if 'it is gone' test ! -e "$E/clients/bob.ovpn"
-    has 'a link is cancelled' 'Link for "alice" cancelled.' "$(menu '6\n1\n0\n')"
-    has 'then nothing is waiting' 'Nothing is waiting to be picked up' "$(menu '6\n0\n')"
+    has 'a link is cancelled' 'Link for "alice" cancelled.' "$(menu '6\n1\n2\n0\n')"
+    ok_if 'with its saved address' test -z "$(find "$E/links" -name '*.url')"
+    has 'then the list is empty' 'No open links and no files on the server' "$(menu '6\n0\n')"
     stop_links_stub
 }
 
@@ -937,7 +950,8 @@ install_removal_scripts() {
         -e "s#^APT_LIST=.*#APT_LIST=$root/sources/openvpn.list#" -e "s#^SYSCTL_FILE=.*#SYSCTL_FILE=$root/sysctl/darban.conf#" \
         -e "s#^MODULES_FILE=.*#MODULES_FILE=$root/modules/darban.conf#" -e "s#^NAT_UNIT=.*#NAT_UNIT=$root/units/nat.service#" \
         -e "s#^BACKUP_DIR=.*#BACKUP_DIR=$E/backups#" -e "s#^TOOL_BACKUPS=.*#TOOL_BACKUPS=$E/tool-backups#" \
-        -e "s#^SETUP_LOG=.*#SETUP_LOG=$E/setup.log#" -e "s#^LOCK_FILE=.*#LOCK_FILE=$E/run/lock#" "$REPO/setup/remove-server.sh" > "$E/lib/remove-server.sh"
+        -e "s#^SETUP_LOG=.*#SETUP_LOG=$E/setup.log#" -e "s#^LOCK_FILE=.*#LOCK_FILE=$E/run/lock#" \
+        -e "s#^CERT_LOG=.*#CERT_LOG=$E/varlib/link-certificates.log#" "$REPO/setup/remove-server.sh" > "$E/lib/remove-server.sh"
     sed -e "s#^LIB=.*#LIB=$E/fake-lib#" -e "s#^SBIN=.*#SBIN=$E/fake-sbin#" -e "s#^UNITS=.*#UNITS=$E/fake-units#" \
         -e 's/^\[\[ \$EUID == 0 \]\] .*/:/' "$REPO/setup/uninstall.sh" > "$E/lib/uninstall.sh"
 }
@@ -981,6 +995,40 @@ test_remove_everything_removes_only_what_setup_added() {
     listing=$(tar -tzPf "$backup")
     has 'the backup holds the CA key' 'pki/private/ca.key' "$listing"
     has 'the backup holds the profiles' 'clients/first.ovpn' "$listing"
+}
+
+test_remove_everything_keeps_the_link_certificate() {
+    # Let's Encrypt gives 5 a week for one address: the link certificate stays for the next install, unless
+    # the admin deletes it.
+    local out
+    built_server
+    mkdir -p "$E/le/live/darban-ovpn-links" "$E/varlib"
+    echo cert > "$E/le/live/darban-ovpn-links/fullchain.pem"
+    echo '1 vpn.example.com' > "$E/varlib/link-certificates.log"
+    echo 'certbot_cert darban-ovpn-links' >> "$E/cfg/.server-setup-started"
+    printf '#!/usr/bin/env bash\necho "certbot $*" >> "$STUB_LOG"\n' > "$E/bin/certbot"; chmod +x "$E/bin/certbot"
+    : > "$STUB_LOG"
+    out=$(printf '2\n1\n1\nremove-everything\n' | bash "$E/manager.sh" remove-all 2>&1)
+    has 'it asks, and keeping is the default' "Keep the Let's Encrypt certificate of the links?" "$out"
+    has 'it says the certificate stays' "Kept the Let's Encrypt certificate darban-ovpn-links" "$out"
+    has 'and how to delete it' 'To delete it: sudo rm -rf /etc/letsencrypt/live/darban-ovpn-links' "$out"
+    if grep -q 'certbot delete' "$STUB_LOG"; then result 0 'certbot does not delete it'; else result 1 'certbot does not delete it'; fi
+    ok_if 'the record of issues stays' test -s "$E/varlib/link-certificates.log"
+}
+
+test_remove_everything_can_delete_the_link_certificate() {
+    local out
+    built_server
+    mkdir -p "$E/le/live/darban-ovpn-links" "$E/varlib"
+    echo cert > "$E/le/live/darban-ovpn-links/fullchain.pem"
+    echo '1 vpn.example.com' > "$E/varlib/link-certificates.log"
+    echo 'certbot_cert darban-ovpn-links' >> "$E/cfg/.server-setup-started"
+    printf '#!/usr/bin/env bash\necho "certbot $*" >> "$STUB_LOG"\n' > "$E/bin/certbot"; chmod +x "$E/bin/certbot"
+    : > "$STUB_LOG"
+    out=$(printf '2\n2\n1\nremove-everything\n' | bash "$E/manager.sh" remove-all 2>&1)
+    has 'deleting is a choice' 'The certificate will be deleted.' "$out"
+    grep -q 'certbot delete --non-interactive --cert-name darban-ovpn-links' "$STUB_LOG"; rc_is 'certbot deletes it' 0 "$?"
+    ok_if 'with the record of issues' test ! -e "$E/varlib/link-certificates.log"
 }
 
 test_remove_everything_backup_choice() {
@@ -1246,7 +1294,7 @@ test_temporary_link_end_to_end() {
     has 'responses keep the address private' 'no-referrer' "$head"
 
     has 'active links shows it not downloaded' 'not downloaded' "$(menu '6\n\n0\n')"
-    has 'and the time left in hours and minutes' 'link, 24 h left          not downloaded' "$(menu '6\n\n0\n')"
+    has 'and the time left in hours and minutes' '24 h left' "$(menu '6\n\n0\n')"
     head=$(web -D - -o "$E/got.ovpn" "$url/file")
     has 'the file type is what OpenVPN clients expect' 'application/x-openvpn-profile' "$head"
     has 'it downloads under the client name' 'alice.ovpn' "$head"
@@ -1332,10 +1380,10 @@ test_temporary_link_expiry_cancel_and_revoke() {
     sed -i 's/^expires=.*/expires=1000/' "$meta"
     [[ $(web -o /dev/null -w '%{http_code}' "$url") == 410 ]]; rc_is 'an expired link is refused' 0 "$?"
     [[ $(web -o /dev/null -w '%{http_code}' "$url/file") == 410 ]]; rc_is 'and gives no file' 0 "$?"
-    has 'active links drops an expired link' 'Nothing is waiting to be picked up' "$(menu '6\n0\n')"
+    has 'active links drops an expired link' 'No open links and no files on the server' "$(menu '6\n0\n')"
 
     url=$(new_link alice)
-    out=$(menu '6\n1\n0\n')
+    out=$(menu '6\n1\n2\n0\n')
     has 'a link can be cancelled' 'cancelled' "$out"
     [[ $(web -o /dev/null -w '%{http_code}' "$url") == 410 ]]; rc_is 'a cancelled link is refused' 0 "$?"
     ok_if 'a cancelled link leaves no copy' test -z "$(find "$E/links" -name '*.ovpn')"
@@ -1374,13 +1422,13 @@ test_link_certificate_heals_and_survives_failures() {
     openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes -keyout "$E/other.key" -out "$E/other.pem" \
         -days 30 -subj /CN=127.0.0.1 -addext subjectAltName=IP:127.0.0.1 >/dev/null 2>&1
     menu '5\nalice\n1\n1\n0\n' >/dev/null
-    menu '6\n1\n0\n' >/dev/null
+    menu '6\n1\n2\n0\n' >/dev/null
     cp "$E/other.key" "$E/cfg/link-key.pem"
     has 'a pair that does not match is replaced, and the link is made' '/l/' "$(menu '5\nalice\n1\n1\n0\n')"
     openssl x509 -in "$E/cfg/link-cert.pem" -noout -pubkey > "$E/pub.cert"
     openssl pkey -in "$E/cfg/link-key.pem" -pubout > "$E/pub.key"
     cmp -s "$E/pub.cert" "$E/pub.key"; rc_is 'the new pair matches' 0 "$?"
-    menu '6\n1\n0\n' >/dev/null
+    menu '6\n1\n2\n0\n' >/dev/null
 
     # The pair is unusable again, and making a new one fails: the files stay as they were.
     cp "$E/other.key" "$E/cfg/link-key.pem"
@@ -1411,7 +1459,7 @@ test_link_lifetime_setting() {
     now=$(date -u +%s)
     expires=$(sed -n 's/^expires=//p' "$E"/links/*.meta | head -n 1)
     (( expires > now + 6 * 3600 - 120 && expires <= now + 6 * 3600 )); rc_is 'and expires after 6 hours' 0 "$?"
-    menu '6\n1\n0\n' >/dev/null
+    menu '6\n1\n2\n0\n' >/dev/null
     printf 'LINK_HOURS=100\n' >> "$E/cfg/config"
     has 'a bad value in the file falls back to 24 hours' 'Invalid LINK_HOURS' "$(menu '7\n0\n0\n')"
     stop_links_stub
@@ -1435,7 +1483,7 @@ test_link_server_ends_when_idle() {
     kill -0 "$pid"; rc_is 'the server runs while a link exists' 0 "$?"
     sleep 2
     kill -0 "$pid"; rc_is 'it stays up while the link is waiting' 0 "$?"
-    menu '6\n1\n0\n' >/dev/null
+    menu '6\n1\n2\n0\n' >/dev/null
     for attempt in 1 2 3 4 5 6 7 8 9 10; do kill -0 "$pid" 2>/dev/null || break; sleep 0.5; done
     if kill -0 "$pid" 2>/dev/null; then result 0 'it ends when no link is left'; else result 1 'it ends when no link is left'; fi
     stop_links_stub
@@ -1558,13 +1606,13 @@ test_link_certificate_for_a_hostname() {
     has 'declining falls back to a self-signed certificate' 'no trusted certificate' "$out"
     has 'the link uses the hostname' "https://vpn.example.com:$LINK_TEST_PORT/l/" "$out"
     openssl x509 -in "$E/cfg/link-cert.pem" -noout -checkhost vpn.example.com | grep -q 'does match'; rc_is 'the certificate fits the hostname' 0 "$?"
-    menu '6\n1\n0\n' >/dev/null
+    menu '6\n1\n2\n0\n' >/dev/null
     before=$(sha256sum < "$E/cfg/link-cert.pem")
     out=$(menu '5\nalice\n1\n2\n1\n0\n')
     has 'a self-signed certificate is offered a trusted one again' "Let's Encrypt" "$out"
     [[ $(sha256sum < "$E/cfg/link-cert.pem") == "$before" ]]; rc_is 'declining keeps the current self-signed certificate' 0 "$?"
     has 'and the link is made' "https://vpn.example.com:$LINK_TEST_PORT/l/" "$out"
-    menu '6\n1\n0\n' >/dev/null
+    menu '6\n1\n2\n0\n' >/dev/null
 
     # A trusted certificate valid for weeks is not asked about again.
     mkdir -p "$E/le"
@@ -1575,7 +1623,7 @@ test_link_certificate_for_a_hostname() {
     out=$(menu '5\nalice\n1\n1\n0\n')
     lacks 'a usable trusted certificate is not asked about again' "Let's Encrypt" "$out"
     has 'and the link is made with it' "https://vpn.example.com:$LINK_TEST_PORT/l/" "$out"
-    menu '6\n1\n0\n' >/dev/null
+    menu '6\n1\n2\n0\n' >/dev/null
     rm -f "$E/cfg/link-cert.pem" "$E/cfg/link-key.pem"
     mv "$E/cfg/link-cert.self" "$E/cfg/link-cert.pem"; mv "$E/cfg/link-key.self" "$E/cfg/link-key.pem"
 
@@ -1586,10 +1634,7 @@ test_link_certificate_for_a_hostname() {
     has 'a failed request explains itself' 'certbot could not get a certificate' "$out"
     has 'and still gives a working link' "https://vpn.example.com:$LINK_TEST_PORT/l/" "$out"
     grep -q 'certbot certonly --standalone' "$STUB_LOG"; rc_is 'certbot was asked' 0 "$?"
-    menu '6
-1
-0
-' >/dev/null
+    menu '6\n1\n2\n0\n' >/dev/null
 
     # A trusted certificate with less than a day left, and a renewal that fails: the one that still works stays.
     mkdir -p "$E/le"
@@ -1598,7 +1643,7 @@ test_link_certificate_for_a_hostname() {
     ln -s "$E/le/fullchain.pem" "$E/cfg/link-cert.pem"; ln -s "$E/le/privkey.pem" "$E/cfg/link-key.pem"
     out=$(menu '5\nalice\n1\n1\n1\n0\n')
     has 'a trusted certificate that still works stays' 'The current trusted certificate stays' "$out"
-    menu '6\n1\n0\n' >/dev/null
+    menu '6\n1\n2\n0\n' >/dev/null
     out=$(menu '5\nalice\n1\n1\n1\n0\n')
     has 'a link does not outlive the certificate' 'The link certificate ends sooner than 24 hours, so this link works for at most 23 hours.' "$out"
     has 'and a shorter one is made' "https://vpn.example.com:$LINK_TEST_PORT/l/" "$out"
@@ -1680,7 +1725,7 @@ test_settings_apply_in_the_same_session() {
     out=$(menu '7\n3\n5\n0\n5\nalice\n1\n1\n0\n')
     has 'Settings shows the new lifetime at once' 'Link lifetime            5 hours' "$out"
     has 'and the next link takes it' 'Valid     5 hours' "$out"
-    menu '6\n1\n0\n' >/dev/null
+    menu '6\n1\n2\n0\n' >/dev/null
     out=$(menu '7\n6\n7\n30\n0\n0\n0\n')
     has 'Advanced shows a new client lifetime at once' 'New client lifetime      30' "$out"
     out=$(menu '7\n6\n7\n0\n0\n0\n0\n')
@@ -2509,14 +2554,14 @@ test_download_uses_a_copy_the_user_can_read() {
     has 'the command fetches the copy' "ali@" "$out"
     has 'from the user home' "$home/alice.ovpn" "$out"
     ok_if 'the copy exists' test -s "$home/alice.ovpn"
-    out=$(menu '6\n1\n2\n0\n')
+    out=$(menu '6\n1\n2\n2\n0\n')
     has 'deleting the server copy names the user copy' "The copy made for ali is deleted too" "$out"
     ok_if 'and deletes it' test ! -e "$home/alice.ovpn"
     # A file of the same name that is not this client's profile stays.
     echo 'not a profile' > "$home/alice.ovpn"
     menu '5\nalice\n2\n\n0\n' >/dev/null
     echo 'not a profile' > "$home/alice.ovpn"
-    menu '6\n1\n2\n0\n' >/dev/null
+    menu '6\n1\n2\n2\n0\n' >/dev/null
     grep -q 'not a profile' "$home/alice.ovpn"; rc_is 'a file that is not the profile stays' 0 "$?"
     menu '1\nbob\n0\n' >/dev/null
     printf '5\nbob\n2\n\n0\n' | bash "$E/manager.sh" >/dev/null 2>&1
@@ -2568,7 +2613,7 @@ test_link_certificate_for_a_public_ip() {
     if grep -q '^certbot_cert' "$E/cfg/.server-setup-started"; then result 0 'a failed request is not recorded'; else result 1 'a failed request is not recorded'; fi
     has 'it still gives a working link' "https://203.0.113.9:$LINK_TEST_PORT/l/" "$out"
     has 'and says what a password would protect' 'A password on the key protects the profile' "$out"
-    menu '6\n1\n0\n' >/dev/null
+    menu '6\n1\n2\n0\n' >/dev/null
     rm -f "$E/cfg/link-cert.pem" "$E/cfg/link-key.pem"
     printf '#!/usr/bin/env bash\nif [[ $1 == --version ]]; then echo "certbot 5.9.0"; exit 0; fi\necho "certbot $*" >> "$STUB_LOG"; exit 0\n' > "$E/bin/certbot"
     menu '5\nalice\n1\n1\n1\n0\n' >/dev/null
@@ -2580,8 +2625,9 @@ test_link_certificate_for_a_public_ip() {
 }
 
 make_test_ca() {
-    # A certificate authority of its own, trusted as the system's, and a certificate from it for $1 in $2/$3.
-    local host=$1 dir=$2 leaf=$3 key=$4
+    # A certificate authority of its own, trusted as the system's, and a certificate from it for $1 in $2/$3,
+    # valid for $5 days (30 by default).
+    local host=$1 dir=$2 leaf=$3 key=$4 days=${5:-30}
     if [[ ! -s $E/test-ca.pem ]]; then
         openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes -keyout "$E/test-ca.key" -out "$E/test-ca.pem" \
             -days 60 -subj /CN=Darban-Test-Root >/dev/null 2>&1
@@ -2590,8 +2636,72 @@ make_test_ca() {
     mkdir -p "$dir"
     openssl req -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes -keyout "$dir/$key" -out "$E/leaf.csr" -subj "/CN=$host" >/dev/null 2>&1
     printf 'subjectAltName=DNS:%s\n' "$host" > "$E/leaf.ext"
-    openssl x509 -req -in "$E/leaf.csr" -CA "$E/test-ca.pem" -CAkey "$E/test-ca.key" -CAcreateserial -days 30 \
+    openssl x509 -req -in "$E/leaf.csr" -CA "$E/test-ca.pem" -CAkey "$E/test-ca.key" -CAcreateserial -days "$days" \
         -extfile "$E/leaf.ext" -out "$dir/$leaf" >/dev/null 2>&1
+}
+
+test_a_kept_link_certificate_is_used_again() {
+    # A certificate this tool got before a removal is taken back without a question or a new request.
+    local out
+    start_links_stub
+    echo vpn.example.com > "$E/cfg/domain"
+    : > "$E/cfg/.server-setup-started"
+    make_test_ca vpn.example.com "$E/le/live/darban-ovpn-links" fullchain.pem privkey.pem
+    printf '#!/usr/bin/env bash\nif [[ $1 == --version ]]; then echo "certbot 5.9.0"; exit 0; fi\necho "certbot $*" >> "$STUB_LOG"; exit 0\n' > "$E/bin/certbot"
+    chmod +x "$E/bin/certbot"
+    out=$(menu '5\nalice\n1\n1\n0\n')
+    has 'the kept certificate is used' "Links use the Let's Encrypt certificate this server got earlier" "$out"
+    lacks 'without the question' "Get a free Let's Encrypt certificate?" "$out"
+    if grep -q '^certbot' "$STUB_LOG" 2>/dev/null; then result 0 'and without asking Let'"'"'s Encrypt'; else result 1 'and without asking Let'"'"'s Encrypt'; fi
+    [[ $(readlink "$E/cfg/link-cert.pem") == "$E/le/live/darban-ovpn-links/fullchain.pem" ]]; rc_is 'the links point at it' 0 "$?"
+    grep -qx 'certbot_cert darban-ovpn-links' "$E/cfg/.server-setup-started"; rc_is 'it is recorded again, for a later removal' 0 "$?"
+    has 'the link is made' "https://vpn.example.com:$LINK_TEST_PORT/l/" "$out"
+    stop_links_stub
+}
+
+test_link_certificate_renews_and_counts_the_weekly_limit() {
+    local out next
+    start_links_stub
+    echo vpn.example.com > "$E/cfg/domain"
+    : > "$E/cfg/.server-setup-started"
+    # A certificate of an earlier request that ends within a day: it is renewed, not requested anew.
+    make_test_ca vpn.example.com "$E/le/live/darban-ovpn-links" fullchain.pem privkey.pem 1
+    mkdir -p "$E/le/renewal"; echo 'authenticator = standalone' > "$E/le/renewal/darban-ovpn-links.conf"
+    printf '#!/usr/bin/env bash\nif [[ $1 == --version ]]; then echo "certbot 5.9.0"; exit 0; fi\necho "certbot $*" >> "$STUB_LOG"; exit 0\n' > "$E/bin/certbot"
+    chmod +x "$E/bin/certbot"
+    out=$(menu '5\nalice\n1\n1\n1\n0\n')
+    grep -q 'certbot renew --non-interactive --cert-name darban-ovpn-links' "$STUB_LOG"; rc_is 'an existing certificate is renewed' 0 "$?"
+    if grep -q 'certbot certonly' "$STUB_LOG"; then result 0 'and not requested anew'; else result 1 'and not requested anew'; fi
+    menu '6\n1\n2\n0\n' >/dev/null
+
+    # A new request: certbot writes a new certificate, and the tool records it.
+    rm -rf "$E/le/live/darban-ovpn-links" "$E/le/renewal" "$E/cfg/link-cert.pem" "$E/cfg/link-key.pem"
+    make_test_ca vpn.example.com "$E/new-le" fullchain.pem privkey.pem
+    printf '#!/usr/bin/env bash\nif [[ $1 == --version ]]; then echo "certbot 5.9.0"; exit 0; fi\necho "certbot $*" >> "$STUB_LOG"\nmkdir -p "%s"; cp "%s"/*.pem "%s"/\n' \
+        "$E/le/live/darban-ovpn-links" "$E/new-le" "$E/le/live/darban-ovpn-links" > "$E/bin/certbot"
+    out=$(menu '5\nalice\n1\n1\n1\n0\n')
+    has 'a new certificate is installed' 'Trusted certificate installed.' "$out"
+    grep -q ' vpn.example.com$' "$E/varlib/link-certificates.log"; rc_is 'and recorded' 0 "$?"
+    has 'Settings counts it' '1 of 5 new Let'"'"'s Encrypt certificates for vpn.example.com' "$(menu '7\n5\n4\n0\n0\n')"
+    menu '6\n1\n2\n0\n' >/dev/null
+
+    # Five this week: no sixth request is sent, and the tool says when one can be.
+    rm -rf "$E/le/live/darban-ovpn-links" "$E/cfg/link-cert.pem" "$E/cfg/link-key.pem"
+    for next in 1 2 3 4; do echo "$(( $(date -u +%s) - next * 600 )) vpn.example.com" >> "$E/varlib/link-certificates.log"; done
+    : > "$STUB_LOG"
+    out=$(menu '5\nalice\n1\n1\n1\n0\n')
+    has 'the weekly limit is named' 'This server got 5 for vpn.example.com in the last 7 days' "$out"
+    has 'with the time of the next one' 'so the next one can be requested after' "$out"
+    if grep -q 'certbot certonly' "$STUB_LOG"; then result 0 'no request is sent'; else result 1 'no request is sent'; fi
+    has 'Settings shows the limit' '5 of 5 new Let'"'"'s Encrypt certificates' "$(menu '7\n5\n4\n0\n0\n')"
+    has 'the link is still made' "https://vpn.example.com:$LINK_TEST_PORT/l/" "$out"
+    menu '6\n1\n2\n0\n' >/dev/null
+
+    # Let's Encrypt refusing for the limit: its time is shown.
+    : > "$E/varlib/link-certificates.log"
+    printf '#!/usr/bin/env bash\nif [[ $1 == --version ]]; then echo "certbot 5.9.0"; exit 0; fi\necho "An unexpected error occurred: too many certificates (5) already issued for this exact set of identifiers in the last 168h0m0s, retry after 2026-11-12 04:12:00 UTC"; exit 1\n' > "$E/bin/certbot"
+    has 'a refusal for the limit gives its time' 'The next one can be issued after 2026-11-12 04:12:00 UTC' "$(menu '5\nalice\n1\n1\n1\n0\n')"
+    stop_links_stub
 }
 
 test_link_uses_a_certificate_already_on_the_server() {
@@ -2607,14 +2717,14 @@ test_link_uses_a_certificate_already_on_the_server() {
     lacks 'no browser warning note' 'The note below tells the person' "$out"
     lacks 'and no note in the block' $'\nNote:\n' "$out"
     has 'Settings names where it came from' 'trusted' "$(menu '7\n0\n0\n')"
-    menu '6\n1\n0\n' >/dev/null
+    menu '6\n1\n2\n0\n' >/dev/null
 
     # Renewed where it lives: the next link takes the new one, without a question.
     make_test_ca vpn.example.com "$E/panel-cert/vpn.example.com" fullchain.pem privkey.pem
     out=$(menu '5\nalice\n1\n1\n0\n')
     has 'a renewal there reaches the links' 'links use the new one' "$out"
     cmp -s "$E/cfg/link-cert.pem" "$E/panel-cert/vpn.example.com/fullchain.pem"; rc_is 'the new one is copied' 0 "$?"
-    menu '6\n1\n0\n' >/dev/null
+    menu '6\n1\n2\n0\n' >/dev/null
 
     # A renewal seen half way, a new certificate but still the old key, is refused, and the pair in use stays.
     before=$(sha256sum < "$E/cfg/link-cert.pem")
@@ -2625,7 +2735,7 @@ test_link_uses_a_certificate_already_on_the_server() {
     [[ $(sha256sum < "$E/cfg/link-cert.pem") == "$before" ]]; rc_is 'and the pair in use stays as it was' 0 "$?"
     cert_key_pair_ok() { [[ $(openssl x509 -in "$E/cfg/link-cert.pem" -noout -pubkey) == "$(openssl pkey -in "$E/cfg/link-key.pem" -pubout)" ]]; }
     cert_key_pair_ok; rc_is 'its certificate and key still belong together' 0 "$?"
-    menu '6\n1\n0\n' >/dev/null
+    menu '6\n1\n2\n0\n' >/dev/null
     cp "$E/half/privkey.pem" "$E/panel-cert/vpn.example.com/privkey.pem"
 
     # A file chosen by hand: a key that does not belong is refused.
@@ -2691,10 +2801,7 @@ test_old_certbot_is_not_used_for_an_ip() {
     if grep -q '^certbot certonly' "$STUB_LOG"; then result 0 'certbot 4.0 is never asked for an IP'; else result 1 'certbot 4.0 is never asked for an IP'; fi
     grep -q 'snap install --classic certbot' "$STUB_LOG"; rc_is 'the Certbot snap is tried instead' 0 "$?"
     has 'a failed install falls back to a working link' "https://203.0.113.9:$LINK_TEST_PORT/l/" "$out"
-    menu '6
-1
-0
-' >/dev/null
+    menu '6\n1\n2\n0\n' >/dev/null
     # Without snap there is no way to a new enough certbot, so the question is not asked at all.
     rm -f "$E/cfg/link-cert.pem" "$E/cfg/link-key.pem"
     sed -i 's/^have_snap() {.*/have_snap() { false; }/' "$E/manager.sh"

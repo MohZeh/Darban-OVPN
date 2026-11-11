@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Serves temporary links to client profiles over HTTPS.
 
-A link file is <sha256 of token>.meta plus <same>.ovpn in the store directory, so a token never rests on
-disk. A link works until the client it was made for connects to the VPN for the first time, or until it
+A link file is <sha256 of token>.meta plus <same>.ovpn in the store directory, so this service finds a link
+without keeping its token. darban keeps the whole address in <same>.url, readable by root only, so it can show
+a link again; this service never reads that file, and removes it with the link. A link works until the client it was made for connects to the VPN for the first time, or until it
 expires, whichever comes first. Until then the page and the file can be opened again, so a mistake on the
 phone costs nothing. Opening the page never uses anything up: messengers fetch links for their previews.
 Standard library only. The process ends by itself once no link is left.
@@ -73,7 +74,7 @@ class Store:
         os.replace(temp, self._path(key, '.meta'))
 
     def _drop(self, key):
-        for suffix in ('.meta', '.ovpn', '.tmp'):
+        for suffix in ('.meta', '.ovpn', '.tmp', '.url'):
             try:
                 os.unlink(self._path(key, suffix))
             except FileNotFoundError:
@@ -119,7 +120,7 @@ class Store:
             remaining = 0
             now = time.time()
             for entry in os.listdir(self.directory):
-                if entry.endswith(('.ovpn', '.tmp')):
+                if entry.endswith(('.ovpn', '.tmp', '.url')):
                     # A link is written profile first, so a profile with no record for a while is left over.
                     path = os.path.join(self.directory, entry)
                     try:
