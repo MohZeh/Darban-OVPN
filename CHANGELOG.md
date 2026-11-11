@@ -4,6 +4,9 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## [Unreleased]
 
+### Removed
+- The install no longer moves settings and files from the tool's earlier name, `mzx-openvpn-manager`, and the diagnostics no longer accept its NAT table, `mzx_openvpn`. No server uses that name any more.
+
 ### Fixed
 - A link certificate whose key does not match it, whatever left them so, is replaced at the next link. Before, every link failed until the certificate was changed by hand.
 - A new link certificate, from Let's Encrypt or self-signed, is made beside the current one and then put in place, so a failure keeps the current pair.

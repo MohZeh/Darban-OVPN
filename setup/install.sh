@@ -40,20 +40,6 @@ if ! server_checks; then
     echo 'WARNING: this server has a problem; see: sudo darban status. The tool is still being updated.' >&2
 fi
 
-# This tool was first installed under another name; take over its settings and remove the old files.
-if [[ -d /etc/mzx-openvpn-manager && ! -e /etc/darban ]]; then
-    mv -- /etc/mzx-openvpn-manager /etc/darban
-    printf 'Moved settings from /etc/mzx-openvpn-manager to /etc/darban.\n'
-fi
-if [[ -e /etc/systemd/system/mzx-openvpn-crl.timer ]]; then
-    systemctl disable --now mzx-openvpn-crl.timer >/dev/null 2>&1 || true
-    rm -f -- /etc/systemd/system/mzx-openvpn-crl.timer /etc/systemd/system/mzx-openvpn-crl.service
-    rm -f -- /usr/local/sbin/mzx-vpn /usr/local/sbin/mzx-openvpn-crl-maintain
-    rm -rf -- /usr/local/lib/mzx-openvpn-manager
-    systemctl daemon-reload
-    printf 'Removed the previous mzx-vpn command; use: sudo darban\n'
-fi
-
 # Each update keeps the version it replaces, for Setup > Restore previous version.
 LIB=$DARBAN_LIB
 install -d -o root -g root -m 700 "$LIB"

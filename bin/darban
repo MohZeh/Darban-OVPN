@@ -2488,7 +2488,6 @@ network_rules_health() {
     # What the kernel runs now is checked, not what a file says: a flushed chain or an old network must not pass.
     local net nat=$CONFIG_DIR/nat.nft fix reinstall live_iface route_iface
     if ! nft list table ip darban >/dev/null 2>&1; then
-        if nft list table ip mzx_openvpn >/dev/null 2>&1; then check ok 'NAT table for the VPN present'; return 0; fi
         if [[ -f $nat ]]; then
             check bad "The NAT rules of this tool are not loaded $S_ARROW sudo systemctl restart darban-nat.service"
         else
