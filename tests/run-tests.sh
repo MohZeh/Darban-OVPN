@@ -2185,7 +2185,6 @@ test_diagnostics_check_the_live_network_rules() {
 #!/usr/bin/env bash
 case "$*" in
     'list table ip darban') [[ -e $E/live-post ]] ;;
-    'list table ip mzx_openvpn') exit 1 ;;
     'list chain ip darban postrouting') cat "$E/live-post" 2>/dev/null ;;
     'list chain ip darban forward') cat "$E/live-forward" 2>/dev/null ;;
     'list chain ip darban input') cat "$E/live-input" 2>/dev/null ;;

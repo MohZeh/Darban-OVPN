@@ -4,6 +4,9 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## [Unreleased]
 
+### Removed
+- The install no longer moves settings and files from the tool's earlier name, `mzx-openvpn-manager`, and the diagnostics no longer accept its NAT table, `mzx_openvpn`. No server uses that name any more.
+
 ## [1.0.0-rc.6] - 2026-11-10
 
 Release candidate for `v1.0.0`, for testing on a server that is not in use. It replaces `v1.0.0-rc.5`, with the fixes and changes from its test on a real server. A server on `v1.0.0-rc.5` or older reaches it with the install command, not with `darban update`; from this version on, `darban update` offers the next test version.
