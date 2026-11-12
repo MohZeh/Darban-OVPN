@@ -4,6 +4,19 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## [Unreleased]
 
+## [1.0.0-rc.8] - 2026-11-11
+
+Release candidate for `v1.0.0`, for testing on a server that is not in use. It replaces `v1.0.0-rc.7`, with the changes from its test on a real server: the link certificate is kept and renewed instead of requested again, and menu 6 can show a link again. A server on `v1.0.0-rc.6` or later reaches it from the menu (Setup › 2) or with `sudo darban update`.
+
+### Changed
+- Menu 6 is **Links and files (show, cancel, delete)**. It says how long a link and a file stay, groups open links and files on the server, and a chosen row opens what can be done with it: show a link again and copy it, or cancel it; show the download commands again and copy one, or delete the file after a confirmation. A number alone removes nothing. Links made before this version cannot be shown again.
+- When the link certificate this tool got earlier already covers the address, it is renewed with `certbot renew` instead of requested anew. certbot tells Let's Encrypt which certificate it replaces, and such a renewal can be exempt from the weekly limit.
+- **Settings › Link certificate** shows how many of the 5 new Let's Encrypt certificates a week for this address were used. When none is left, no request is sent, and the tool says when the next one can be.
+- When Let's Encrypt refuses a certificate for the weekly limit, the tool shows the time it gives. Other failures point to certbot's log.
+
+### Fixed
+- **Remove everything** no longer deletes the link certificate by default. Let's Encrypt gives at most 5 new certificates a week for the same address, and each new install asked for one. It now asks, keeps the certificate unless you choose to delete it, and a new install on the same server takes it back without a question or a request.
+
 ## [1.0.0-rc.7] - 2026-11-10
 
 Release candidate for `v1.0.0`, for testing on a server that is not in use. It replaces `v1.0.0-rc.6`, with the fixes from an audit of its code: safer link certificates, a lock shared by the link service and the menu, and exact guides. A server on `v1.0.0-rc.6` reaches it from the menu (Setup › 2) or with `sudo darban update`; an older one needs the install command.
