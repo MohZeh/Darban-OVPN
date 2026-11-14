@@ -83,7 +83,16 @@ A **Cloudflare Origin certificate** is not used, and the tool says so. Browsers 
 - **Domain name:** the certificate comes from Ubuntu's `certbot` package, and certbot renews it by itself. If a renewal fails, for example because port 80 is closed, the tool asks again when a link needs a new one.
 - **IP address:** Let's Encrypt gives a six-day certificate, and a new one is requested when a link needs it. This needs `certbot` 5.3 or newer, which Ubuntu does not have yet, so the tool uses a certbot that is new enough, or installs it from the Certbot project as a snap. A server with neither is not offered one.
 
-**Let's Encrypt gives at most 5 new certificates a week for the same address**, one more every 34 hours, and deleting one does not give it back. So the tool renews the certificate it got instead of asking for a new one, keeps it when you remove everything, and uses it again after a new install on the same server. It records each certificate it got: **Settings › Link certificate** shows how many of the 5 were used this week. When none is left, the tool says when the next one can be requested, and the link uses a self-signed certificate until then.
+**Let's Encrypt gives at most 5 new certificates a week for the same address**, one more every 34 hours, and deleting one does not give it back. So the tool renews the certificate it got instead of asking for a new one, keeps it when you remove everything, and uses it again after a new install on the same server. It records each certificate it asked for, as new or renewed. **Settings › Link certificate** shows:
+
+- whether browsers trust the certificate now, checked from the certificate itself: its dates, its address, its key and who issued it;
+- where it came from, and its dates (`Valid from … until …`);
+- whether certbot's renewal timer is active;
+- how many new and renewed certificates this tool recorded in the last 7 days.
+
+That count is only this server's record: Let's Encrypt keeps the real one, and renewals by certbot's own timer are not in it. So when the record shows the week used up, the tool warns and asks anyway. If Let's Encrypt refuses, the tool shows the time Let's Encrypt gives, and the link uses a self-signed certificate until then.
+
+A renewal ends one of three ways, and the tool says which: renewed, with the new end date; not due yet, so nothing was issued; or failed, and the current certificate stays. After a new install, a kept certificate that cannot be used is named with the reason, for example that it is for another address.
 
 If a new certificate cannot be had while the current trusted one still works, the current one stays, and the tool says when it ends. Otherwise, if you choose No, or the request fails, the tool makes a self-signed certificate. The link is still encrypted, but the browser cannot confirm that it reaches this server, so it warns. In that case:
 
