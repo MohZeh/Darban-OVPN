@@ -147,7 +147,7 @@ sudo journalctl -u darban-crl.service -n 20 --no-pager
 
 ### A revocation that did not finish
 
-If a certificate is revoked in the CA but the CRL is not published, **that client can still connect**. The menu, the list and the diagnostics name it until this is fixed. After fixing the cause, run **Maintenance › Repair CRL** or `sudo darban repair-crl`. It publishes the CRL, removes the leftover profile and handles the active session.
+If a certificate is revoked in the CA but the CRL is not published, **that client can still connect**. The menu, the list and the diagnostics name it until this is fixed. After fixing the cause, run **Maintenance › Fix the blocklist** or `sudo darban repair-crl`. It publishes the CRL, removes the leftover profile and handles the active session.
 
 ### Restoring an old backup of the CA
 

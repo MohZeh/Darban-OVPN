@@ -324,6 +324,26 @@ def name_reuse_asks_when_server_settings_exist(m):
     check('old record revoked, new one valid', m.index_state('alice') == 'RV')
 
 
+def diagnostics_start_with_a_summary(m):
+    assert m.wait_for('Choose [0-9]')
+    m.press('8', ENTER)
+    assert m.wait_for('Choose [0-3')
+    start = len(m.seen)
+    m.press('1', ENTER)
+    check('it asks before the whole list', m.wait_for('See every check?'), m.seen)
+    screen = plain(m.seen[start:])
+    check('it starts with a summary', 'checks passed' in screen or 'out of' in screen, screen)
+    check('the whole list waits', 'Revocation (CRL)' not in screen, screen)
+    assert m.wait_for('Esc: Cancel')
+    m.drain()
+    m.press(DOWN, ENTER)
+    check('the whole list comes on request', m.wait_for('Revocation (CRL)'), m.seen)
+    assert m.wait_for('Press Enter')
+    m.press(ENTER)
+    assert m.wait_for('Choose [0-3')
+    m.press('0', ENTER)
+
+
 def share_chooser_moves_with_keys(m):
     assert m.wait_for('Choose [0-9]')
     m.press('5', ENTER)
@@ -376,6 +396,7 @@ for function, options in [
     (unknown_keys_ignored, {}), (typed_ahead_keys_do_not_answer, {}), (colors_follow_the_risk, {'colors': True}),
     (hint_says_what_enter_does, {}), (rows_redraw_in_place, {}), (restart_needs_two_key_presses, {'colors': True}), (list_offers_revoked_history, {}),
     (name_reuse_asks_when_server_settings_exist, {}),
+    (diagnostics_start_with_a_summary, {}),
     (share_chooser_moves_with_keys, {}), (share_esc_means_later, {}), (ctrl_c_at_main_menu_exits, {}),
 ]:
     scenario(function.__name__, function, **options)

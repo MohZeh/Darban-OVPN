@@ -303,7 +303,7 @@ test_repair_runs_from_the_settings_menu() {
     local out
     printf '4\nalice\nalice\n0\n' | FAIL_GENCRL=1 bash "$E/manager.sh" >/dev/null 2>&1
     out=$(menu '8\n2\n\n0\n')
-    has 'menu item exists' 'Repair CRL / finish a revocation' "$out"
+    has 'menu item exists' 'Fix the blocklist (CRL), or finish a revocation' "$out"
     has 'menu item repairs' 'The CRL is repaired.' "$out"
 }
 
@@ -457,6 +457,12 @@ test_menu_groups_profile_files_together() {
     lacks 'advanced no longer holds the link port' 'Share link port' "$(menu '7\n6\n0\n0\n0\n')"
     out=$(menu '8\n1\n0\n0\n')
     has 'maintenance runs diagnostics' 'Revocation (CRL)' "$out"
+    has 'maintenance says what it is for' 'fix what a revocation left unfinished' "$out"
+    out=$(menu '0\n')
+    has 'a healthy blocklist is one word on the server line' 'blocklist ✓' "$(grep -E '^  Server' <<<"$out")"
+    lacks 'and has no line of its own' 'Blocklist' "$out"
+    has 'the hints are one line' 'An empty answer or Ctrl+C cancels' "$out"
+    has 'the notice reads on or off' 'Update notice            off' "$(menu '9\n0\n0\n')"
     lacks 'maintenance no longer lists who is connected' '4  Connected now' "$(menu '8\n0\n0\n')"
 }
 
@@ -2478,6 +2484,9 @@ test_connected_clients() {
     out=$(mgr connected)
     has 'a connected client is listed' 'alice' "$out"
     has 'with its address, without the port' '198.51.100.7 ' "$out"
+    has 'with how long it is connected' 'CONNECTED FOR' "$out"
+    has 'and the traffic of this session, down first' '20 B / 10 B' "$out"
+    has 'the client list marks it connected' 'connected' "$(mgr list | grep -E '^  alice ')"
     lacks 'a half-open session is not counted' 'UNDEF' "$out"
     has 'the header counts it' '1 connected' "$(menu '0\n')"
     has 'the menu offers it' 'Connected now' "$(menu '3\n\n0\n0\n')"
