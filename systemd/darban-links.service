@@ -8,6 +8,8 @@ User=root
 Group=root
 EnvironmentFile=/etc/darban/links.env
 ExecStart=/usr/bin/python3 -I /usr/local/lib/darban/linkd.py --dir /run/darban-links --cert /etc/darban/link-cert.pem --key /etc/darban/link-key.pem --host ${LINK_HOST} --port ${LINK_PORT}
+# A new certificate reaches new connections; a download in progress finishes.
+ExecReload=/bin/kill -HUP $MAINPID
 Restart=no
 UMask=0077
 TasksMax=64
