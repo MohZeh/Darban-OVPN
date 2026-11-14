@@ -1617,12 +1617,24 @@ test_link_certificate_for_a_hostname() {
     has 'and the link is made' "https://vpn.example.com:$LINK_TEST_PORT/l/" "$out"
     menu '6\n1\n2\n0\n' >/dev/null
 
-    # A trusted certificate valid for weeks is not asked about again.
+    # A link to a self-signed certificate is no trusted certificate: the menu, the note and the password say so.
     mkdir -p "$E/le"
     openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes -keyout "$E/le/privkey.pem" -out "$E/le/fullchain.pem" \
         -days 30 -subj /CN=vpn.example.com -addext subjectAltName=DNS:vpn.example.com >/dev/null 2>&1
     mv "$E/cfg/link-cert.pem" "$E/cfg/link-cert.self"; mv "$E/cfg/link-key.pem" "$E/cfg/link-key.self"
     ln -s "$E/le/fullchain.pem" "$E/cfg/link-cert.pem"; ln -s "$E/le/privkey.pem" "$E/cfg/link-key.pem"
+    has 'Settings does not call it trusted' 'browser warning: browsers do not trust who issued it' "$(menu '7\n0\n0\n')"
+    out=$(menu '5\nalice\n1\n2\n1\n0\n')
+    has 'a trusted one is offered again' "Let's Encrypt" "$out"
+    has 'and the person is told about the warning' 'Your browser will warn' "$out"
+    menu '6\n1\n2\n0\n' >/dev/null
+
+    # A trusted certificate valid for weeks is not asked about again.
+    rm -f "$E/cfg/link-cert.pem" "$E/cfg/link-key.pem"
+    make_test_ca vpn.example.com "$E/le" fullchain.pem privkey.pem
+    ln -s "$E/le/fullchain.pem" "$E/cfg/link-cert.pem"; ln -s "$E/le/privkey.pem" "$E/cfg/link-key.pem"
+    # 29 or 30: within the second the certificate was made, a whole 30 days are left.
+    grep -Eq "Link certificate +trusted, Let's Encrypt, (29|30) days left$" <<<"$(menu '7\n0\n0\n')"; rc_is 'Settings calls it trusted, with the days left' 0 "$?"
     out=$(menu '5\nalice\n1\n1\n0\n')
     lacks 'a usable trusted certificate is not asked about again' "Let's Encrypt" "$out"
     has 'and the link is made with it' "https://vpn.example.com:$LINK_TEST_PORT/l/" "$out"
@@ -1640,8 +1652,7 @@ test_link_certificate_for_a_hostname() {
     menu '6\n1\n2\n0\n' >/dev/null
 
     # A trusted certificate with less than a day left, and a renewal that fails: the one that still works stays.
-    mkdir -p "$E/le"
-    openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes -keyout "$E/le/privkey.pem" -out "$E/le/fullchain.pem"         -days 1 -subj /CN=vpn.example.com -addext subjectAltName=DNS:vpn.example.com >/dev/null 2>&1
+    make_test_ca vpn.example.com "$E/le" fullchain.pem privkey.pem 1
     rm -f "$E/cfg/link-cert.pem" "$E/cfg/link-key.pem"
     ln -s "$E/le/fullchain.pem" "$E/cfg/link-cert.pem"; ln -s "$E/le/privkey.pem" "$E/cfg/link-key.pem"
     out=$(menu '5\nalice\n1\n1\n1\n0\n')
@@ -2695,6 +2706,12 @@ test_a_kept_link_certificate_is_used_again() {
     [[ $(readlink "$E/cfg/link-cert.pem") == "$E/le/live/darban-ovpn-links/fullchain.pem" ]]; rc_is 'the links point at it' 0 "$?"
     grep -qx 'certbot_cert darban-ovpn-links' "$E/cfg/.server-setup-started"; rc_is 'it is recorded again, for a later removal' 0 "$?"
     has 'the link is made' "https://vpn.example.com:$LINK_TEST_PORT/l/" "$out"
+    menu '6\n1\n2\n0\n' >/dev/null
+
+    # A kept certificate for another address is named, so nobody wonders why a new one is asked for.
+    echo other.example.com > "$E/cfg/domain"
+    rm -f "$E/cfg/link-cert.pem" "$E/cfg/link-key.pem"
+    has 'a kept certificate for another address says so' 'is for vpn.example.com, not other.example.com' "$(menu '5\nalice\n1\n2\n1\n0\n')"
     stop_links_stub
 }
 
@@ -2711,7 +2728,23 @@ test_link_certificate_renews_and_counts_the_weekly_limit() {
     out=$(menu '5\nalice\n1\n1\n1\n0\n')
     grep -q 'certbot renew --non-interactive --cert-name darban-ovpn-links' "$STUB_LOG"; rc_is 'an existing certificate is renewed' 0 "$?"
     if grep -q 'certbot certonly' "$STUB_LOG"; then result 0 'and not requested anew'; else result 1 'and not requested anew'; fi
+    has 'the kept certificate says why it is not used as it is' 'It can be renewed instead of asked for anew' "$out"
+    has 'the question names the renewal' "Renew the Let's Encrypt certificate this server got earlier?" "$out"
+    has 'a renewal that changed nothing says so' 'Not due for renewal yet' "$out"
+    ok_if 'and nothing is recorded' test ! -s "$E/varlib/link-certificates.log"
     menu '6\n1\n2\n0\n' >/dev/null
+
+    # A renewal that brings a new certificate is named, and recorded as a renewal.
+    rm -f "$E/cfg/link-cert.pem" "$E/cfg/link-key.pem"
+    make_test_ca vpn.example.com "$E/renewed" fullchain.pem privkey.pem
+    printf '#!/usr/bin/env bash\nif [[ $1 == --version ]]; then echo "certbot 5.9.0"; exit 0; fi\necho "certbot $*" >> "$STUB_LOG"\ncp "%s"/*.pem "%s"/\n' \
+        "$E/renewed" "$E/le/live/darban-ovpn-links" > "$E/bin/certbot"
+    out=$(menu '5\nalice\n1\n1\n1\n0\n')
+    has 'a real renewal is named' 'Renewed: the certificate for vpn.example.com is valid until' "$out"
+    grep -q ' vpn.example.com renew$' "$E/varlib/link-certificates.log"; rc_is 'and recorded as a renewal' 0 "$?"
+    has 'Settings counts it apart' '0 new, 1 renewed' "$(menu '7\n5\n4\n0\n0\n')"
+    menu '6\n1\n2\n0\n' >/dev/null
+    : > "$E/varlib/link-certificates.log"
 
     # A new request: certbot writes a new certificate, and the tool records it.
     rm -rf "$E/le/live/darban-ovpn-links" "$E/le/renewal" "$E/cfg/link-cert.pem" "$E/cfg/link-key.pem"
@@ -2719,24 +2752,30 @@ test_link_certificate_renews_and_counts_the_weekly_limit() {
     printf '#!/usr/bin/env bash\nif [[ $1 == --version ]]; then echo "certbot 5.9.0"; exit 0; fi\necho "certbot $*" >> "$STUB_LOG"\nmkdir -p "%s"; cp "%s"/*.pem "%s"/\n' \
         "$E/le/live/darban-ovpn-links" "$E/new-le" "$E/le/live/darban-ovpn-links" > "$E/bin/certbot"
     out=$(menu '5\nalice\n1\n1\n1\n0\n')
-    has 'a new certificate is installed' 'Trusted certificate installed.' "$out"
-    grep -q ' vpn.example.com$' "$E/varlib/link-certificates.log"; rc_is 'and recorded' 0 "$?"
-    has 'Settings counts it' '1 of 5 new Let'"'"'s Encrypt certificates for vpn.example.com' "$(menu '7\n5\n4\n0\n0\n')"
+    has 'a new certificate is named' "New certificate from Let's Encrypt for vpn.example.com, valid until" "$out"
+    grep -q ' vpn.example.com new$' "$E/varlib/link-certificates.log"; rc_is 'and recorded as new' 0 "$?"
+    out=$(menu '7\n5\n4\n0\n0\n')
+    has 'Settings counts it' '1 new, 0 renewed in the last 7 days, by this tool for vpn.example.com' "$out"
+    has 'and says who keeps the real count' "Let's Encrypt keeps the real count" "$out"
+    has 'with the dates of the certificate' 'Valid     from ' "$out"
+    # v1.0.0-rc.8 reads the first two fields; a line with the kind still counts there.
+    [[ $(awk -v host=vpn.example.com '$2 == host && $1 ~ /^[0-9]+$/' "$E/varlib/link-certificates.log" | wc -l) == 1 ]]; rc_is 'the record still reads in v1.0.0-rc.8' 0 "$?"
     menu '6\n1\n2\n0\n' >/dev/null
 
-    # Five this week: no sixth request is sent, and the tool says when one can be.
+    # Five this week by this server's record: only a warning, since Let's Encrypt keeps the count.
     rm -rf "$E/le/live/darban-ovpn-links" "$E/cfg/link-cert.pem" "$E/cfg/link-key.pem"
     for next in 1 2 3 4; do echo "$(( $(date -u +%s) - next * 600 )) vpn.example.com" >> "$E/varlib/link-certificates.log"; done
     : > "$STUB_LOG"
     out=$(menu '5\nalice\n1\n1\n1\n0\n')
-    has 'the weekly limit is named' 'This server got 5 for vpn.example.com in the last 7 days' "$out"
-    has 'with the time of the next one' 'so the next one can be requested after' "$out"
-    if grep -q 'certbot certonly' "$STUB_LOG"; then result 0 'no request is sent'; else result 1 'no request is sent'; fi
-    has 'Settings shows the limit' '5 of 5 new Let'"'"'s Encrypt certificates' "$(menu '7\n5\n4\n0\n0\n')"
-    has 'the link is still made' "https://vpn.example.com:$LINK_TEST_PORT/l/" "$out"
+    has 'the weekly limit is named' 'This server recorded 5 new certificates for vpn.example.com in the last 7 days' "$out"
+    has 'with the time it may refuse until' 'so it may refuse until about' "$out"
+    grep -q 'certbot certonly' "$STUB_LOG"; rc_is 'the request is still sent' 0 "$?"
+    has 'Settings shows old lines as unknown' '2 new, 0 renewed, 4 of unknown kind' "$(menu '7\n5\n4\n0\n0\n')"
+    has 'the link is made' "https://vpn.example.com:$LINK_TEST_PORT/l/" "$out"
     menu '6\n1\n2\n0\n' >/dev/null
 
     # Let's Encrypt refusing for the limit: its time is shown.
+    rm -rf "$E/le/live/darban-ovpn-links" "$E/cfg/link-cert.pem" "$E/cfg/link-key.pem"
     : > "$E/varlib/link-certificates.log"
     printf '#!/usr/bin/env bash\nif [[ $1 == --version ]]; then echo "certbot 5.9.0"; exit 0; fi\necho "An unexpected error occurred: too many certificates (5) already issued for this exact set of identifiers in the last 168h0m0s, retry after 2026-11-12 04:12:00 UTC"; exit 1\n' > "$E/bin/certbot"
     has 'a refusal for the limit gives its time' 'The next one can be issued after 2026-11-12 04:12:00 UTC' "$(menu '5\nalice\n1\n1\n1\n0\n')"

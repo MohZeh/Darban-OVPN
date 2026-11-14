@@ -842,7 +842,7 @@ share_client() {
     fi
     # The link's certificate is settled first, because a link without a trusted one gets a word about the password.
     prepare_link || return 1
-    if link_cert_is_trusted; then choose_profile_password; else choose_profile_password untrusted; fi
+    if link_cert_is_trusted "$(domain)"; then choose_profile_password; else choose_profile_password untrusted; fi
     if [[ -n $PROFILE_PASSWORD ]]; then
         ca_lock || return 1
         write_profile "$name" yes || return 1
@@ -1047,7 +1047,26 @@ link_cert_usable() {
     if host_is_ip "$host"; then check=-checkip; else check=-checkhost; fi
     openssl x509 -in "$LINK_CERT" -noout "$check" "$host" 2>/dev/null | grep -q 'does match'
 }
-link_cert_is_trusted() { [[ -L $LINK_CERT || -s $LINK_CERT_SOURCE ]]; }
+link_cert_source() {
+    # Where the links' certificate came from: letsencrypt (this tool's), copied (from another tool or a file),
+    # self-signed, or none.
+    if [[ ! -s $LINK_CERT ]]; then printf 'none\n'
+    elif [[ -s $LINK_CERT_SOURCE ]]; then printf 'copied\n'
+    elif [[ -L $LINK_CERT ]]; then printf 'letsencrypt\n'
+    else printf 'self-signed\n'
+    fi
+}
+link_cert_problem() {
+    # link_cert_problem [host]: why a browser would warn about the links' certificate now, or nothing when it
+    # would not. Whatever the certificate came from: the same check for the menu, the note and the password.
+    local host=${1:-$(domain)}
+    if [[ ! -s $LINK_CERT || ! -s $LINK_KEY ]]; then printf 'there is none yet\n'; return; fi
+    if ! openssl x509 -in "$LINK_CERT" -noout -checkend 0 >/dev/null 2>&1; then printf 'it ended on %s\n' "$(cert_end_date "$LINK_CERT")"; return; fi
+    if ! cert_covers "$LINK_CERT" "$host"; then printf 'it is not for %s\n' "$host"; return; fi
+    if ! cert_key_matches "$LINK_CERT" "$LINK_KEY"; then printf 'its key does not belong to it\n'; return; fi
+    if ! cert_publicly_trusted "$LINK_CERT"; then printf 'browsers do not trust who issued it\n'; fi
+}
+link_cert_is_trusted() { [[ -z $(link_cert_problem "${1:-}") ]]; }
 CERT_NAME=darban-ovpn-links
 # Let's Encrypt issues IP address certificates from Certbot 5.3 on; a hostname works with any version.
 CERTBOT_IP_MIN=5.3
@@ -1086,7 +1105,7 @@ install_certbot() {
 get_trusted_cert() {
     # get_trusted_cert <host> [asked]: Let's Encrypt for a hostname or a public IP address. It needs TCP 80
     # from the internet for a moment. "asked" means the person already chose it, so there is no question.
-    local host=$1 asked=${2:-} need=0 certbot
+    local host=$1 asked=${2:-} need=0 certbot renewing=0
     local -a target
     if host_is_ip "$host"; then
         is_private_ip "$host" && return 1
@@ -1099,6 +1118,9 @@ get_trusted_cert() {
         info "A trusted certificate for an IP address needs certbot $CERTBOT_IP_MIN or newer. Ubuntu does not ship it yet, and this server has no snap to get it from the Certbot project."
         return 1
     fi
+    # The certificate of an earlier request is renewed: certbot then tells Let's Encrypt which one it replaces
+    # (ARI), and such a renewal can be exempt from the weekly limit.
+    if [[ -s $LE_DIR/renewal/$CERT_NAME.conf ]] && cert_covers "$LE_DIR/live/$CERT_NAME/fullchain.pem" "$host"; then renewing=1; fi
     if [[ $asked != asked ]]; then
         say
         info "A trusted certificate for $host means the person opening the link sees no browser warning."
@@ -1106,7 +1128,11 @@ get_trusted_cert() {
             info "For an IP address it lasts six days, and a new one is requested when a link needs it. It needs certbot $CERTBOT_IP_MIN or newer, from the Certbot project."
         fi
         info 'It needs TCP port 80 open in your provider firewall and free on this server for a moment. Choosing yes accepts the Let'"'"'s Encrypt subscriber agreement.'
-        choose_one 'Get a free Let'"'"'s Encrypt certificate?' 'Yes, get a certificate' 'No, use a self-signed certificate (browser warning)' || return 1
+        if (( renewing )); then
+            choose_one 'Renew the Let'"'"'s Encrypt certificate this server got earlier?' 'Yes, renew it' 'No, use a self-signed certificate (browser warning)' || return 1
+        else
+            choose_one 'Get a free Let'"'"'s Encrypt certificate?' 'Yes, get a certificate' 'No, use a self-signed certificate (browser warning)' || return 1
+        fi
         (( CHOSEN == 1 )) || return 1
     fi
     if tcp_port_taken 80; then warn "TCP port 80 is used by $(safe_text "$(tcp_port_program 80)"), so certbot cannot answer on it."; return 1; fi
@@ -1114,21 +1140,20 @@ get_trusted_cert() {
         install_certbot "$need" || { warn 'Could not install certbot.'; return 1; }
         certbot=$(find_certbot "$need") || { warn "No certbot $need or newer is available."; return 1; }
     fi
-    local live=$LE_DIR/live/$CERT_NAME/fullchain.pem before after out used next rc=0
+    local live=$LE_DIR/live/$CERT_NAME/fullchain.pem before after out used next rc=0 kind=new
     before=$(cert_fingerprint "$live")
     out=$(mktemp) || return 1
-    if [[ -s $LE_DIR/renewal/$CERT_NAME.conf ]] && cert_covers "$live" "$host"; then
-        # The certificate of an earlier request is renewed: certbot then tells Let's Encrypt which one it
-        # replaces (ARI), and such a renewal can be exempt from the weekly limit. Nothing is done when it is
-        # not due yet.
+    if (( renewing )); then
+        # Nothing is done when it is not due yet.
+        kind=renew
         info "Renewing the certificate for $host${S_ELL}"
         "$certbot" renew --non-interactive --cert-name "$CERT_NAME" >"$out" 2>&1 || rc=$?
     else
+        # This server's record is only an estimate: Let's Encrypt keeps the count, and refuses with its own time
+        # when the week is used up. A refused request changes nothing here, so it is asked anyway.
         read -r used next <<<"$(issue_budget "$host")"
         if (( next > 0 )); then
-            warn "Let's Encrypt gives at most 5 new certificates a week for the same address, one more every 34 hours. This server got $used for $host in the last 7 days, so the next one can be requested after $(date -u -d "@$next" '+%Y-%m-%d %H:%M UTC')."
-            rm -f -- "$out"
-            return 1
+            warn "This server recorded $used new certificates for $host in the last 7 days. Let's Encrypt gives 5 a week for the same address, one more every 34 hours, so it may refuse until about $(date -u -d "@$next" '+%Y-%m-%d %H:%M UTC'). Asking anyway."
         fi
         info "Requesting a certificate for $host${S_ELL}"
         "$certbot" certonly --standalone --non-interactive --agree-tos --register-unsafely-without-email --cert-name "$CERT_NAME" \
@@ -1141,8 +1166,17 @@ get_trusted_cert() {
     fi
     rm -f -- "$out"
     after=$(cert_fingerprint "$live")
-    if [[ -n $after && $after != "$before" ]]; then log_link_cert_issue "$host"; fi
-    use_own_cert quiet
+    if [[ -n $after && $after != "$before" ]]; then
+        log_link_cert_issue "$host" "$kind"
+        if [[ $kind == renew ]]; then
+            use_own_cert "Renewed: the certificate for $host is valid until $(cert_end_date "$live")."
+        else
+            use_own_cert "New certificate from Let's Encrypt for $host, valid until $(cert_end_date "$live")."
+        fi
+    else
+        # certbot succeeds without doing anything while the certificate is not due: no new one, and none counted.
+        use_own_cert "Not due for renewal yet: the certificate for $host stays valid until $(cert_end_date "$live"). Nothing was issued."
+    fi
 }
 cert_fingerprint() { openssl x509 -in "$1" -noout -fingerprint -sha256 2>/dev/null | sed 's/^.*=//'; }
 explain_certbot_failure() {
@@ -1157,18 +1191,30 @@ explain_certbot_failure() {
     fi
 }
 log_link_cert_issue() {
-    # One line per certificate Let's Encrypt issued for the links: the time and the address.
+    # log_link_cert_issue <host> <new|renew>: one line per certificate Let's Encrypt issued for the links that this
+    # tool asked for, "<time> <address> <kind>". The first two fields are what v1.0.0-rc.8 reads. Renewals by
+    # certbot's own timer do not pass through here.
     install -d -m 700 "${LINK_CERT_LOG%/*}" 2>/dev/null || return 0
-    printf '%s %s\n' "$(date -u +%s)" "$1" >>"$LINK_CERT_LOG" 2>/dev/null || return 0
+    printf '%s %s %s\n' "$(date -u +%s)" "$1" "$2" >>"$LINK_CERT_LOG" 2>/dev/null || return 0
     chmod 600 "$LINK_CERT_LOG" 2>/dev/null || true
-    audit "link certificate issued by Let's Encrypt for $1"
+    audit "link certificate from Let's Encrypt for $1 ($2)"
+}
+issue_counts() {
+    # issue_counts <host>: "<new> <renewals> <unknown>" recorded in the last 7 days. A line written before the kind
+    # was recorded is unknown.
+    [[ -s $LINK_CERT_LOG ]] || { printf '0 0 0\n'; return; }
+    awk -v host="$1" -v now="$(date -u +%s)" '
+        $2 == host && $1 ~ /^[0-9]+$/ && now - $1 < 604800 { if ($3 == "new") n++; else if ($3 == "renew") r++; else u++ }
+        END { print n + 0, r + 0, u + 0 }' "$LINK_CERT_LOG"
 }
 issue_budget() {
-    # issue_budget <host>: "<issued in the last 7 days> <epoch when the next one can be asked for, or 0>", from
-    # this server's own record. Let's Encrypt counts 5 a week for one address, and gives one back every 34 hours.
+    # issue_budget <host>: "<new in the last 7 days> <epoch when another one should be allowed, or 0>", an
+    # estimate from this server's own record. Let's Encrypt counts 5 a week for one address and gives one back
+    # every 34 hours. Renewals are left out: certbot asks for them as such, and they can be exempt. A line of
+    # unknown kind counts, as before.
     [[ -s $LINK_CERT_LOG ]] || { printf '0 0\n'; return; }
     awk -v host="$1" -v now="$(date -u +%s)" '
-        $2 == host && $1 ~ /^[0-9]+$/ {
+        $2 == host && $1 ~ /^[0-9]+$/ && $3 != "renew" {
             if (seen == 0) tokens = 5; else { tokens += ($1 - last) / 122400; if (tokens > 5) tokens = 5 }
             tokens -= 1; last = $1; seen++
             if (now - $1 < 604800) week++
@@ -1185,9 +1231,27 @@ own_cert_usable() {
     [[ -s $dir/fullchain.pem && -s $dir/privkey.pem ]] || return 1
     [[ -z $(cert_problem "$dir/fullchain.pem" "$dir/privkey.pem" "$1") ]]
 }
+explain_kept_cert() {
+    # A Let's Encrypt certificate this tool got before, kept through a removal, that cannot serve host: why, so
+    # nobody wonders why a certificate is asked for again.
+    local host=$1 dir=$LE_DIR/live/$CERT_NAME names problem
+    [[ -s $dir/fullchain.pem ]] || return 0
+    if ! cert_covers "$dir/fullchain.pem" "$host"; then
+        names=$(openssl x509 -in "$dir/fullchain.pem" -noout -ext subjectAltName 2>/dev/null | sed -n '2p' | sed 's/^ *//; s/DNS://g; s/IP Address://g')
+        info "The Let's Encrypt certificate kept on this server is for ${names:-another address}, not $host, so a new one is needed."
+        return 0
+    fi
+    problem=$(cert_problem "$dir/fullchain.pem" "$dir/privkey.pem" "$host")
+    [[ -n $problem ]] || return 0
+    if [[ -s $LE_DIR/renewal/$CERT_NAME.conf ]]; then
+        info "The Let's Encrypt certificate kept on this server for $host cannot be used as it is: $problem It can be renewed instead of asked for anew."
+    else
+        info "The Let's Encrypt certificate kept on this server for $host cannot be used: $problem"
+    fi
+}
 use_own_cert() {
-    # use_own_cert [quiet]: points the links at the certificate this tool got. The new links are made beside the
-    # current pair and then renamed over it, so a failure keeps the old one.
+    # use_own_cert [message]: points the links at the certificate this tool got, and says so. The new links are
+    # made beside the current pair and then renamed over it, so a failure keeps the old one.
     local new_cert=$CONFIG_DIR/.link-cert.new new_key=$CONFIG_DIR/.link-key.new
     # Recorded only once it exists, so a removal never deletes a certificate this tool did not get.
     record_added "certbot_cert $CERT_NAME"
@@ -1196,8 +1260,8 @@ use_own_cert() {
         && ln -s "$LE_DIR/live/$CERT_NAME/privkey.pem" "$new_key" \
         && mv -fT -- "$new_key" "$LINK_KEY" && mv -fT -- "$new_cert" "$LINK_CERT"; then
         rm -f -- "$LINK_CERT_SOURCE"
-        if [[ ${1:-} == quiet ]]; then
-            ok 'Trusted certificate installed.'
+        if [[ -n ${1:-} ]]; then
+            ok "$1"
         else
             ok "Links use the Let's Encrypt certificate this server got earlier, valid until $(cert_end_date "$LINK_CERT"). Nothing was requested."
         fi
@@ -1257,6 +1321,7 @@ cert_publicly_trusted() {
 }
 cert_is_cloudflare_origin() { openssl x509 -in "$1" -noout -issuer 2>/dev/null | grep -qi 'cloudflare origin'; }
 cert_end_date() { date -u -d "$(openssl x509 -in "$1" -noout -enddate 2>/dev/null | cut -d= -f2)" +%Y-%m-%d 2>/dev/null; }
+cert_start_date() { date -u -d "$(openssl x509 -in "$1" -noout -startdate 2>/dev/null | cut -d= -f2)" +%Y-%m-%d 2>/dev/null; }
 existing_cert_pairs() {
     # Certificate and key pairs where other tools keep them: certbot, panels such as 3x-ui, and acme.sh.
     local root dir name
@@ -1350,6 +1415,7 @@ offer_trusted_cert() {
     local host=$1 found cert key end
     # The one this tool got before, kept through a removal: taken back without a question or a new request.
     if own_cert_usable "$host"; then use_own_cert; return; fi
+    explain_kept_cert "$host"
     if found=$(find_existing_cert "$host"); then
         IFS=$'\t' read -r cert key end <<<"$found"
         say
@@ -1371,41 +1437,65 @@ ensure_link_cert() {
     if link_cert_usable "$host"; then
         # A self-signed certificate is no reason to stop offering a trusted one: the question returns with each
         # link, and No keeps the current certificate.
-        link_cert_is_trusted || offer_trusted_cert "$host" || true
+        link_cert_is_trusted "$host" || offer_trusted_cert "$host" || true
         return 0
     fi
     if offer_trusted_cert "$host"; then return 0; fi
     # A trusted certificate that still works is kept, so open links do not change to a self-signed one.
-    if link_cert_is_trusted && link_cert_usable "$host" 0; then
+    if link_cert_is_trusted "$host" && link_cert_usable "$host" 0; then
         ends=$(openssl x509 -in "$LINK_CERT" -noout -enddate 2>/dev/null | cut -d= -f2)
         warn "The current trusted certificate stays. It ends ${ends:-soon}; a link that lasts longer stops opening then."
         return 0
     fi
     make_self_signed_cert "$host"
 }
+link_cert_source_label() {
+    case $(link_cert_source) in
+        letsencrypt) printf "Let's Encrypt\n" ;;
+        copied) printf 'from %s\n' "$(head -n 1 "$LINK_CERT_SOURCE")" ;;
+        self-signed) printf 'self-signed\n' ;;
+        *) printf 'none\n' ;;
+    esac
+}
 link_cert_summary() {
-    local end
+    # The Settings line: whether browsers trust it now, then where it came from. Trust comes from the certificate
+    # itself, never from its kind of file.
+    local problem end days
     [[ -s $LINK_CERT ]] || { printf 'none yet\n'; return; }
-    end=$(cert_end_date "$LINK_CERT") || end='?'
-    if [[ -s $LINK_CERT_SOURCE ]]; then
-        printf 'trusted, from %s, until %s\n' "$(head -n 1 "$LINK_CERT_SOURCE")" "$end"
-    elif [[ -L $LINK_CERT ]]; then
-        printf "trusted, Let's Encrypt, until %s\n" "$end"
+    problem=$(link_cert_problem)
+    if [[ -z $problem ]]; then
+        end=$(openssl x509 -in "$LINK_CERT" -noout -enddate 2>/dev/null | cut -d= -f2)
+        days=$(( ( $(date -u -d "$end" +%s 2>/dev/null || date -u +%s) - $(date -u +%s) ) / 86400 ))
+        printf 'trusted, %s, %s days left\n' "$(link_cert_source_label)" "$days"
+    elif [[ $(link_cert_source) == self-signed ]]; then
+        printf 'self-signed, browser warning\n'
     else
-        printf 'self-signed, until %s\n' "$end"
+        printf 'browser warning: %s\n' "$problem"
+    fi
+}
+certbot_timer_active() { systemctl is-active --quiet snap.certbot.renew.timer 2>/dev/null || systemctl is-active --quiet certbot.timer 2>/dev/null; }
+show_link_cert_details() {
+    local host=$1 new renewed unknown
+    kv Current "$(safe_text "$(link_cert_summary)")"
+    if [[ -s $LINK_CERT ]]; then kv Valid "from $(cert_start_date "$LINK_CERT") until $(cert_end_date "$LINK_CERT")"; fi
+    if [[ $(link_cert_source) == letsencrypt ]]; then
+        if certbot_timer_active; then
+            kv Renewal "certbot's timer is active; a link also renews it when needed"
+        else
+            kv Renewal "no certbot timer is active; a link renews it when needed"
+        fi
+    fi
+    if ! { host_is_ip "$host" && is_private_ip "$host"; }; then
+        read -r new renewed unknown <<<"$(issue_counts "$host")"
+        kv Recorded "$new new, $renewed renewed$( (( unknown > 0 )) && printf ', %s of unknown kind' "$unknown") in the last 7 days, by this tool for $host"
+        info "Let's Encrypt keeps the real count: 5 new certificates a week for one address, one more every 34 hours. Renewals by certbot's own timer are not recorded here."
     fi
 }
 change_link_cert() {
     local host cert key guess problem found end
     host=$(domain)
     [[ -n $host ]] && valid_endpoint "$host" || { warn "Set the server address first: Settings $S_CRUMB 1."; return 1; }
-    kv Current "$(safe_text "$(link_cert_summary)")"
-    if ! { host_is_ip "$host" && is_private_ip "$host"; }; then
-        local used next
-        read -r used next <<<"$(issue_budget "$host")"
-        kv 'This week' "$used of 5 new Let's Encrypt certificates for $host"
-        if (( next > 0 )); then info "The next one can be requested after $(date -u -d "@$next" '+%Y-%m-%d %H:%M UTC')."; fi
-    fi
+    show_link_cert_details "$host"
     say
     choose_one 'Which certificate should links use?' 'Find a trusted one on this server' 'A certificate file on this server' "A new one from Let's Encrypt" 'Keep the current one' || { cancelled; return 0; }
     case $CHOSEN in
@@ -1434,7 +1524,7 @@ change_link_cert() {
             problem=$(cert_problem "$cert" "$key" "$host")
             if [[ -n $problem ]]; then warn "$problem Nothing changed."; return 1; fi
             use_existing_cert "$cert" "$key" ;;
-        3) get_trusted_cert "$host" asked || warn 'The current certificate stays.' ;;
+        3) get_trusted_cert "$host" asked || warn "The current certificate stays$([[ -s $LINK_CERT ]] && printf ', valid until %s' "$(cert_end_date "$LINK_CERT")")." ;;
         *) info 'The current certificate stays.' ;;
     esac
 }
@@ -1547,7 +1637,7 @@ share_by_link() {
 link_note() {
     # The note for the person, only when the browser will warn. English only: a terminal shows right-to-left
     # text backwards. The guides have the note in Persian.
-    link_cert_is_trusted && return 0
+    link_cert_is_trusted "$(domain)" && return 0
     printf '%s' 'Your browser will warn that this connection is not private, because this server has no trusted certificate. Only for this link, which came to you straight from me: choose Advanced, then Continue. Never do this for other sites.'
 }
 present_link() {
@@ -2970,7 +3060,7 @@ draw_settings() {
     menu_group LINKS
     menu_item 3 "$(printf '%-24s %s' 'Link lifetime' "$(hours_label "$(link_hours)")")"
     menu_item 4 "$(printf '%-24s %s' 'Link port' "$(link_port_summary)")"
-    menu_item 5 "$(printf '%-24s %s' 'Link certificate' "$(link_cert_summary | cut -d, -f1)")"
+    menu_item 5 "$(printf '%-24s %s' 'Link certificate' "$(link_cert_summary)")"
     menu_group MORE
     menu_item 6 'Advanced'
     menu_item 0 'Back'
