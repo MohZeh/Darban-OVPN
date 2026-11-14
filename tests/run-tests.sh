@@ -2737,7 +2737,7 @@ test_a_certificate_change_reaches_open_links() {
     ok_if 'the service says it can reload' test -s "$E/links/.reloadable"
 
     make_test_ca vpn.example.com "$E/panel-cert/vpn.example.com" fullchain.pem privkey.pem
-    out=$(menu '7\n5\n1\n0\n0\n')
+    out=$(menu '7\n5\n3\n0\n0\n')
     has 'the change reaches the open link' 'Open links use it now; no download was interrupted.' "$out"
     [[ $(served_fp) == "$(file_fp)" ]]; rc_is 'the port answers with the new certificate' 0 "$?"
     [[ $(cat "$LINKS_PIDFILE") == "$pid" ]] && kill -0 "$pid"; rc_is 'by a reload, not a restart' 0 "$?"
@@ -2746,7 +2746,7 @@ test_a_certificate_change_reaches_open_links() {
     # A reload that does not arrive: the previous pair is put back, and the port still answers with it.
     old=$(file_fp)
     make_test_ca vpn.example.com "$E/panel-cert/vpn.example.com" fullchain.pem privkey.pem 40
-    out=$(printf '7\n5\n1\n0\n0\n' | FAKE_RELOAD_FAIL=1 bash "$E/manager.sh" 2>&1)
+    out=$(printf '7\n5\n3\n0\n0\n' | FAKE_RELOAD_FAIL=1 bash "$E/manager.sh" 2>&1)
     has 'a change the service did not take is said' 'did not take the new certificate, so the previous one was put back' "$out"
     lacks 'and not called done' 'Open links use it now' "$out"
     [[ $(file_fp) == "$old" && $(served_fp) == "$old" ]]; rc_is 'the file and the port agree on the previous one' 0 "$?"
@@ -2755,7 +2755,7 @@ test_a_certificate_change_reaches_open_links() {
     # A service from before this version would end on SIGHUP: it is not sent one.
     rm -f "$E/links/.reloadable"
     : > "$STUB_LOG"
-    out=$(menu '7\n5\n1\n0\n0\n')
+    out=$(menu '7\n5\n3\n0\n0\n')
     has 'an older service is named' 'still runs the version from before the last update' "$out"
     if grep -q 'reload darban-links' "$STUB_LOG"; then result 0 'and gets no reload'; else result 1 'and gets no reload'; fi
     kill -0 "$pid"; rc_is 'and keeps running' 0 "$?"
@@ -2763,7 +2763,43 @@ test_a_certificate_change_reaches_open_links() {
     # No link open, no service: the next link uses the certificate.
     stop_links_stub; sleep 0.3
     make_test_ca vpn.example.com "$E/panel-cert/vpn.example.com" fullchain.pem privkey.pem 50
-    has 'without a running service it says when it applies' 'the next link uses this certificate' "$(menu '7\n5\n1\n0\n0\n')"
+    has 'without a running service it says when it applies' 'the next link uses this certificate' "$(menu '7\n5\n3\n0\n0\n')"
+}
+
+test_link_certificate_screen() {
+    # Enter changes nothing; the Let's Encrypt row says what it costs; self-signed and the fingerprint are there.
+    local out before
+    echo vpn.example.com > "$E/cfg/domain"
+    make_test_ca vpn.example.com "$E/le-own" fullchain.pem privkey.pem
+    cp "$E/le-own/fullchain.pem" "$E/cfg/link-cert.pem"; cp "$E/le-own/privkey.pem" "$E/cfg/link-key.pem"
+    before=$(sha256sum < "$E/cfg/link-cert.pem")
+    out=$(menu '7\n5\n\n0\n0\n')
+    has 'the question says what it is for' 'What do you want to do?' "$out"
+    has 'Enter keeps the certificate' 'The current certificate stays.' "$out"
+    [[ $(sha256sum < "$E/cfg/link-cert.pem") == "$before" ]]; rc_is 'and nothing changed' 0 "$?"
+    has 'a new certificate names its cost' 'one of 5 new a week for vpn.example.com' "$out"
+    has 'other tools are named' 'Use a certificate another tool got (certbot, 3x-ui, acme.sh)' "$out"
+    has 'own files say there are two' 'Use my own certificate files (fullchain and key)' "$out"
+
+    out=$(menu '7\n5\n6\n0\n0\n')
+    has 'the fingerprint is shown' "$(openssl x509 -in "$E/cfg/link-cert.pem" -noout -fingerprint -sha256 | sed 's/^.*=//')" "$out"
+
+    out=$(menu '7\n5\n5\n1\n0\n0\n')
+    has 'switching to self-signed asks first' 'Switch the links to a self-signed certificate?' "$out"
+    [[ $(sha256sum < "$E/cfg/link-cert.pem") == "$before" ]]; rc_is 'and No keeps the certificate' 0 "$?"
+    out=$(menu '7\n5\n5\n2\n0\n0\n')
+    has 'Yes switches' 'Links use a self-signed certificate for vpn.example.com' "$out"
+    has 'and Settings says so' 'self-signed, browser warning' "$(menu '7\n0\n0\n')"
+
+    # This tool's own certificate is renewed, not asked for anew; a private address cannot have one.
+    mkdir -p "$E/le/live/darban-ovpn-links" "$E/le/renewal"
+    cp "$E/le-own/"*.pem "$E/le/live/darban-ovpn-links/"
+    echo 'authenticator = standalone' > "$E/le/renewal/darban-ovpn-links.conf"
+    has 'its own certificate is offered as a renewal' "Renew this tool's Let's Encrypt certificate (only when it is due)" "$(menu '7\n5\n\n0\n0\n')"
+    echo 10.0.0.9 > "$E/cfg/domain"
+    out=$(menu '7\n5\n2\n0\n0\n')
+    has 'a private address says why not' 'not possible for a private address' "$out"
+    has 'and explains' 'Let'"'"'s Encrypt cannot check a private address' "$out"
 }
 
 test_certbot_hook_reloads_the_link_service() {
@@ -2852,7 +2888,7 @@ test_link_certificate_renews_and_counts_the_weekly_limit() {
     out=$(menu '5\nalice\n1\n1\n0\n')
     has 'a real renewal is named' 'Renewed: the certificate for vpn.example.com is valid until' "$out"
     grep -q ' vpn.example.com renew$' "$E/varlib/link-certificates.log"; rc_is 'and recorded as a renewal' 0 "$?"
-    has 'Settings counts it apart' '0 new, 1 renewed' "$(menu '7\n5\n4\n0\n0\n')"
+    has 'Settings counts it apart' '0 new, 1 renewed' "$(menu '7\n5\n1\n0\n0\n')"
     menu '6\n1\n2\n0\n' >/dev/null
     : > "$E/varlib/link-certificates.log"
 
@@ -2865,7 +2901,7 @@ test_link_certificate_renews_and_counts_the_weekly_limit() {
     has 'a new certificate is named' "New certificate from Let's Encrypt for vpn.example.com, valid until" "$out"
     grep -q -- "--deploy-hook $E/sbin/darban reload-links" "$STUB_LOG"; rc_is 'certbot is told to reload the link service, not restart it' 0 "$?"
     grep -q ' vpn.example.com new$' "$E/varlib/link-certificates.log"; rc_is 'and recorded as new' 0 "$?"
-    out=$(menu '7\n5\n4\n0\n0\n')
+    out=$(menu '7\n5\n1\n0\n0\n')
     has 'Settings counts it' '1 new, 0 renewed in the last 7 days, by this tool for vpn.example.com' "$out"
     has 'and says who keeps the real count' "Let's Encrypt keeps the real count" "$out"
     has 'with the dates of the certificate' 'Valid     from ' "$out"
@@ -2881,7 +2917,7 @@ test_link_certificate_renews_and_counts_the_weekly_limit() {
     has 'the weekly limit is named' 'This server recorded 5 new certificates for vpn.example.com in the last 7 days' "$out"
     has 'with the time it may refuse until' 'so it may refuse until about' "$out"
     grep -q 'certbot certonly' "$STUB_LOG"; rc_is 'the request is still sent' 0 "$?"
-    has 'Settings shows old lines as unknown' '2 new, 0 renewed, 4 of unknown kind' "$(menu '7\n5\n4\n0\n0\n')"
+    has 'Settings shows old lines as unknown' '2 new, 0 renewed, 4 of unknown kind' "$(menu '7\n5\n1\n0\n0\n')"
     has 'the link is made' "https://vpn.example.com:$LINK_TEST_PORT/l/" "$out"
     menu '6\n1\n2\n0\n' >/dev/null
 
@@ -2929,9 +2965,9 @@ test_link_uses_a_certificate_already_on_the_server() {
 
     # A file chosen by hand: a key that does not belong is refused.
     make_test_ca vpn.example.com "$E/other" cert.pem cert.key
-    out=$(menu "7\n5\n2\n$E/other/cert.pem\n$E/panel-cert/vpn.example.com/privkey.pem\n0\n0\n")
+    out=$(menu "7\n5\n4\n$E/other/cert.pem\n$E/panel-cert/vpn.example.com/privkey.pem\n0\n0\n")
     has 'a key from another certificate is refused' 'does not belong to that certificate' "$out"
-    out=$(menu "7\n5\n2\n$E/other/cert.pem\n\n0\n0\n")
+    out=$(menu "7\n5\n4\n$E/other/cert.pem\n\n0\n0\n")
     has 'the key next to it is suggested and used' 'Links use the trusted certificate from' "$out"
     cmp -s "$E/cfg/link-cert.pem" "$E/other/cert.pem"; rc_is 'the chosen file is used' 0 "$?"
     stop_links_stub
