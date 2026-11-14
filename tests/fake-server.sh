@@ -72,6 +72,7 @@ q=0; for a; do [[ $a == --quiet ]] && q=1; done
 case " $* " in
   *" restart "*) if [[ -n ${FAIL_RESTART:-} ]]; then exit 1; fi ;;
   *" is-failed "*) ((q)) || echo active; exit 1 ;;
+  *" is-active "*darban-links*) ((q)) || echo inactive; exit 3 ;;
   *" is-active "*) ((q)) || echo active; exit 0 ;;
   *" is-enabled "*) echo enabled; exit 0 ;;
   *" show "*) [[ $* == *Result* ]] && echo success; exit 0 ;;

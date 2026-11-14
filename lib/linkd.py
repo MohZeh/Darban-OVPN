@@ -6,7 +6,8 @@ without keeping its token. darban keeps the whole address in <same>.url, readabl
 a link again; this service never reads that file, and removes it with the link. A link works until the client it was made for connects to the VPN for the first time, or until it
 expires, whichever comes first. Until then the page and the file can be opened again, so a mistake on the
 phone costs nothing. Opening the page never uses anything up: messengers fetch links for their previews.
-Standard library only. The process ends by itself once no link is left.
+Standard library only. The process ends by itself once no link is left. SIGHUP reads the certificate again:
+new connections get the new one, and a download in progress finishes on the old one.
 """
 import argparse
 import contextlib
@@ -16,6 +17,7 @@ import html
 import http.server
 import os
 import re
+import signal
 import socket
 import ssl
 import sys
@@ -340,6 +342,18 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
 class Server(http.server.ThreadingHTTPServer):
     daemon_threads = True
+    context = None
+
+    def get_request(self):
+        # Each connection is wrapped with the certificate of the moment, so a reload reaches the next one. The
+        # handshake waits for the first read inside a handler thread, under its timeout, so one stalled client
+        # cannot hold up the accept loop.
+        sock, address = self.socket.accept()
+        try:
+            return self.context.wrap_socket(sock, server_side=True, do_handshake_on_connect=False), address
+        except (OSError, ValueError):
+            sock.close()
+            raise
 
     def handle_error(self, *_):
         # Failed TLS handshakes from scanners are routine here; a traceback could also echo a path.
@@ -363,6 +377,30 @@ def watch(server, store, idle_exit, interval, management):
             return
 
 
+def tls_context(cert, key):
+    context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    context.minimum_version = ssl.TLSVersion.TLSv1_2
+    context.load_cert_chain(cert, key)
+    return context
+
+
+def reload_on_hangup(server, cert, key, marker):
+    """SIGHUP puts a new certificate in place for new connections; one that does not load leaves the old one."""
+    def reload(*_):
+        try:
+            server.context = tls_context(cert, key)
+            print('certificate reloaded', flush=True)
+        except (OSError, ssl.SSLError) as error:
+            print(f'certificate not reloaded, the previous one stays: {error}', flush=True)
+    signal.signal(signal.SIGHUP, reload)
+    # darban reloads only a process that says it can: an older one would end on SIGHUP.
+    try:
+        with open(marker, 'w') as handle:
+            handle.write(f'{os.getpid()}\n')
+    except OSError:
+        pass
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--dir', required=True)
@@ -377,14 +415,10 @@ def main():
     args = parser.parse_args()
 
     store = Store(args.dir)
-    context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
-    context.minimum_version = ssl.TLSVersion.TLSv1_2
-    context.load_cert_chain(args.cert, args.key)
     server = Server(('0.0.0.0', args.port), Handler)
     server.store = store
-    # The handshake waits for the first read inside a handler thread, under its timeout, so one
-    # stalled client cannot hold up the accept loop.
-    server.socket = context.wrap_socket(server.socket, server_side=True, do_handshake_on_connect=False)
+    server.context = tls_context(args.cert, args.key)
+    reload_on_hangup(server, args.cert, args.key, os.path.join(args.dir, '.reloadable'))
     management = management_address(args.server_conf)
     threading.Thread(target=watch, args=(server, store, args.idle_exit, args.interval, management), daemon=True).start()
     print(f'listening on TCP {args.port}', flush=True)

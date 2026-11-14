@@ -1498,7 +1498,21 @@ change_link_cert() {
     show_link_cert_details "$host"
     say
     choose_one 'Which certificate should links use?' 'Find a trusted one on this server' 'A certificate file on this server' "A new one from Let's Encrypt" 'Keep the current one' || { cancelled; return 0; }
-    case $CHOSEN in
+    (( CHOSEN == 4 )) || change_link_cert_to "$host" "$CHOSEN"
+    (( CHOSEN != 4 )) || info 'The current certificate stays.'
+}
+change_link_cert_to() {
+    # change_link_cert_to <host> <choice>: the change, then the running service takes it.
+    local host=$1 cert key guess problem found end before
+    before=$(cert_fingerprint "$LINK_CERT")
+    save_link_cert_pair || { fail 'Could not keep a copy of the current certificate; nothing changed.'; return 1; }
+    change_link_cert_choice "$host" "$2" || true
+    if [[ $(cert_fingerprint "$LINK_CERT") != "$before" ]]; then put_link_cert_in_service || true; fi
+    drop_saved_link_cert_pair
+}
+change_link_cert_choice() {
+    local host=$1 cert key guess problem found end
+    case $2 in
         1)
             if found=$(find_existing_cert "$host"); then
                 IFS=$'\t' read -r cert key end <<<"$found"
@@ -1525,10 +1539,83 @@ change_link_cert() {
             if [[ -n $problem ]]; then warn "$problem Nothing changed."; return 1; fi
             use_existing_cert "$cert" "$key" ;;
         3) get_trusted_cert "$host" asked || warn "The current certificate stays$([[ -s $LINK_CERT ]] && printf ', valid until %s' "$(cert_end_date "$LINK_CERT")")." ;;
-        *) info 'The current certificate stays.' ;;
     esac
 }
 valid_abs_path() { [[ $1 == /* && $1 != *$'\n'* ]]; }
+
+# ---------- the running link service takes a changed certificate ----------
+LINK_CERT_PREV=$CONFIG_DIR/.link-cert.prev
+LINK_KEY_PREV=$CONFIG_DIR/.link-key.prev
+LINK_SOURCE_PREV=$CONFIG_DIR/.link-cert.source.prev
+save_link_cert_pair() {
+    # The pair in use before a change, links kept as links, so a change the service does not take is undone.
+    rm -f -- "$LINK_CERT_PREV" "$LINK_KEY_PREV" "$LINK_SOURCE_PREV"
+    [[ -e $LINK_CERT || -L $LINK_CERT ]] || return 0
+    cp -P -- "$LINK_CERT" "$LINK_CERT_PREV" && cp -P -- "$LINK_KEY" "$LINK_KEY_PREV" || return 1
+    if [[ -e $LINK_CERT_SOURCE ]]; then cp -- "$LINK_CERT_SOURCE" "$LINK_SOURCE_PREV" || return 1; fi
+}
+restore_link_cert_pair() {
+    [[ -e $LINK_CERT_PREV || -L $LINK_CERT_PREV ]] || return 1
+    mv -fT -- "$LINK_KEY_PREV" "$LINK_KEY" && mv -fT -- "$LINK_CERT_PREV" "$LINK_CERT" || return 1
+    if [[ -e $LINK_SOURCE_PREV ]]; then mv -f -- "$LINK_SOURCE_PREV" "$LINK_CERT_SOURCE"; else rm -f -- "$LINK_CERT_SOURCE"; fi
+}
+drop_saved_link_cert_pair() { rm -f -- "$LINK_CERT_PREV" "$LINK_KEY_PREV" "$LINK_SOURCE_PREV"; }
+served_link_cert_fingerprint() {
+    # The certificate the link service answers with now, asked for the way a browser asks.
+    local port
+    port=$(awk -F= '$1 == "LINK_PORT" {print $2; exit}' "$LINK_ENV" 2>/dev/null)
+    [[ $port =~ ^[0-9]+$ ]] || return 1
+    timeout 5 openssl s_client -connect "127.0.0.1:$port" -servername "$(domain)" </dev/null 2>/dev/null \
+        | openssl x509 -noout -fingerprint -sha256 2>/dev/null | sed 's/^.*=//'
+}
+link_service_serves() {
+    # link_service_serves <fingerprint>: the running service answers with it, within a few seconds.
+    local attempt
+    for attempt in 1 2 3 4 5 6 7 8 9 10; do
+        [[ $(served_link_cert_fingerprint) == "$1" ]] && return 0
+        sleep 0.3
+    done
+    return 1
+}
+link_service_reloadable() {
+    # Only a service from this version reloads on SIGHUP; an older one would end.
+    local pid=''
+    [[ -s $LINK_DIR/.reloadable ]] && IFS= read -r pid <"$LINK_DIR/.reloadable"
+    [[ -n $pid && $pid == "$(systemctl show -p MainPID --value darban-links.service 2>/dev/null)" ]]
+}
+put_link_cert_in_service() {
+    # After a change of the links' certificate: the running service takes it without stopping a download in
+    # progress, and it is called done only once the service answers with it. One it does not take is undone.
+    local want
+    if ! systemctl is-active --quiet darban-links.service 2>/dev/null; then
+        info 'No link is open, so the link service is not running: the next link uses this certificate.'
+        return 0
+    fi
+    if ! link_service_reloadable; then
+        warn "The link service still runs the version from before the last update, so open links keep the previous certificate until the next link. To change it now, which stops a download in progress: $(cmd sudo systemctl restart darban-links.service)"
+        return 0
+    fi
+    want=$(cert_fingerprint "$LINK_CERT")
+    if systemctl reload darban-links.service 2>/dev/null && link_service_serves "$want"; then
+        ok 'Open links use it now; no download was interrupted.'
+        return 0
+    fi
+    if restore_link_cert_pair; then
+        want=$(cert_fingerprint "$LINK_CERT")
+        if systemctl is-active --quiet darban-links.service 2>/dev/null; then
+            systemctl reload darban-links.service 2>/dev/null || true
+        else
+            # It stopped, so no download is left to interrupt.
+            start_link_service "$(domain)" >/dev/null 2>&1 || true
+        fi
+        if link_service_serves "$want"; then
+            fail "The link service did not take the new certificate, so the previous one was put back, and open links use it. Details: $(cmd journalctl -u darban-links.service -n 20 --no-pager)"
+            return 1
+        fi
+    fi
+    fail "The link service answers with neither certificate, so open links may not open. Restart it: $(cmd sudo systemctl restart darban-links.service), and see $(cmd journalctl -u darban-links.service -n 20 --no-pager)"
+    return 1
+}
 start_link_service() {
     local attempt
     printf 'LINK_HOST=%s\nLINK_PORT=%s\n' "$1" "$LINK_PORT" >"$LINK_ENV" || return 1

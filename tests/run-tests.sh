@@ -1259,6 +1259,14 @@ if [[ " \$* " == *" restart darban-links.service "* ]]; then
     echo \$! > "$LINKS_PIDFILE"
     exit 0
 fi
+# The service's state and its reload, as systemd would give them. FAKE_RELOAD_FAIL: the signal never arrives.
+if [[ " \$* " == *" reload darban-links.service "* ]]; then
+    echo "systemctl \$*" >> "\$STUB_LOG"
+    [[ -n \${FAKE_RELOAD_FAIL:-} ]] && exit 0
+    kill -HUP "\$(cat "$LINKS_PIDFILE")"; exit
+fi
+if [[ " \$* " == *" is-active "*darban-links.service* ]]; then [[ -s "$LINKS_PIDFILE" ]] && kill -0 "\$(cat "$LINKS_PIDFILE")" 2>/dev/null; exit; fi
+if [[ " \$* " == *" show "*darban-links.service* ]]; then cat "$LINKS_PIDFILE" 2>/dev/null; exit 0; fi
 exec bash "$E/bin/systemctl.real" "\$@"
 STUB
     chmod +x "$E/bin/systemctl"
@@ -2688,6 +2696,53 @@ make_test_ca() {
     printf 'subjectAltName=DNS:%s\n' "$host" > "$E/leaf.ext"
     openssl x509 -req -in "$E/leaf.csr" -CA "$E/test-ca.pem" -CAkey "$E/test-ca.key" -CAcreateserial -days "$days" \
         -extfile "$E/leaf.ext" -out "$dir/$leaf" >/dev/null 2>&1
+}
+
+served_fp() {
+    timeout 5 openssl s_client -connect "127.0.0.1:$LINK_TEST_PORT" -servername vpn.example.com </dev/null 2>/dev/null \
+        | openssl x509 -noout -fingerprint -sha256 2>/dev/null | sed 's/^.*=//'
+}
+file_fp() { openssl x509 -in "$E/cfg/link-cert.pem" -noout -fingerprint -sha256 | sed 's/^.*=//'; }
+test_a_certificate_change_reaches_open_links() {
+    # Settings changes the certificate while a link is open: the running service takes it at once, without a
+    # restart, and one it does not take is undone.
+    local out pid old
+    start_links_stub
+    echo vpn.example.com > "$E/cfg/domain"
+    menu '5\nalice\n1\n2\n1\n0\n' >/dev/null
+    sleep 0.5
+    pid=$(cat "$LINKS_PIDFILE")
+    [[ $(served_fp) == "$(file_fp)" ]]; rc_is 'the open link serves the self-signed certificate' 0 "$?"
+    ok_if 'the service says it can reload' test -s "$E/links/.reloadable"
+
+    make_test_ca vpn.example.com "$E/panel-cert/vpn.example.com" fullchain.pem privkey.pem
+    out=$(menu '7\n5\n1\n0\n0\n')
+    has 'the change reaches the open link' 'Open links use it now; no download was interrupted.' "$out"
+    [[ $(served_fp) == "$(file_fp)" ]]; rc_is 'the port answers with the new certificate' 0 "$?"
+    [[ $(cat "$LINKS_PIDFILE") == "$pid" ]] && kill -0 "$pid"; rc_is 'by a reload, not a restart' 0 "$?"
+    grep -q 'certificate reloaded' "$E/links.log"; rc_is 'the service logs the reload' 0 "$?"
+
+    # A reload that does not arrive: the previous pair is put back, and the port still answers with it.
+    old=$(file_fp)
+    make_test_ca vpn.example.com "$E/panel-cert/vpn.example.com" fullchain.pem privkey.pem 40
+    out=$(printf '7\n5\n1\n0\n0\n' | FAKE_RELOAD_FAIL=1 bash "$E/manager.sh" 2>&1)
+    has 'a change the service did not take is said' 'did not take the new certificate, so the previous one was put back' "$out"
+    lacks 'and not called done' 'Open links use it now' "$out"
+    [[ $(file_fp) == "$old" && $(served_fp) == "$old" ]]; rc_is 'the file and the port agree on the previous one' 0 "$?"
+    ok_if 'no copy is left behind' test ! -e "$E/cfg/.link-cert.prev"
+
+    # A service from before this version would end on SIGHUP: it is not sent one.
+    rm -f "$E/links/.reloadable"
+    : > "$STUB_LOG"
+    out=$(menu '7\n5\n1\n0\n0\n')
+    has 'an older service is named' 'still runs the version from before the last update' "$out"
+    if grep -q 'reload darban-links' "$STUB_LOG"; then result 0 'and gets no reload'; else result 1 'and gets no reload'; fi
+    kill -0 "$pid"; rc_is 'and keeps running' 0 "$?"
+
+    # No link open, no service: the next link uses the certificate.
+    stop_links_stub; sleep 0.3
+    make_test_ca vpn.example.com "$E/panel-cert/vpn.example.com" fullchain.pem privkey.pem 50
+    has 'without a running service it says when it applies' 'the next link uses this certificate' "$(menu '7\n5\n1\n0\n0\n')"
 }
 
 test_a_kept_link_certificate_is_used_again() {

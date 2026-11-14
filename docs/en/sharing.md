@@ -73,7 +73,7 @@ Profiles keep the address they were made with. Send them again from menu `5`.
 
 On a domain name or a public IP address, a link can have a trusted certificate, and the browser then shows no warning. The setup already installs `certbot` for it. Getting one can still fail, for example when TCP port 80 is closed in the provider's firewall; the tool then says so.
 
-1. **A trusted certificate already on this server** comes first: one that certbot, a panel such as 3x-ui or x-ui, or acme.sh got for the same address. The tool asks, and Enter uses it. The link service gets a copy, and when the certificate is renewed there, the next link takes the new one. **Settings › Link certificate** also takes a certificate file you name.
+1. **A trusted certificate already on this server** comes first: one that certbot, a panel such as 3x-ui or x-ui, or acme.sh got for the same address. The tool asks, and Enter uses it. The link service gets a copy, and when the certificate is renewed there, the next link takes the new one. **Settings › Link certificate** also takes a certificate file you name. A certificate changed there reaches open links at once: the link service reloads it, a download in progress finishes, and the tool checks that the port answers with the new certificate. If it does not, the previous one is put back and the tool says so.
 2. Otherwise the tool offers a free certificate from **Let's Encrypt**, and Enter means Yes. It needs TCP port 80 open in your provider's firewall for a moment, when the certificate is requested and at each renewal.
 
 Until the link has a trusted certificate, the question comes back each time you share by link.
