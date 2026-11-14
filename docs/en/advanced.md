@@ -123,7 +123,7 @@ LINK_PORT=9347
 UPDATE_CHECK=no
 ```
 
-`UPDATE_CHECK=no` turns off the daily update notice, as does **Setup › Daily update notice**. The tool never installs an update by itself.
+The menu looks for a new release when it starts, at most once an hour, and waits up to two seconds for the answer, so a new version shows on the first screen. After a failed check it tries again ten minutes later, or when GitHub says its limit allows. That limit counts every program on the server's address, the VPN clients' traffic included. **Setup** shows the state beside **Check for updates**: a new version, up to date with the time of the check, or why it is not known. `UPDATE_CHECK=no` turns the notice off, as does **Setup › Update notice**. The tool never installs an update by itself.
 
 ## Firewall ports
 
