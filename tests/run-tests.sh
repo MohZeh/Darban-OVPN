@@ -1175,7 +1175,7 @@ test_advanced_settings_are_applied_and_rolled_back() {
     if conf_has 'DNS 9.9.9.9'; then result 0 'the DNS stays after No'; else result 1 'the DNS stays after No'; fi
     if grep -q 'systemctl restart' "$STUB_LOG"; then result 0 'no restart after No'; else result 1 'no restart after No'; fi
     out=$(menu '7\n6\n2\nnot-an-ip\n\n0\n0\n0\n')
-    has 'a bad DNS is asked again' 'Enter one or two IPv4 addresses' "$out"
+    has 'a bad DNS is asked again' 'or one or two IPv4 addresses' "$out"
 
     out=$(menu '7\n6\n2\n9.9.9.9 8.8.4.4\n2\n0\n0\n0\n')
     has 'the DNS change is confirmed' 'Applied: DNS 9.9.9.9 8.8.4.4' "$out"
@@ -1205,7 +1205,7 @@ test_advanced_settings_are_applied_and_rolled_back() {
     grep -q 'ip saddr 10.50.0.0/24' "$E/cfg/nat.nft"; rc_is 'NAT follows the new network' 0 "$?"
 
     out=$(menu '7\n6\n4\nBF-CBC\n\n0\n0\n0\n')
-    has 'a non-AEAD cipher is refused' 'Use only the allowed names' "$out"
+    has 'a non-AEAD cipher is refused' 'or only AES-256-GCM, AES-128-GCM and CHACHA20-POLY1305' "$out"
     out=$(menu '7\n6\n4\nAES-256-GCM\n2\n0\n0\n0\n')
     has 'the ciphers change' 'Applied: data ciphers AES-256-GCM' "$out"
     conf_has '^data-ciphers AES-256-GCM$'; rc_is 'one data-ciphers line remains' 0 "$?"
@@ -1215,6 +1215,24 @@ test_advanced_settings_are_applied_and_rolled_back() {
     conf_has '^keepalive 15 90$'; rc_is 'keepalive changes' 0 "$?"
     out=$(menu '7\n6\n6\n4\n2\n0\n0\n0\n')
     conf_has '^verb 4$'; rc_is 'log detail changes' 0 "$?"
+
+    # Common values come as a numbered list; a number picks one, and a value can still be typed.
+    out=$(menu '7\n6\n2\n3\n2\n0\n0\n0\n')
+    has 'the DNS list names what each does' 'Quad9, blocks known malicious sites (9.9.9.9 149.112.112.112)' "$out"
+    has 'a number picks a DNS' 'Applied: DNS 9.9.9.9 149.112.112.112' "$out"
+    out=$(menu '7\n6\n5\n3\n2\n0\n0\n0\n')
+    conf_has '^keepalive 5 30$'; rc_is 'a number picks a keepalive' 0 "$?"
+    out=$(menu '7\n6\n4\n2\n2\n0\n0\n0\n')
+    conf_has '^data-ciphers CHACHA20-POLY1305:AES-256-GCM:AES-128-GCM$'; rc_is 'a number picks ciphers' 0 "$?"
+    out=$(menu '7\n6\n3\n\n0\n0\n0\n')
+    has 'the network question suggests a free one' 'A free one on this server: 10.8.0.0' "$out"
+    out=$(menu '7\n6\n0\n0\n')
+    has 'Advanced says what it holds' 'The defaults suit most servers' "$out"
+    has 'items that restart OpenVPN are marked' 'DNS for clients *' "$out"
+    has 'and the mark is explained' '* restarts OpenVPN' "$out"
+    out=$(menu '7\n0\n0\n')
+    has 'Settings says what it holds' 'What clients connect to, and how temporary links work' "$out"
+    has 'the port is marked as a restart' 'OpenVPN UDP port *' "$out"
 
     before=$(cat "$SERVER_CONF")
     cp "$E/cfg/nat.nft" "$E/nat.before"
@@ -1254,7 +1272,7 @@ test_advanced_download_access_and_client_lifetime() {
     out=$(menu '7\n6\n7\n5000\n0\n0\n0\n')
     has 'a bad lifetime is refused' 'Nothing changed' "$out"
     out=$(menu '7\n6\n7\n100\n0\n0\n0\n')
-    has 'the lifetime is saved' 'New clients last: 100 days' "$out"
+    has 'the lifetime is saved' 'Saved: new clients last 100 days. It applies to clients created from now on.' "$out"
     out=$(menu '1\nshortlived\n0\n')
     has 'a client is created' 'Client "shortlived" created' "$out"
     end=$(openssl x509 -in "$PKI/issued/shortlived.crt" -noout -enddate | sed 's/notAfter=//')
