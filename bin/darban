@@ -1512,7 +1512,15 @@ certbot_timer_active() { systemctl is-active --quiet snap.certbot.renew.timer 2>
 show_link_cert_details() {
     local host=$1 new renewed unknown
     kv Current "$(safe_text "$(link_cert_summary)")"
-    if [[ -s $LINK_CERT ]]; then kv Valid "from $(cert_start_date "$LINK_CERT") until $(cert_end_date "$LINK_CERT")"; fi
+    if [[ -s $LINK_CERT ]]; then
+        kv Valid "from $(cert_start_date "$LINK_CERT") until $(cert_end_date "$LINK_CERT")"
+        case $(link_cert_source) in
+            letsencrypt) kv Source "Let's Encrypt, in $LE_DIR/live/$CERT_NAME" ;;
+            copied) kv Source "a copy of $(safe_text "$(head -n 1 "$LINK_CERT_SOURCE")")" ;;
+            *) kv Source 'made on this server' ;;
+        esac
+        kv SHA-256 "$(cert_fingerprint "$LINK_CERT")"
+    fi
     if [[ $(link_cert_source) == letsencrypt ]]; then
         if certbot_timer_active; then
             kv Renewal "certbot's timer is active; a link also renews it when needed"
@@ -1525,43 +1533,50 @@ show_link_cert_details() {
         kv Recorded "$new new, $renewed renewed$( (( unknown > 0 )) && printf ', %s of unknown kind' "$unknown") in the last 7 days, by this tool for $host"
         info "Let's Encrypt keeps the real count: 5 new certificates a week for one address, one more every 34 hours. Renewals by certbot's own timer are not recorded here."
     fi
+    info 'The browser shows the same SHA-256 value in the certificate details of the link page.'
 }
-lets_encrypt_label() {
-    # The Let's Encrypt row says what choosing it costs: a renewal of this tool's certificate, or a new one.
-    local host=$1
-    if host_is_ip "$host" && is_private_ip "$host"; then
-        printf "A trusted one from Let's Encrypt (not possible for a private address)\n"
-    elif [[ -s $LE_DIR/renewal/$CERT_NAME.conf ]] && cert_covers "$LE_DIR/live/$CERT_NAME/fullchain.pem" "$host"; then
-        printf "Renew this tool's Let's Encrypt certificate (only when it is due)\n"
-    else
-        printf "Get a trusted one from Let's Encrypt (one of 5 new a week for %s)\n" "$host"
-    fi
+link_cert_renewal_line() {
+    # One line for the main screen: how the certificate stays valid, only for this tool's Let's Encrypt one.
+    [[ $(link_cert_source) == letsencrypt ]] || return 1
+    if certbot_timer_active; then printf 'automatic\n'; else printf 'when a link needs it\n'; fi
 }
 change_link_cert() {
-    local host
+    # Two lines of state and four choices; everything else is one level down.
+    local host renewal
+    local -a labels=() actions=()
     host=$(domain)
     [[ -n $host ]] && valid_endpoint "$host" || { warn "Set the server address first: Settings $S_CRUMB 1."; return 1; }
-    show_link_cert_details "$host"
+    kv Current "$(safe_text "$(link_cert_summary)")"
+    if renewal=$(link_cert_renewal_line); then kv Renewal "$renewal"; fi
     say
-    # Enter changes nothing: the safe answer comes first, as everywhere in this tool.
-    choose_one 'What do you want to do?' \
-        'Nothing, keep it' \
-        "$(lets_encrypt_label "$host")" \
-        'Use a certificate another tool got (certbot, 3x-ui, acme.sh)' \
-        'Use my own certificate files (fullchain and key)' \
-        'Switch to a self-signed certificate (browser warning)' \
-        'Show the fingerprint' || { cancelled; return 0; }
-    case $CHOSEN in
-        1) info 'The current certificate stays.' ;;
-        6) show_link_cert_fingerprint ;;
-        *) change_link_cert_to "$host" "$CHOSEN" ;;
+    labels+=('Keep it'); actions+=(keep)
+    # Let's Encrypt cannot check a private address, so it is not offered there.
+    if ! { host_is_ip "$host" && is_private_ip "$host"; }; then
+        if own_cert_renewable "$host"; then labels+=('Renew now'); else labels+=('Get a trusted one'); fi
+        actions+=(letsencrypt)
+    fi
+    labels+=('Use another certificate' 'Details'); actions+=(another details)
+    choose_one 'What do you want to do?' "${labels[@]}" || { cancelled; return 0; }
+    case ${actions[CHOSEN - 1]} in
+        keep) info 'The current certificate stays.' ;;
+        letsencrypt) change_link_cert_to "$host" letsencrypt ;;
+        another) choose_another_cert "$host" ;;
+        details) show_link_cert_details "$host" ;;
     esac
 }
-show_link_cert_fingerprint() {
-    # What the person opening a link can compare in the browser, when it warns.
-    if [[ ! -s $LINK_CERT ]]; then info 'There is no link certificate yet; the first link makes one.'; return 0; fi
-    kv SHA-256 "$(cert_fingerprint "$LINK_CERT")"
-    info 'The browser shows the same value in the certificate details of the link page.'
+choose_another_cert() {
+    local host=$1
+    choose_one 'Which certificate should links use?' \
+        'One another tool got (certbot, 3x-ui, acme.sh)' \
+        'My own certificate files (fullchain and key)' \
+        'A self-signed one (browser warning)' \
+        'Back' || { cancelled; return 0; }
+    case $CHOSEN in
+        1) change_link_cert_to "$host" tool ;;
+        2) change_link_cert_to "$host" files ;;
+        3) change_link_cert_to "$host" self ;;
+        *) info 'The current certificate stays.' ;;
+    esac
 }
 change_link_cert_to() {
     # change_link_cert_to <host> <choice>: the change, then the running service takes it.
@@ -1575,13 +1590,15 @@ change_link_cert_to() {
 change_link_cert_choice() {
     local host=$1 cert key guess problem found end
     case $2 in
-        2)
-            if host_is_ip "$host" && is_private_ip "$host"; then
-                info "Let's Encrypt cannot check a private address, so it gives no certificate for $host. Links on a private network use a self-signed certificate."
-                return 0
+        letsencrypt)
+            # What it costs is said once it is chosen, not on the list.
+            if own_cert_renewable "$host"; then
+                info "certbot renews this tool's certificate only when it is due, and tells Let's Encrypt which one it replaces."
+            else
+                info "This asks Let's Encrypt for a new certificate for $host: one of the 5 it gives a week for one address."
             fi
             get_trusted_cert "$host" asked || warn "The current certificate stays$([[ -s $LINK_CERT ]] && printf ', valid until %s' "$(cert_end_date "$LINK_CERT")")." ;;
-        3)
+        tool)
             info "Looking where certbot, panels such as 3x-ui, and acme.sh keep certificates for $host${S_ELL}"
             if found=$(find_existing_cert "$host"); then
                 IFS=$'\t' read -r cert key end <<<"$found"
@@ -1591,7 +1608,7 @@ change_link_cert_choice() {
                 info "No trusted certificate for $host was found there. Nothing changed."
                 explain_untrusted_certs "$host"
             fi ;;
-        4)
+        files)
             info 'Two files: the certificate with its chain (fullchain), and its private key. They are copied, so the originals stay where they are.'
             prompt_valid 'Certificate file (Enter = cancel): ' valid_abs_path 'Enter a full path that starts with /.' || return 0
             cert=$REPLY
@@ -1607,7 +1624,7 @@ change_link_cert_choice() {
             problem=$(cert_problem "$cert" "$key" "$host")
             if [[ -n $problem ]]; then warn "$problem Nothing changed."; return 1; fi
             use_existing_cert "$cert" "$key" ;;
-        5)
+        self)
             info 'A self-signed certificate needs nothing from outside, but the browser warns about every link, and the person has to choose to continue.'
             confirm_choice 'Switch the links to a self-signed certificate?' 'No, keep the current one' 'Switch to self-signed' caution || { info 'The current certificate stays.'; return 0; }
             # A Let's Encrypt certificate this tool got stays in /etc/letsencrypt, so it can be taken back later.
