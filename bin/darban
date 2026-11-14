@@ -1600,6 +1600,11 @@ put_link_cert_in_service() {
         ok 'Open links use it now; no download was interrupted.'
         return 0
     fi
+    # The service ends a minute after the last link; if it just did, nothing serves the old pair either.
+    if ! systemctl is-active --quiet darban-links.service 2>/dev/null; then
+        info 'The last link just ended, so the link service stopped: the next link uses this certificate.'
+        return 0
+    fi
     if restore_link_cert_pair; then
         want=$(cert_fingerprint "$LINK_CERT")
         if systemctl is-active --quiet darban-links.service 2>/dev/null; then
