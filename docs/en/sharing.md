@@ -35,7 +35,7 @@ Note:
 Your browser will warn that this connection is not private, …
 ```
 
-Then it asks **Copy it to your clipboard?**, and Enter copies all of them in this order. With a password, the second option, **Copy without the password**, leaves it out, so you can send it another way.
+The block to send comes first, right after one line that says how long the link works. Then the tool asks **Copy it to your clipboard?**, and Enter copies all of them in this order. With a password, the second option, **Copy without the password**, leaves it out, so you can send it another way. **More about this link** shows what holds for every link: menu 6 for later, the firewall port, the certificate fingerprint when the browser will warn, and a word on safety.
 
 The text goes over SSH to the clipboard of your own computer. Windows Terminal, kitty, WezTerm and Alacritty allow it, and iTerm2 when its settings allow applications to use the clipboard. PuTTY and the macOS Terminal do not, and neither does tmux unless its `set-clipboard` option is on. The tool cannot see whether it worked. If pasting does not give the text, select the lines from `Link:` down with the mouse: they have no frame and no indent, so the selection holds only that text.
 
@@ -48,7 +48,7 @@ For a phone in front of you, choose **Show a QR code** in the copy question, and
 Use this when a link cannot be used, for example when your provider does not let you open a TCP port, or to fetch the file to your own computer over SSH.
 
 1. Choose **Keep it on the server**.
-2. The tool shows a command for Windows, one for macOS and Linux, and an address for WinSCP or FileZilla. Then it offers to copy one of them, as in [Copying what you send](#copying-what-you-send). Run the one for your computer, now or later.
+2. The tool asks which computer will download it: Windows, macOS or Linux, or an SFTP app such as WinSCP or FileZilla. It shows only that command or address, and offers to copy it, as in [Copying what you send](#copying-what-you-send). Run it now or later; menu 6 shows the commands again.
 3. After downloading, delete the server copy from menu `6`.
 
 This way asks for no password: the file comes to you over SSH, which already checks that it is your server.

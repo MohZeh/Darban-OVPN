@@ -108,7 +108,8 @@ Enter: Create a client => \r
 Client name [client1] => accept1\r
 Enter: Temporary link => 2\r
 Kept on the server
-Enter: Copy the Windows command => 4\r
+Enter: Windows => \r
+Enter: Copy the command => 2\r
 Waiting for accept1 to connect => \r
 Choose [0-9] => 0\r
 EOF
@@ -130,7 +131,8 @@ cat > "$LOG/share.keys" <<'EOF'
 Choose [0-9] => 5\r
 Number or name => accept1\r
 Enter: Temporary link => 2\r
-Enter: Copy the Windows command => 4\r
+Enter: Windows => \r
+Enter: Copy the command => 2\r
 accept1 is connected from => \r
 Choose [0-9] => 0\r
 EOF

@@ -337,12 +337,16 @@ def share_chooser_moves_with_keys(m):
     m.press(DOWN, ENTER)
     check('it shows where the file is', m.wait_for('Kept on the server'), m.seen)
     check('without asking for a password', 'Lock the private key' not in plain(m.seen), m.seen)
+    # The question came with the line above, so it is already read: wait_for only looks at new output.
     m.drain()
-    screen = plain(m.seen)
-    check('and offers to copy a command', 'Copy the Windows command' in screen, screen)
-    check('with the Windows command', 'USERPROFILE' in screen, screen)
-    check('the macOS and Linux command', '~/Downloads/' in screen, screen)
-    check('and the sftp address', 'sftp://' in screen, screen)
+    check('it asks which computer downloads it', 'Which computer will download it?' in plain(m.seen), m.seen)
+    start = len(m.seen)
+    m.press(ENTER)
+    check('Windows gets its command', m.wait_for('Copy the command'), m.seen)
+    m.drain()
+    screen = plain(m.seen[start:])
+    check('the Windows command is shown', 'USERPROFILE' in screen, screen)
+    check('and only that one', '~/Downloads/' not in screen and 'sftp://' not in screen, screen)
 
 
 def share_esc_means_later(m):

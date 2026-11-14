@@ -33,6 +33,9 @@ LINK_KEY=$CONFIG_DIR/link-key.pem
 LINK_PORT_CHOICES='9347 9563 9741'
 # Where a link certificate taken from another tool came from, so a renewal there reaches the links.
 LINK_CERT_SOURCE=$CONFIG_DIR/link-cert.source
+# The link port the firewall warning was last given for.
+LINK_PORT_TOLD=$CONFIG_DIR/.link-port-told
+LINK_MORE_LABEL='' LINK_MORE_NOTE=''
 SYSTEM_CA_FILE=/etc/ssl/certs/ca-certificates.crt
 # Where certbot, panels such as 3x-ui and x-ui, and acme.sh keep certificates.
 CERT_SEARCH_DIRS='/etc/letsencrypt/live /root/cert /root/.acme.sh'
@@ -970,16 +973,24 @@ delete_home_copy() {
     if rm -f -- "$1"; then ok "Copy for $DOWNLOAD_SSH_USER deleted: $1"; audit "profile deleted from server: $1"; else warn "Could not delete the copy for $DOWNLOAD_SSH_USER: $1"; fi
 }
 share_by_download() {
-    # The file stays on the server, with every way to fetch it, now or later.
-    local name=$1
-    prepare_download_copy "$OUT_DIR/$name.ovpn"
-    download_panel "$OUT_DIR/$name.ovpn" "Profile for \"$name\" rebuilt"
-    info "Kept on the server: $OUT_DIR/$name.ovpn. After downloading it, delete it from menu 6."
-    [[ -n $DOWNLOAD_SSH_HOST ]] || return 0
-    offer_copy 'the command' '' \
-        'Copy the Windows command' "$(download_command windows "$OUT_DIR/$name.ovpn")" \
-        'Copy the macOS or Linux command' "$(download_command unix "$OUT_DIR/$name.ovpn")" \
-        'Copy the SFTP address' "$(download_command sftp "$OUT_DIR/$name.ovpn")"
+    # The file stays on the server. A person at a terminal is asked which computer downloads it and sees only that
+    # command; a script gets all of them.
+    local name=$1 file only=all
+    local -a kinds=(windows unix sftp)
+    file=$OUT_DIR/$name.ovpn
+    prepare_download_copy "$file"
+    if (( UI_TTY )) && [[ -n $DOWNLOAD_SSH_HOST ]]; then
+        info "Kept on the server: $file."
+        choose_one 'Which computer will download it?' 'Windows' 'macOS or Linux' 'An SFTP app (WinSCP, FileZilla, Termius)' || {
+            info "Share it from menu 5 later, or delete it from menu 6."
+            return 0
+        }
+        only=${kinds[CHOSEN - 1]}
+    fi
+    download_panel "$file" "Profile for \"$name\" rebuilt" "$only"
+    info "Kept on the server: $file. After downloading it, delete it from menu 6."
+    [[ -n $DOWNLOAD_SSH_HOST && $only != all ]] || return 0
+    offer_copy 'the command' '' 'Copy the command' "$(download_command "$only" "$file")"
 }
 tcp_port_open() { timeout 1 bash -c 'exec 3<>"/dev/tcp/127.0.0.1/$0"' "$1" 2>/dev/null; }
 tcp_port_taken() {
@@ -1123,17 +1134,17 @@ get_trusted_cert() {
     if [[ -s $LE_DIR/renewal/$CERT_NAME.conf ]] && cert_covers "$LE_DIR/live/$CERT_NAME/fullchain.pem" "$host"; then renewing=1; fi
     if [[ $asked != asked ]]; then
         say
-        info "A trusted certificate for $host means the person opening the link sees no browser warning."
-        if [[ $need != 0 ]]; then
-            info "For an IP address it lasts six days, and a new one is requested when a link needs it. It needs certbot $CERTBOT_IP_MIN or newer, from the Certbot project."
-        fi
-        info 'It needs TCP port 80 open in your provider firewall and free on this server for a moment. Choosing yes accepts the Let'"'"'s Encrypt subscriber agreement.'
+        info "A trusted certificate means no browser warning for the person opening the link. It needs TCP port 80 open for a moment, and yes accepts the Let's Encrypt subscriber agreement."
+
         if (( renewing )); then
             choose_one 'Renew the Let'"'"'s Encrypt certificate this server got earlier?' 'Yes, renew it' 'No, use a self-signed certificate (browser warning)' || return 1
         else
             choose_one 'Get a free Let'"'"'s Encrypt certificate?' 'Yes, get a certificate' 'No, use a self-signed certificate (browser warning)' || return 1
         fi
         (( CHOSEN == 1 )) || return 1
+    fi
+    if [[ $need != 0 ]]; then
+        info "For an IP address it lasts six days, and a new one is requested when a link needs it. It needs certbot $CERTBOT_IP_MIN or newer, from the Certbot project."
     fi
     if tcp_port_taken 80; then warn "TCP port 80 is used by $(safe_text "$(tcp_port_program 80)"), so certbot cannot answer on it."; return 1; fi
     if ! certbot=$(find_certbot "$need"); then
@@ -1752,9 +1763,7 @@ prepare_link() {
 share_by_link() {
     local name=$1 host hours minutes label token key now expires url temp note=''
     host=$(domain)
-    if link_sees_connections; then
-        info "The link stops working after $(hours_label "$(link_hours)"), or about 10 seconds after a connection with this profile is seen, whichever comes first. Until then it can be opened again. To change the time: Settings $S_CRUMB Link lifetime."
-    else
+    if ! link_sees_connections; then
         warn "This server has no local management interface, so the link cannot see a connection: it works for $(hours_label "$(link_hours)")."
     fi
     # A link must not outlive its certificate. That can only happen with a trusted one that could not be renewed:
@@ -1797,24 +1806,33 @@ share_by_link() {
     rm -f -- "$OUT_DIR/$name.ovpn"
     ca_unlock
     audit "temporary link created: $name, valid for $label"
-    ok "Temporary link for \"$name\""
-    hr
-    if link_sees_connections; then kv Valid "$label, or until a connection with this profile is seen"; else kv Valid "$label"; fi
-    kv Later 'menu 6 shows it again or cancels it'
-    say
-    warn "TCP $LINK_PORT must be open in your provider firewall."
     note=$(link_note)
-    if [[ -n $note ]]; then
-        warn 'This server has no trusted certificate, so the browser shows a warning for this link. The note below tells the person what to do.'
+    LINK_MORE_LABEL=$label LINK_MORE_NOTE=$note
+    if link_sees_connections; then ok "Link for \"$name\": works $label, or until $name connects"; else ok "Link for \"$name\": works $label"; fi
+    # The firewall is said once for each port: after that it is either open, or the first link already failed.
+    if [[ $(cat "$LINK_PORT_TOLD" 2>/dev/null) != "$LINK_PORT" ]]; then
+        warn "TCP $LINK_PORT must be open in your provider firewall."
+        printf '%s\n' "$LINK_PORT" >"$LINK_PORT_TOLD" 2>/dev/null || true
+    fi
+    say
+    present_link "$url" "$PROFILE_PASSWORD" "$note" more
+}
+link_more_info() {
+    # What used to stand before the link: true for every link, so it waits until asked for. A script gets it at
+    # once, since it has nobody to ask.
+    say
+    if link_sees_connections; then kv Valid "$LINK_MORE_LABEL, or until a connection with this profile is seen"; else kv Valid "$LINK_MORE_LABEL"; fi
+    kv Later 'menu 6 shows it again or cancels it'
+    kv Firewall "TCP $LINK_PORT must be open in your provider firewall"
+    if [[ -n $LINK_MORE_NOTE ]]; then
+        warn 'This server has no trusted certificate, so the browser shows a warning for this link. The note tells the person what to do.'
         info "Certificate fingerprint: $(openssl x509 -in "$LINK_CERT" -noout -fingerprint -sha256 | sed 's/^.*=//')"
     fi
     if [[ -n $PROFILE_PASSWORD ]]; then
-        info 'The password is shown only now. To send it another way than the link, for example by SMS or a call, copy without it.'
         info 'In OpenVPN Connect, the person can turn on "Save private key password" when importing, so it is asked only once.'
     fi
     info "Until the link ends, anyone who has it can get this profile. If a connection you did not expect shows up, revoke the client and issue a new one."
-    hr
-    present_link "$url" "$PROFILE_PASSWORD" "$note"
+    say
 }
 link_note() {
     # The note for the person, only when the browser will warn. English only: a terminal shows right-to-left
@@ -1823,26 +1841,41 @@ link_note() {
     printf '%s' 'Your browser will warn that this connection is not private, because this server has no trusted certificate. Only for this link, which came to you straight from me: choose Advanced, then Continue. Never do this for other sites.'
 }
 present_link() {
-    # present_link <url> <password> <note>: the block to send, then the copy question with the QR code in it.
-    local url=$1 password=$2 note=$3 qr='Show a QR code' rc
+    # present_link <url> <password> <note> [more]: what to send first, then one question: copy it, show the QR
+    # code, or, with "more", read what holds for every link.
+    local url=$1 password=$2 note=$3 more=${4:-} qr='Show a QR code' pick
+    local -a labels=() texts=()
     show_share_block "$url" "$password" "$note"
-    hr
-    # Once drawn, the QR code is not offered again.
+    if [[ -n $password ]]; then info 'The password is shown only now. To send it another way, for example by SMS or a call, copy without it.'; fi
+    if (( ! UI_TTY )); then
+        if [[ -n $more ]]; then link_more_info; fi
+        return 0
+    fi
+    labels+=("$(copy_label "$note" "$password")"); texts+=("$(share_text "$url" "$password" "$note")")
+    if [[ -n $password ]]; then
+        labels+=('Copy without the password')
+        texts+=("$(share_text "$url" '' "${note:+$note }The file is locked. Its password comes to you separately.")")
+    fi
     while :; do
-        rc=0
-        if [[ -n $password ]]; then
-            offer_copy 'the lines from "Link:" down' "$qr" \
-                "$(copy_label "$note" password)" "$(share_text "$url" "$password" "$note")" \
-                'Copy without the password' \
-                "$(share_text "$url" '' "${note:+$note }The file is locked. Its password comes to you separately.")" || rc=$?
-        else
-            offer_copy 'the lines from "Link:" down' "$qr" "$(copy_label "$note")" "$(share_text "$url" '' "$note")" || rc=$?
-        fi
-        (( rc == 3 )) || break
-        say
-        show_qr "$url"
-        qr=''
+        local -a options=("${labels[@]}")
+        if [[ -n $qr ]]; then options+=("$qr"); fi
+        if [[ -n $more ]]; then options+=('More about this link'); fi
+        options+=('Do not copy')
+        choose_one 'Copy it to your clipboard?' "${options[@]}" || return 0
+        pick=${options[CHOSEN - 1]}
+        if (( CHOSEN <= ${#texts[@]} )); then copy_shown_text "${texts[CHOSEN - 1]}" 'the lines from "Link:" down'; return 0; fi
+        case $pick in
+            "$qr") say; show_qr "$url"; qr='' ;;
+            'More about this link') link_more_info; more='' ;;
+            *) return 0 ;;
+        esac
     done
+}
+copy_shown_text() {
+    # copy_shown_text <text> <what to select instead>
+    copy_to_clipboard "$1" || { warn 'Could not copy.'; return 0; }
+    ok 'Copied to your clipboard, if your terminal allows it.'
+    info "If pasting does not give this text, your terminal does not allow it (PuTTY, for example). Select $2 with the mouse instead."
 }
 copy_label() {
     # copy_label <note> [password]: names what the first copy option holds.
