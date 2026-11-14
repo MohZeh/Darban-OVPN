@@ -27,7 +27,7 @@ Each device should have its own client, so you can remove one without affecting 
 
 ## See who is connected
 
-Press `3` **Connected now**. The top of the menu also counts them.
+Press `3` **Connected now**. It shows each client's address, how long it has been connected, and the traffic of this session, down and up. The top of the menu also counts them, and **List clients** marks them as connected.
 
 ## See all clients
 
@@ -79,7 +79,7 @@ Only the tool changes. OpenVPN does not restart, and clients stay as they are. I
 
 ## Check the server
 
-Open **8 Maintenance**, then `1` **Diagnostics**, or run:
+Open **8 Maintenance**, then `1` **Diagnostics**. It starts with one line that says whether all checks passed, then lists only what needs attention, each with what to do; **Show all checks** shows the whole list. Or run this for the whole list:
 
 ```bash
 sudo darban status
