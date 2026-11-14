@@ -377,11 +377,8 @@ install_certbot_for_links() {
         if [[ $candidate =~ ^[0-9.]+ && $(printf '%s\n5.3\n' "${BASH_REMATCH[0]}" | sort -V | head -n 1) == 5.3 ]]; then
             :
         elif command -v snap >/dev/null; then
-            if timeout 600 snap install --classic certbot; then
-                printf 'snap certbot\n' >>"$MARKER"
-            else
-                warn 'Could not install certbot from the snap store; the first link tries again.'
-            fi
+            # Recorded for removal only when this install put it here.
+            darban_snap_install_certbot "$MARKER" || warn 'Could not install certbot from the snap store; the first link tries again.'
             return 0
         else
             return 0

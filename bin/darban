@@ -1079,8 +1079,8 @@ install_certbot() {
         record_added 'package certbot'
     else
         info "Installing certbot from the Certbot project (snap)${S_ELL}"
-        snap install --classic certbot >/dev/null || return 1
-        record_added 'snap certbot'
+        # Recorded for removal only when this install put it here; one that was there is only refreshed.
+        darban_snap_install_certbot "$CONFIG_DIR/.server-setup-started" || return 1
     fi
 }
 get_trusted_cert() {

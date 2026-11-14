@@ -394,3 +394,40 @@ darban_publish_crl() {
     fi
     darban_verify_crl "$DARBAN_CRL" || { darban_error 'Published CRL failed post-publication verification.'; return 1; }
 }
+
+# ---------- certbot from the Certbot project's snap ----------
+# Seconds before the one more try; the tests set it to 0.
+DARBAN_SNAP_RETRY_DELAY=${DARBAN_SNAP_RETRY_DELAY:-30}
+darban_snap_has_certbot() { snap list certbot >/dev/null 2>&1; }
+darban_snap_certbot_busy() {
+    # snapd is still working on certbot: it can go on after the command that asked for it gave up.
+    snap changes 2>/dev/null | awk '$2 == "Doing" && /certbot/ {found = 1} END {exit !found}'
+}
+darban_snap_install_certbot() {
+    # darban_snap_install_certbot <record file>: the Certbot snap, recorded for removal only when this call put
+    # it on the server, and only in a record file that exists. A snap that was already there is refreshed and
+    # stays its owner's. After a failed install there is one more try, unless the snap arrived anyway; a change
+    # still in progress is waited for instead of asked for again.
+    local record=$1 attempt rc
+    if darban_snap_has_certbot; then
+        timeout 300 snap refresh certbot >/dev/null 2>&1 || true
+        return 0
+    fi
+    for attempt in 1 2; do
+        rc=0
+        timeout 600 snap install --classic certbot >/dev/null 2>&1 || rc=$?
+        (( rc == 0 )) && break
+        if darban_snap_certbot_busy; then
+            printf 'snap is still installing certbot; waiting for it.\n' >&2 || true
+            timeout 300 snap watch --last=install >/dev/null 2>&1 || true
+        fi
+        darban_snap_has_certbot && break
+        if (( attempt == 1 )); then
+            printf 'Installing certbot from the snap store failed (exit %s); trying once more in %s seconds.\n' "$rc" "$DARBAN_SNAP_RETRY_DELAY" >&2 || true
+            sleep "$DARBAN_SNAP_RETRY_DELAY"
+        fi
+    done
+    darban_snap_has_certbot || return 1
+    if [[ -n $record && -e $record ]]; then printf 'snap certbot\n' >>"$record"; fi
+    return 0
+}

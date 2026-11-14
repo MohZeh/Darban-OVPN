@@ -56,7 +56,7 @@ sudo bash -c 'set -o pipefail; curl -fsSL https://github.com/MohZeh/Darban-OVPN/
 ## What the install does
 
 - Adds the OpenVPN project's apt repository (stable channel) and installs `openvpn`, `easy-rsa`, `socat` and `nftables`.
-- On a public address, also installs `certbot`, so temporary links can get a Let's Encrypt certificate: Ubuntu's package for a domain name, and the Certbot project's snap for an IP address. If this fails, the VPN install goes on, and the first link tries again.
+- On a public address, also installs `certbot`, so temporary links can get a Let's Encrypt certificate: Ubuntu's package for a domain name, and the Certbot project's snap for an IP address. A failed snap install is tried once more, and an install snapd is still working on is waited for. A certbot snap that was already on the server is only refreshed, and **Remove everything** leaves it there. If this fails, the VPN install goes on, and the first link tries again.
 - If the running kernel has no `ovpn` module, installs `linux-image-virtual-hwe-24.04` or `linux-image-virtual-hwe-26.04`, matching the system, without recommended packages. If apt plans firmware or graphics packages, the setup stops. A container needs no kernel.
 - Creates a CA in `/root/pki` and a server certificate valid for 10 years.
 - Writes `/etc/openvpn/server/server.conf`, enables IPv4 forwarding, and adds NAT for the VPN only, in its own nftables table.
