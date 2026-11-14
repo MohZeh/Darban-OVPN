@@ -2969,7 +2969,7 @@ test_link_uses_a_certificate_already_on_the_server() {
     has 'and the link is made with it' "https://vpn.example.com:$LINK_TEST_PORT/l/" "$out"
     cmp -s "$E/cfg/link-cert.pem" "$E/panel-cert/vpn.example.com/fullchain.pem"; rc_is 'the link service gets a copy it can read' 0 "$?"
     ok_if 'and a link certificate is no longer self-signed' test -s "$E/cfg/link-cert.source"
-    lacks 'no browser warning note' 'The note below tells the person' "$out"
+    lacks 'no browser warning note' 'The note tells the person' "$out"
     lacks 'and no note in the block' $'\nNote:\n' "$out"
     has 'Settings names where it came from' 'trusted' "$(menu '7\n0\n0\n')"
     menu '6\n1\n2\n0\n' >/dev/null

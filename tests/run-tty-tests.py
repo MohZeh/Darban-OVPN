@@ -337,12 +337,14 @@ def share_chooser_moves_with_keys(m):
     m.press(DOWN, ENTER)
     check('it shows where the file is', m.wait_for('Kept on the server'), m.seen)
     check('without asking for a password', 'Lock the private key' not in plain(m.seen), m.seen)
+    check('it asks which computer downloads it', m.wait_for('Which computer will download it?'), m.seen)
+    assert m.wait_for('Esc: Cancel')
     m.drain()
+    m.press(ENTER)
+    check('Windows gets its command', m.wait_for('Copy the command'), m.seen)
     screen = plain(m.seen)
-    check('and offers to copy a command', 'Copy the Windows command' in screen, screen)
-    check('with the Windows command', 'USERPROFILE' in screen, screen)
-    check('the macOS and Linux command', '~/Downloads/' in screen, screen)
-    check('and the sftp address', 'sftp://' in screen, screen)
+    check('the Windows command is shown', 'USERPROFILE' in screen, screen)
+    check('and only that one', '~/Downloads/' not in screen and 'sftp://' not in screen, screen)
 
 
 def share_esc_means_later(m):
