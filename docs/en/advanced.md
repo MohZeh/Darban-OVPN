@@ -95,17 +95,17 @@ management /run/openvpn-server/darban.sock unix
 
 ## Advanced settings
 
-Open **Settings › Advanced**. Items 1 to 6 change `server.conf` and restart OpenVPN: connected users drop for a few seconds and reconnect by themselves.
+Open **Settings › Advanced**. Items marked `*` (1 to 6, and the OpenVPN port in **Settings**) change `server.conf` and restart OpenVPN: connected users drop for a few seconds and reconnect by themselves. Each item first says what it changes. Where common values exist, they come as a numbered list: type the number, or type a value of your own.
 
 | # | Setting | Notes |
 |---|---|---|
 | 1 | Traffic routing | **Full tunnel** sends all client IPv4 traffic through the server; **split tunnel** only the VPN network. Switching to full adds default DNS if none is set. The server needs NAT for the full tunnel |
-| 2 | DNS for clients | One or two IPv4 addresses. Not used in a split tunnel, where clients keep their own |
-| 3 | VPN network | A private `/24` ending in `.0`, not overlapping an existing route. NAT follows the change. Refused if this tool did not create the NAT. Fixed addresses from `client-config-dir` or `ifconfig-pool-persist` are not updated |
-| 4 | Data ciphers | `AES-256-GCM`, `AES-128-GCM`, `CHACHA20-POLY1305`, separated by colons. Others would turn DCO off. Clients with no cipher in common must get a new profile |
-| 5 | Keepalive | Ping interval and timeout in seconds. The timeout must be at least twice the interval |
+| 2 | DNS for clients | One or two IPv4 addresses, or one from the list: Cloudflare, Google, Quad9 (blocks known malicious sites), AdGuard (blocks ads and trackers). Not used in a split tunnel, where clients keep their own |
+| 3 | VPN network | A private `/24` ending in `.0`, not overlapping an existing route; the tool suggests a free one. NAT follows the change. Refused if this tool did not create the NAT. Fixed addresses from `client-config-dir` or `ifconfig-pool-persist` are not updated |
+| 4 | Data ciphers | `AES-256-GCM`, `AES-128-GCM`, `CHACHA20-POLY1305`, separated by colons, or one of three ready lists. Others would turn DCO off. Clients with no cipher in common must get a new profile |
+| 5 | Keepalive | Ping interval and timeout in seconds, or one from the list: normal `10 60`, mobile networks `20 120`, quicker `5 30`. The timeout must be at least twice the interval |
 | 6 | Log detail | `0` to `6`, where `3` is normal. `4` and up are for troubleshooting and can log private details |
-| 7 | New client lifetime | Days for new client certificates, or `0` for the Easy-RSA default. No restart |
+| 7 | New client lifetime | Days for new client certificates, such as `365` or `730`, or `0` for the Easy-RSA default of 825 days. No restart |
 | 8 | Download access | SSH address, port and user shown in `scp` and `sftp` commands. No restart |
 
 The link settings are in **Settings** itself: **Link lifetime**, **Link port** and **Link certificate**. None of them restarts OpenVPN.

@@ -2288,6 +2288,7 @@ change_port() {
     server_proto_ok || { warn 'Only udp4 OpenVPN servers are supported.'; return 1; }
     systemctl is-active --quiet "$DARBAN_UNIT" || { warn 'OpenVPN service is not active. Refusing to change port.'; return 1; }
     kv Current "$old/UDP"
+    info 'The UDP port clients connect to. It must be open in your provider firewall, and every client profile names it, so clients need a new profile afterwards (menu 5).'
     say
     while :; do
         prompt_valid 'New UDP port, 1024-65535 (Enter = cancel): ' valid_port 'Enter a number from 1024 to 65535.' || return 0
@@ -2333,6 +2334,27 @@ conf_ready() {
     server_port >/dev/null || { warn 'Expected exactly one port directive in server.conf.'; return 1; }
     systemctl is-active --quiet "$DARBAN_UNIT" || { warn 'OpenVPN service is not active; fix that first (Maintenance).'; return 1; }
 }
+PRESETS=()
+show_presets() {
+    # show_presets <label> <value>...: a numbered list of common values; a number typed at the next question picks
+    # that value, and anything else is taken as typed.
+    local i=0
+    PRESETS=()
+    while (( $# >= 2 )); do
+        i=$((i + 1))
+        PRESETS+=("$2")
+        say "  $C_KEY$i$C_RESET  $1 ($2)"
+        shift 2
+    done
+}
+preset_value() {
+    # preset_value <answer>: the value of a listed number, or the answer as typed.
+    if [[ $1 =~ ^[1-9]$ ]] && (( $1 <= ${#PRESETS[@]} )); then printf '%s\n' "${PRESETS[$1 - 1]}"; else printf '%s\n' "$1"; fi
+}
+saved() {
+    # saved <what> <from when>: the same last line for every setting that is saved without a restart.
+    ok "Saved: $1. It applies $2."
+}
 restart_notice() {
     bullet 'OpenVPN restarts: connected users drop for a few seconds and reconnect by themselves'
     bullet 'if it does not come back, the previous configuration is restored'
@@ -2367,6 +2389,7 @@ set_routing() {
     conf_ready || return 1
     if conf_full_tunnel; then
         kv Current 'full tunnel: all client IPv4 traffic goes through the VPN'
+        info 'Full tunnel is what most people want from a VPN: their whole internet goes through this server. A split tunnel only reaches the VPN network itself.'
         say
         restart_notice
         bullet 'clients keep their own internet path and DNS'
@@ -2378,6 +2401,7 @@ set_routing() {
         return
     fi
     kv Current 'split tunnel: only traffic for the VPN network'
+    info 'A split tunnel only reaches the VPN network itself. Full tunnel is what most people want from a VPN: their whole internet goes through this server.'
     say
     restart_notice
     bullet "clients send all IPv4 traffic through this server; DNS: $DEFAULT_CLIENT_DNS unless already set"
@@ -2402,8 +2426,11 @@ set_dns() {
     fi
     current=$(conf_dns)
     kv Current "${current:-none pushed}"
+    info 'The DNS servers clients use for names while connected. Any of these works; the last two also block some sites.'
+    show_presets 'Cloudflare' '1.1.1.1 1.0.0.1' 'Google' '8.8.8.8 8.8.4.4' \
+        'Quad9, blocks known malicious sites' '9.9.9.9 149.112.112.112' 'AdGuard, blocks ads and trackers' '94.140.14.14 94.140.15.15'
     say
-    prompt_valid 'New DNS servers, one or two IPv4 addresses (Enter = cancel): ' valid_dns 'Enter one or two IPv4 addresses, such as 1.1.1.1 8.8.8.8.' || return 0
+    prompt_valid "Choose 1-${#PRESETS[@]}, or type one or two IPv4 addresses (Enter = cancel): " valid_dns_choice 'Enter a number from the list, or one or two IPv4 addresses, such as 1.1.1.1 8.8.8.8.' || return 0
     if [[ $DNS_LIST == "$current" ]]; then info 'Same as the current DNS; nothing changed.'; return 0; fi
     say
     restart_notice
@@ -2413,6 +2440,17 @@ set_dns() {
     awk '!($1=="push" && $2=="\"dhcp-option" && $3=="DNS")' "$DARBAN_SERVER_CONF" >"$CONF_TEMP"
     for item in $DNS_LIST; do printf 'push "dhcp-option DNS %s"\n' "$item" >>"$CONF_TEMP"; done
     conf_apply "DNS $DNS_LIST" "$CONF_TEMP"
+}
+valid_dns_choice() { valid_dns "$(preset_value "$1")"; }
+free_vpn_network() {
+    # free_vpn_network <current>: the first private /24 from 10.8.0.0 up that no route uses.
+    local n candidate
+    for n in $(seq 8 250); do
+        candidate=10.$n.0.0
+        [[ $candidate != "$1" ]] || continue
+        if ! subnet_conflict "$candidate" >/dev/null; then printf '%s\n' "$candidate"; return 0; fi
+    done
+    return 1
 }
 set_vpn_network() {
     local current mask candidate clash nat=$CONFIG_DIR/nat.nft nat_saved rc=0
@@ -2427,6 +2465,8 @@ set_vpn_network() {
         return 1
     fi
     kv Current "$current/24"
+    info 'The private addresses clients get inside the VPN. Change it only when it clashes with a network your clients use at home or at work.'
+    if candidate=$(free_vpn_network "$current"); then info "A free one on this server: $candidate"; fi
     say
     prompt_valid 'New VPN network, a private /24 ending in .0 (Enter = cancel): ' valid_subnet 'Enter a private network ending in .0, such as 10.9.0.0.' || return 0
     candidate=$REPLY
@@ -2480,11 +2520,15 @@ set_ciphers() {
     conf_ready || return 1
     current=$(conf_value data-ciphers)
     kv Current "${current:-OpenVPN default}"
-    info 'Allowed: AES-256-GCM, AES-128-GCM, CHACHA20-POLY1305. Others would turn off DCO.'
+    info 'How the VPN traffic is encrypted. All of these are strong; most servers keep the first. Other names would turn off DCO, the fast kernel path.'
+    show_presets 'AES first, then CHACHA20' 'AES-256-GCM:AES-128-GCM:CHACHA20-POLY1305' \
+        'CHACHA20 first, faster on phones without AES hardware' 'CHACHA20-POLY1305:AES-256-GCM:AES-128-GCM' \
+        'AES-256-GCM only' 'AES-256-GCM'
     say
-    prompt_valid 'New list, separated by colons (Enter = cancel): ' valid_ciphers 'Use only the allowed names, separated by colons.' || return 0
-    if [[ $REPLY == "$current" ]]; then info 'Same as the current list; nothing changed.'; return 0; fi
-    local value=$REPLY
+    prompt_valid "Choose 1-${#PRESETS[@]}, or type the names separated by colons (Enter = cancel): " valid_ciphers_choice 'Enter a number from the list, or only AES-256-GCM, AES-128-GCM and CHACHA20-POLY1305, separated by colons.' || return 0
+    local value
+    value=$(preset_value "$REPLY")
+    if [[ $value == "$current" ]]; then info 'Same as the current list; nothing changed.'; return 0; fi
     say
     restart_notice
     warn 'Clients whose .ovpn has no cipher in common with the new list cannot connect until shared again (menu 5).'
@@ -2494,6 +2538,7 @@ set_ciphers() {
     conf_set_directive data-ciphers "$value" "$CONF_TEMP"
     conf_apply "data ciphers $value" "$CONF_TEMP"
 }
+valid_ciphers_choice() { valid_ciphers "$(preset_value "$1")"; }
 valid_keepalive() {
     local interval timeout extra
     read -r interval timeout extra <<<"$1"
@@ -2504,10 +2549,11 @@ set_keepalive() {
     local value
     conf_ready || return 1
     kv Current "$(conf_value keepalive)"
-    info 'Two numbers in seconds: how often to ping, and when to give up. The second must be at least twice the first.'
+    info 'How often the server checks that a client is still there, and when it gives up: two numbers in seconds.'
+    show_presets 'Normal' '10 60' 'Mobile networks: fewer checks, more patience' '20 120' 'Notice a lost client sooner' '5 30'
     say
-    prompt_valid 'New keepalive, such as 10 60 (Enter = cancel): ' valid_keepalive 'Enter two numbers, such as 10 60; the second at least twice the first.' || return 0
-    value=$(printf '%s' "$REPLY" | awk '{print $1, $2}')
+    prompt_valid "Choose 1-${#PRESETS[@]}, or type two numbers such as 10 60 (Enter = cancel): " valid_keepalive_choice 'Enter a number from the list, or two numbers such as 10 60; the second at least twice the first.' || return 0
+    value=$(preset_value "$REPLY" | awk '{print $1, $2}')
     say
     restart_notice
     say
@@ -2516,12 +2562,13 @@ set_keepalive() {
     conf_set_directive keepalive "$value" "$CONF_TEMP"
     conf_apply "keepalive $value" "$CONF_TEMP"
 }
+valid_keepalive_choice() { valid_keepalive "$(preset_value "$1")"; }
 valid_verb() { [[ $1 =~ ^[0-9]$ ]] && (( $1 <= 6 )); }
 set_verb() {
     local value
     conf_ready || return 1
     kv Current "$(conf_value verb)"
-    info '3 is normal. 4 or more shows more detail, can log private details, and is only for troubleshooting.'
+    info 'How much OpenVPN writes to its log: 0 to 2 quiet, 3 normal (the default), 4 to 6 for troubleshooting only, since they can log private details. Go back to 3 afterwards.'
     say
     prompt_valid 'New log detail, 0 to 6 (Enter = cancel): ' valid_verb 'Enter a number from 0 to 6.' || return 0
     value=$REPLY
@@ -2555,7 +2602,7 @@ valid_ssh_port() { [[ $1 =~ ^[0-9]{1,5}$ ]] && (( 10#$1 >= 1 && 10#$1 <= 65535 )
 valid_ssh_user() { [[ $1 =~ ^[a-z_][a-z0-9_-]{0,31}$ ]]; }
 set_download_access() {
     local host=$DOWNLOAD_SSH_HOST port=$DOWNLOAD_SSH_PORT user=$DOWNLOAD_SSH_USER
-    info 'Only the scp and sftp commands shown after creating a client use these. No restart is needed.'
+    info 'The SSH address, port and user that the download commands for a profile kept on the server use (scp, sftp). Set them when you reach this server by another name or port than the one shown. No restart is needed.'
     say
     while :; do
         ask "SSH address${host:+ [$host]} (Enter = keep): " || { cancelled; return 0; }
@@ -2579,11 +2626,11 @@ set_download_access() {
     DOWNLOAD_SSH_HOST=$host DOWNLOAD_SSH_PORT=$port DOWNLOAD_SSH_USER=$user
     save_config || { fail 'Could not save the settings.'; return 1; }
     audit "download access changed: $user@$host:$port"
-    ok "Saved: $user@$host:$port"
+    saved "$user@$host:$port" 'to the download commands shown from now on'
 }
 set_client_days() {
     kv Current "${CLIENT_CERT_DAYS:-Easy-RSA default}"
-    info 'Applies only to clients created from now on. Certificates are not renewed automatically.'
+    info 'How long a new client profile works. Common values: 365 (one year), 730 (two years), 1825 (five years); 0 keeps the Easy-RSA default of 825 days. Certificates are not renewed automatically.'
     say
     if ! ask 'Days a new client certificate lasts, 1 to 3650; 0 = Easy-RSA default (Enter = cancel): ' || [[ -z $REPLY ]]; then cancelled; return 0; fi
     if [[ $REPLY == 0 ]]; then
@@ -2596,21 +2643,24 @@ set_client_days() {
     fi
     save_config || { fail 'Could not save the settings.'; return 1; }
     audit "new client lifetime changed: ${CLIENT_CERT_DAYS:-default}"
-    ok "New clients last: ${CLIENT_CERT_DAYS:-Easy-RSA default} ${CLIENT_CERT_DAYS:+days}"
+    saved "new clients last ${CLIENT_CERT_DAYS:-the Easy-RSA default}${CLIENT_CERT_DAYS:+ days}" 'to clients created from now on'
 }
 set_link_hours() {
     kv Current "$(hours_label "$(link_hours)")"
-    info 'The longest time a temporary link works. It usually ends sooner, about 10 seconds after a connection with its profile is seen.'
+    info 'The longest time a temporary link works. It usually ends sooner, about 10 seconds after a connection with its profile is seen. Common values: 1, 6, 24 (the default), 48 or 72.'
     say
     prompt_valid 'Hours, 1 to 72 (Enter = cancel): ' valid_link_hours 'Enter a whole number of hours from 1 to 72.' || return 0
     LINK_HOURS=$((10#$REPLY))
     save_config || { fail 'Could not save the setting.'; return 1; }
     audit "link lifetime changed: $LINK_HOURS hours"
-    ok "Saved: links work for at most $(hours_label "$LINK_HOURS"). It applies from the next link."
+    saved "links work for at most $(hours_label "$LINK_HOURS")" 'from the next link'
 }
 set_link_port() {
     kv Current "$(link_port_summary)"
-    info 'TCP port of temporary links. It must be open in your provider firewall.'
+    local free='' candidate
+    info 'The TCP port of the link page. It must be open in your provider firewall, and no other program may use it.'
+    for candidate in $LINK_PORT_CHOICES; do tcp_port_taken "$candidate" || free+="${free:+, }$candidate"; done
+    if [[ -n $free ]]; then info "Free now: $free"; fi
     say
     prompt_valid 'New port, 1 to 65535 (Enter = cancel): ' valid_link_port 'Enter a number from 1 to 65535.' || return 0
     if tcp_port_taken "$((10#$REPLY))"; then
@@ -2620,7 +2670,7 @@ set_link_port() {
     LINK_PORT=$((10#$REPLY))
     save_config || { fail 'Could not save the setting.'; return 1; }
     audit "share link port changed: $LINK_PORT"
-    ok "Saved: TCP $LINK_PORT. It applies from the next link."
+    saved "TCP $LINK_PORT" 'from the next link'
 }
 restart_openvpn() {
     local state port rc=0
@@ -3219,9 +3269,10 @@ draw_settings() {
     port=$(server_port 2>/dev/null || printf '?')
     clear_screen
     title_bar Settings
+    printf ' %sWhat clients connect to, and how temporary links work. Choose one to see what it does before anything changes.%s\n' "$C_DIM" "$C_RESET" || true
     menu_group SERVER
     menu_item 1 "$(printf '%-24s %s' 'Server address' "${host:-not set}")"
-    menu_item 2 "$(printf '%-24s %s' 'OpenVPN UDP port' "$port")"
+    menu_item 2 "$(printf '%-24s %s' 'OpenVPN UDP port *' "$port")"
     menu_group LINKS
     menu_item 3 "$(printf '%-24s %s' 'Link lifetime' "$(hours_label "$(link_hours)")")"
     menu_item 4 "$(printf '%-24s %s' 'Link port' "$(link_port_summary)")"
@@ -3230,6 +3281,7 @@ draw_settings() {
     menu_item 6 'Advanced'
     menu_item 0 'Back'
     hr
+    printf ' %s* restarts OpenVPN: connected users drop for a few seconds.%s\n' "$C_DIM" "$C_RESET" || true
 }
 draw_advanced() {
     local network routing dns ciphers keepalive verb download days
@@ -3244,19 +3296,20 @@ draw_advanced() {
     days=${CLIENT_CERT_DAYS:-Easy-RSA default}
     clear_screen
     title_bar "Settings $S_CRUMB Advanced"
+    printf ' %sThe defaults suit most servers. Each item says what it changes, and suggests common values.%s\n' "$C_DIM" "$C_RESET" || true
     menu_group VPN
-    menu_item 1 "$(printf '%-24s %s' 'Traffic routing' "$routing")"
-    menu_item 2 "$(printf '%-24s %s' 'DNS for clients' "${dns:-none pushed}")"
-    menu_item 3 "$(printf '%-24s %s' 'VPN network' "${network:-not set}")"
-    menu_item 4 "$(printf '%-24s %s' 'Data ciphers' "${ciphers:-OpenVPN default}")"
-    menu_item 5 "$(printf '%-24s %s' 'Keepalive' "${keepalive:-not set}")"
-    menu_item 6 "$(printf '%-24s %s' 'Log detail' "${verb:-OpenVPN default}")"
+    menu_item 1 "$(printf '%-24s %s' 'Traffic routing *' "$routing")"
+    menu_item 2 "$(printf '%-24s %s' 'DNS for clients *' "${dns:-none pushed}")"
+    menu_item 3 "$(printf '%-24s %s' 'VPN network *' "${network:-not set}")"
+    menu_item 4 "$(printf '%-24s %s' 'Data ciphers *' "${ciphers:-OpenVPN default}")"
+    menu_item 5 "$(printf '%-24s %s' 'Keepalive *' "${keepalive:-not set}")"
+    menu_item 6 "$(printf '%-24s %s' 'Log detail *' "${verb:-OpenVPN default}")"
     menu_group CLIENTS
     menu_item 7 "$(printf '%-24s %s' 'New client lifetime' "$days")"
     menu_item 8 "$(printf '%-24s %s' 'Download access' "$download")"
     menu_item 0 'Back'
     hr
-    printf ' %sItems 1-6 restart OpenVPN; a change that fails is rolled back.%s\n' "$C_DIM" "$C_RESET" || true
+    printf ' %s* restarts OpenVPN: connected users drop for a few seconds; a change that fails is rolled back.%s\n' "$C_DIM" "$C_RESET" || true
 }
 advanced_menu() {
     local redraw=1
