@@ -17,7 +17,7 @@
 </div>
 
 ```bash
-sudo bash -c 'curl -fsSL https://github.com/MohZeh/Darban-OVPN/releases/download/v1.0.0-rc.9/get.sh | bash'
+sudo bash -c 'curl -fsSL https://github.com/MohZeh/Darban-OVPN/releases/download/v1.0.0-rc.10/get.sh | bash'
 ```
 
 <div dir="rtl">
