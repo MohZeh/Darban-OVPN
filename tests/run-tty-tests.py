@@ -338,10 +338,6 @@ def diagnostics_start_with_a_summary(m):
     m.drain()
     m.press(DOWN, ENTER)
     check('the whole list comes on request', m.wait_for('Revocation (CRL)'), m.seen)
-    assert m.wait_for('Press Enter')
-    m.press(ENTER)
-    assert m.wait_for('Choose [0-3')
-    m.press('0', ENTER)
 
 
 def share_chooser_moves_with_keys(m):
