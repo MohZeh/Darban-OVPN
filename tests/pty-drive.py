@@ -4,7 +4,11 @@
     pty-drive.py [--timeout SECONDS] SCRIPT -- COMMAND...
 
 Each line of SCRIPT is "text to wait for => keys to press". In keys, \\r is Enter and \\e is Esc; an empty
-right side only waits. Prints everything the command showed, without colors. The exit status is the
+right side only waits.
+
+Where a step looks: after keys were pressed, only in what the command showed since then, so a screen from
+before the keys never answers a step. After a step that pressed nothing, right after the text it matched, so
+two texts that arrive in one read are both found. Prints everything the command showed, without colors. The exit status is the
 command's own, or 3 if an expected text did not appear in time.
 """
 import fcntl
@@ -57,24 +61,44 @@ def main():
     def show():
         print(ANSI.sub('', seen).replace('\r', ''))
 
+    def find(text, start):
+        """Where text ends in seen, searching from start and ignoring colors; -1 when it is not there yet."""
+        segment = seen[start:]
+        plain, raw_at = '', []
+        position = 0
+        for match in ANSI.finditer(segment):
+            for offset in range(position, match.start()):
+                plain += segment[offset]
+                raw_at.append(offset)
+            position = match.end()
+        for offset in range(position, len(segment)):
+            plain += segment[offset]
+            raw_at.append(offset)
+        found = plain.find(text)
+        if found < 0:
+            return -1
+        return start + raw_at[found + len(text) - 1] + 1
+
     start = 0
     for step in steps:
         text, keys = step[0], step[1] if len(step) > 1 else ''
         end = time.time() + timeout
-        while ANSI.sub('', seen[start:]).find(text) < 0:
+        while (found := find(text, start)) < 0:
             if time.time() > end or not read_some(0.1):
-                if ANSI.sub('', seen[start:]).find(text) >= 0:
+                if (found := find(text, start)) >= 0:
                     break
                 print(f'pty-drive: did not see: {text}', file=sys.stderr)
                 show()
                 os.killpg(proc.pid, signal.SIGKILL)
                 proc.wait()
                 return 3
-        start = len(seen)
+        start = found
         # The prompts ignore keys pressed before they were visible, so give them a moment to appear fully.
         time.sleep(0.25)
         read_some(0)
         if keys:
+            # What the keys cause comes after this point; nothing shown before it may answer the next step.
+            start = len(seen)
             os.write(master, keys.replace('\\r', '\r').replace('\\e', '\x1b').encode())
 
     end = time.time() + timeout
