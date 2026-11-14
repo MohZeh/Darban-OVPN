@@ -4,6 +4,26 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## [Unreleased]
 
+## [1.0.0-rc.9] - 2026-11-14
+
+Release candidate for `v1.0.0`, for testing on a server that is not in use. It replaces `v1.0.0-rc.8`, with the changes from its test on a real server and from three rounds of review: the update notice shows at once, the link certificate is judged by itself and reaches open links without a restart, and the certbot snap is installed more reliably. A server on `v1.0.0-rc.6` or later reaches it from the menu (Setup › 2) or with `sudo darban update`.
+
+### Changed
+- The menu looks for a new release when it starts, at most once an hour, and the first screen waits up to two seconds for the answer, so a new version shows at once. **Setup** shows the state beside **Check for updates**: a new version, up to date with the time of the check, or why it is not known. The setting is now called **Update notice**.
+- Whether browsers trust the link certificate is judged from the certificate itself: its dates, its address, its key and who issued it. The Settings line, the note for the person and the password question all use this check. Before, a link into the Let's Encrypt folder or a copy from another tool counted as trusted whatever its state.
+- **Settings › Link certificate** shows the source, `Valid from … until …`, whether certbot's timer is active, and the new and renewed certificates this tool recorded in the last 7 days, with the note that Let's Encrypt keeps the real count.
+- This server's record of certificates no longer blocks a request; it only warns. Let's Encrypt decides, and its own refusal time is shown.
+- A renewal says how it ended: renewed, not due yet, or failed with the current certificate kept. After a new install, a kept certificate that cannot be used is named with the reason.
+- A certificate changed in Settings reaches open links at once: the link service reloads it, a download in progress finishes, and the tool checks that the port answers with it. One the service does not take is undone.
+
+### Fixed
+- A failed update check is tried again ten minutes later, not the next day, and keeps the version known before. A refusal for GitHub's own limit is named, and its time is kept.
+- Renewals were recorded as new certificates. Each line now says new or renew; older lines count as unknown.
+- A failed certbot snap install is tried once more, and an install snapd is still working on is waited for. A certbot snap that was already on the server is only refreshed, and **Remove everything** no longer removes it.
+
+### Going back to v1.0.0-rc.8
+Setup › Restore previous version still works, and nothing breaks. rc.8 reads the same update and certificate records, but its own behavior returns: the daily update check, every recorded certificate counted toward the weekly limit, and trust judged from the kind of file.
+
 ## [1.0.0-rc.8] - 2026-11-11
 
 Release candidate for `v1.0.0`, for testing on a server that is not in use. It replaces `v1.0.0-rc.7`, with the changes from its test on a real server: the link certificate is kept and renewed instead of requested again, and menu 6 can show a link again. A server on `v1.0.0-rc.6` or later reaches it from the menu (Setup › 2) or with `sudo darban update`.
