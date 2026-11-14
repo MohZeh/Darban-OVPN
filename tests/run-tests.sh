@@ -12,6 +12,8 @@ HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 REPO=$(cd "$HERE/.." && pwd)
 FILTER=${1:-}
 export MSYS2_ARG_CONV_EXCL='*' LC_ALL=C.UTF-8 NO_COLOR=1
+# The one more try of a failed snap install comes at once.
+export DARBAN_SNAP_RETRY_DELAY=0
 native() { if command -v cygpath >/dev/null; then cygpath -m "$1"; else printf '%s' "$1"; fi; }
 posix() { if command -v cygpath >/dev/null; then cygpath -u "$1"; else printf '%s' "$1"; fi; }
 WORK=$(native "$(mktemp -d "${TMPDIR:-/tmp}/darban-tests.XXXXXXXX")")
@@ -682,7 +684,7 @@ STUB
     printf '#!/usr/bin/env bash\necho amd64\n' > "$E/bin/dpkg"
     # certbot for links: Ubuntu's is older than 5.3, so an IP address takes the snap.
     printf '#!/usr/bin/env bash\necho "apt-cache $*" >> "$STUB_LOG"\nif [[ $1 == policy ]]; then echo "  Candidate: ${FAKE_CERTBOT_CANDIDATE:-2.9.0-1}"; fi\n' > "$E/bin/apt-cache"
-    printf '#!/usr/bin/env bash\necho "snap $*" >> "$STUB_LOG"\nexit ${FAKE_SNAP_RC:-0}\n' > "$E/bin/snap"
+    fake_snap
     cat > "$E/bin/openvpn" <<'STUB'
 #!/usr/bin/env bash
 if [[ $1 == --version ]]; then echo "OpenVPN ${FAKE_OPENVPN_VERSION:-2.7.8} x86_64-pc-linux-gnu"; exit 0; fi
@@ -2827,14 +2829,69 @@ test_setup_installs_certbot_for_links() {
     if grep -q 'certbot' "$STUB_LOG"; then result 0 'a private address gets no certbot'; else result 1 'a private address gets no certbot'; fi
 }
 
+fake_snap() {
+    # A snapd that remembers what it installed. FAKE_SNAP_RC fails every install; FAKE_SNAP_ONCE fails the first
+    # one only; FAKE_SNAP_LATE fails the command but the snap arrives anyway; FAKE_SNAP_DOING shows a change in
+    # progress, which a watch finishes.
+    mkdir -p "$E/snapd"
+    printf '#!/usr/bin/env bash\ndir=%q\n' "$E/snapd" > "$E/bin/snap"
+    cat >> "$E/bin/snap" <<'STUB'
+echo "snap $*" >> "$STUB_LOG"
+case $1 in
+    list) [[ -e $dir/$2 ]] ;;
+    install)
+        name=${!#}
+        if [[ -n ${FAKE_SNAP_LATE:-} ]]; then touch "$dir/$name"; exit 1; fi
+        if [[ -n ${FAKE_SNAP_ONCE:-} && ! -e $dir/.failed-once ]]; then touch "$dir/.failed-once"; exit 1; fi
+        if [[ ${FAKE_SNAP_RC:-0} != 0 ]]; then exit "$FAKE_SNAP_RC"; fi
+        touch "$dir/$name" ;;
+    changes) if [[ -n ${FAKE_SNAP_DOING:-} ]]; then printf 'ID  Status  Spawn  Ready  Summary\n7   Doing   today  -      Install "certbot" snap\n'; fi ;;
+    watch) if [[ -n ${FAKE_SNAP_DOING:-} ]]; then touch "$dir/certbot"; fi ;;
+    remove) rm -f "$dir/$2" ;;
+    *) exit 0 ;;
+esac
+STUB
+    chmod +x "$E/bin/snap"
+}
+
+snap_try() { : > "$STUB_LOG"; (source "$REPO/lib/common.sh"; darban_snap_install_certbot "$E/record") >/dev/null 2>&1; }
+snap_installs() { grep -c '^snap install' "$STUB_LOG"; }
+test_certbot_snap_is_owned_only_when_installed_here() {
+    local record=$E/record rc
+    fake_snap
+    : > "$record"
+    snap_try; rc_is 'a missing snap is installed' 0 "$?"
+    grep -qx 'snap certbot' "$record"; rc_is 'and recorded for removal' 0 "$?"
+    : > "$record"
+    snap_try; rc=$?
+    rc_is 'a snap already there is fine' 0 "$rc"
+    [[ $(snap_installs) == 0 ]] && grep -q '^snap refresh certbot' "$STUB_LOG"; rc_is 'it is refreshed, not installed again' 0 "$?"
+    if grep -q 'snap certbot' "$record"; then result 0 'and never recorded as ours'; else result 1 'and never recorded as ours'; fi
+    rm -f "$E/snapd/certbot"
+    FAKE_SNAP_ONCE=1 snap_try; rc_is 'one failure is tried once more' 0 "$?"
+    [[ $(snap_installs) == 2 ]] && grep -qx 'snap certbot' "$record"; rc_is 'twice, then recorded' 0 "$?"
+    rm -f "$E/snapd/certbot"; : > "$record"
+    FAKE_SNAP_LATE=1 snap_try; rc_is 'an install that finished after the command gave up counts' 0 "$?"
+    [[ $(snap_installs) == 1 ]] && grep -qx 'snap certbot' "$record"; rc_is 'no second install, and it is recorded' 0 "$?"
+    rm -f "$E/snapd/certbot"; : > "$record"
+    FAKE_SNAP_RC=1 FAKE_SNAP_DOING=1 snap_try; rc_is 'a change in progress is waited for' 0 "$?"
+    [[ $(snap_installs) == 1 ]] && grep -q '^snap watch' "$STUB_LOG" && grep -qx 'snap certbot' "$record"; rc_is 'not asked for again, and recorded' 0 "$?"
+    rm -f "$E/snapd/certbot"; : > "$record"
+    FAKE_SNAP_RC=1 snap_try; rc_is 'a snap that never comes is a failure' 1 "$?"
+    [[ $(snap_installs) == 2 && ! -s $record ]]; rc_is 'after two tries, with nothing recorded' 0 "$?"
+    rm -f "$record"
+    snap_try; rc_is 'without a record file it still installs' 0 "$?"
+    ok_if 'and writes no record' test ! -e "$record"
+}
+
 test_old_certbot_is_not_used_for_an_ip() {
     local out
     start_links_stub
     echo 203.0.113.9 > "$E/cfg/domain"
     printf '#!/usr/bin/env bash\nif [[ $1 == --version ]]; then echo "certbot 4.0.0"; exit 0; fi\necho "certbot $*" >> "$STUB_LOG"; exit 0\n' > "$E/bin/certbot"
-    printf '#!/usr/bin/env bash\necho "snap $*" >> "$STUB_LOG"; exit 1\n' > "$E/bin/snap"
-    chmod +x "$E/bin/certbot" "$E/bin/snap"
-    out=$(menu '5\nalice\n1\n1\n1\n0\n')
+    fake_snap
+    chmod +x "$E/bin/certbot"
+    out=$(printf '5\nalice\n1\n1\n1\n0\n' | FAKE_SNAP_RC=1 bash "$E/manager.sh" 2>&1)
     if grep -q '^certbot certonly' "$STUB_LOG"; then result 0 'certbot 4.0 is never asked for an IP'; else result 1 'certbot 4.0 is never asked for an IP'; fi
     grep -q 'snap install --classic certbot' "$STUB_LOG"; rc_is 'the Certbot snap is tried instead' 0 "$?"
     has 'a failed install falls back to a working link' "https://203.0.113.9:$LINK_TEST_PORT/l/" "$out"
