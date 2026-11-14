@@ -2062,12 +2062,18 @@ connected_clients() {
     fi
     rows=$(connected_rows) || { fail 'The OpenVPN management interface did not answer.'; return 1; }
     if [[ -z $rows ]]; then info 'No client is connected right now.'; return 0; fi
-    printf '  %s%-24s %-18s %-14s %s%s\n' "$C_BOLD" CLIENT ADDRESS 'CONNECTED FOR' 'TRAFFIC (down / up)' "$C_RESET" || true
+    # Built first and written at once, like the client list: a reader that stops early, such as grep -q, then
+    # finds everything already in the pipe, and the tool does not end on a closed pipe halfway through.
+    local out line
+    printf -v out '  %s%-24s %-18s %-14s %s%s\n' "$C_BOLD" CLIENT ADDRESS 'CONNECTED FOR' 'TRAFFIC (down / up)' "$C_RESET"
     while IFS=$'\t' read -r name address since epoch received sent; do
-        printf '  %-24s %-18s %-14s %s\n' "$(safe_text "$name")" "$(safe_text "$address")" "$(duration_since "$epoch")" \
-            "$(human_bytes "$sent") / $(human_bytes "$received")" || true
+        printf -v line '  %-24s %-18s %-14s %s\n' "$(safe_text "$name")" "$(safe_text "$address")" "$(duration_since "$epoch")" \
+            "$(human_bytes "$sent") / $(human_bytes "$received")"
+        out+=$line
     done <<<"$rows"
-    info 'Traffic is for this session only, as the server counts it: down is what the client received.'
+    printf '%s' "$out" || true
+    # The note is for a person; a script reads the table alone.
+    if (( UI_TTY )); then info 'Traffic is for this session only, as the server counts it: down is what the client received.'; fi
 }
 wait_for_connection() {
     # The only proof of the whole path, including the provider's firewall, which nothing here can see.
