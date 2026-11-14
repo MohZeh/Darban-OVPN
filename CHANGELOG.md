@@ -4,6 +4,20 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## [Unreleased]
 
+## [1.0.0-rc.10] - 2026-11-15
+
+Release candidate for `v1.0.0`, for testing on a server that is not in use. It replaces `v1.0.0-rc.9`, with the fixes from its test on a real server: a kept link certificate now really survives a removal, the Link certificate screen is clear, and the settings menus explain themselves. A server on `v1.0.0-rc.6` or later reaches it from the menu (Setup › 2) or with `sudo darban update`.
+
+### Changed
+- **Settings › Link certificate** asks "What do you want to do?", and Enter changes nothing. The Let's Encrypt row says whether it renews this tool's certificate or gets a new one, one of 5 a week. A self-signed certificate can be chosen again, after a confirmation, and the fingerprint can be shown.
+- After a new install, a kept certificate that ends sooner than a link may last is renewed without a question. It is judged against the link lifetime, not a fixed 25 hours.
+- **Remove everything** says until when the kept certificate is valid.
+- **Settings** and **Advanced** open with a line on what they hold, mark with `*` the items that restart OpenVPN, and each setting first says what it changes. DNS, data ciphers and keepalive offer common values as a numbered list; a value can still be typed. The VPN network question suggests a free network, and the link port question shows the free ports.
+
+### Fixed
+- **Remove everything** with the certificate kept still purged Ubuntu's `certbot` package when the setup had installed it, and that purge deletes `/etc/letsencrypt`. The next install then asked Let's Encrypt for a new certificate. certbot's packages are now removed, not purged, when the certificate is kept.
+- A renewal by certbot's timer restarted the link service and cut a download in progress. certbot's hook now reloads it; an older hook in certbot's renewal file is moved to the reload.
+
 ## [1.0.0-rc.9] - 2026-11-14
 
 Release candidate for `v1.0.0`, for testing on a server that is not in use. It replaces `v1.0.0-rc.8`, with the changes from its test on a real server and from three rounds of review: the update notice shows at once, the link certificate is judged by itself and reaches open links without a restart, and the certbot snap is installed more reliably. A server on `v1.0.0-rc.6` or later reaches it from the menu (Setup › 2) or with `sudo darban update`.
