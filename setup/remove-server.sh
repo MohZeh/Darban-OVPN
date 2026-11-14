@@ -38,11 +38,13 @@ kernel_status() {
     if [[ -z $list ]]; then echo none; return 0; fi
     if grep -Fxq -- "linux-image-$(uname -r)" <<<"$list"; then echo running; else echo removable; fi
 }
-purge_exact() {
-    # Purges exactly these packages, or keeps them if apt would have to remove anything else too.
-    local removed extra
+apt_exact() {
+    # apt_exact <purge|remove> <package>...: exactly these packages, or none if apt would have to remove anything
+    # else too.
+    local action=$1 removed extra
+    shift
     (( $# > 0 )) || return 0
-    if ! removed=$(apt-get -s purge "$@" | awk '$1=="Remv" {print $2}' | base_names); then
+    if ! removed=$(apt-get -s "$action" "$@" | awk '$1=="Remv" {print $2}' | base_names); then
         FAILED+=("simulating the removal of: $*")
         return 0
     fi
@@ -51,7 +53,22 @@ purge_exact() {
         KEPT+=("$* (removing them would also remove: ${extra//$'\n'/ })")
         return 0
     fi
-    try apt-get -o DPkg::Lock::Timeout=300 -y -q purge "$@"
+    try apt-get -o DPkg::Lock::Timeout=300 -y -q "$action" "$@"
+}
+purge_exact() { apt_exact purge "$@"; }
+# certbot's packages: purging them deletes /etc/letsencrypt, and with it a certificate that is kept.
+CERTBOT_PACKAGES='certbot|python3-certbot'
+remove_kept_certbot() {
+    # remove_kept_certbot <package>...: when the certificate is kept, certbot's packages are removed, not purged,
+    # so /etc/letsencrypt stays. Prints the other packages, for a purge as usual.
+    local -a keep=() rest=()
+    local pkg
+    for pkg in "$@"; do
+        [[ -n $pkg ]] || continue
+        if (( KEEP_CERT )) && [[ ${pkg%%:*} =~ ^($CERTBOT_PACKAGES)$ ]]; then keep+=("$pkg"); else rest+=("$pkg"); fi
+    done
+    apt_exact remove "${keep[@]}" >&2
+    if (( ${#rest[@]} > 0 )); then printf '%s\n' "${rest[@]}"; fi
 }
 
 ALLOW=0 BACKUP=0 KERNEL=0 KEEP_CERT=0
@@ -147,11 +164,13 @@ if grep -qx 'snap certbot' "$MARKER" && command -v snap >/dev/null; then try sna
 if [[ $certbot_venv == /opt/darban-certbot ]]; then try rm -rf -- "$certbot_venv"; fi
 
 echo 'Removing packages this setup added...'
-purge_exact "${added_packages[@]}"
+mapfile -t to_purge < <(remove_kept_certbot "${added_packages[@]}")
+purge_exact "${to_purge[@]}"
 if (( ${#added_deps[@]} > 0 )); then
     # Only dependencies nothing else uses any more, and never another program's orphans.
     mapfile -t orphans < <(apt-get -s autoremove | awk '$1=="Remv" {print $2}' | base_names | grep -Fx -f <(printf '%s\n' "${added_deps[@]}" | base_names) || true)
-    purge_exact "${orphans[@]}"
+    mapfile -t to_purge < <(remove_kept_certbot "${orphans[@]}")
+    purge_exact "${to_purge[@]}"
 fi
 if (( KERNEL )); then
     purge_exact "${added_kernel[@]}"

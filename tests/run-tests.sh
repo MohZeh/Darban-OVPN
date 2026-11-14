@@ -666,6 +666,7 @@ echo "apt-get $*" >> "$STUB_LOG"
 if [[ " $* " == *" -s "* ]]; then
     case " $* " in
       *" purge "*) on=0; for a; do if (( on )); then echo "Remv $a"; fi; [[ $a == purge ]] && on=1; done; if [[ -n ${REMV_EXTRA:-} ]]; then echo "Remv $REMV_EXTRA"; fi ;;
+      *" remove "*) on=0; for a; do if (( on )); then echo "Remv $a"; fi; [[ $a == remove ]] && on=1; done ;;
       *" autoremove "*) for a in ${AUTOREMOVE:-}; do echo "Remv $a"; done ;;
       *" install openvpn "*) for a in openvpn easy-rsa socat nftables liblzo2-2; do echo "Inst $a"; done; if [[ -n ${APT_UPGRADE:-} ]]; then echo "Inst dep-$APT_UPGRADE [1.0] (2.0 Ubuntu [amd64])"; fi ;;
       *" install certbot "*) echo 'Inst certbot'; echo 'Inst python3-certbot' ;;
@@ -1019,16 +1020,36 @@ test_remove_everything_keeps_the_link_certificate() {
     ok_if 'the record of issues stays' test -s "$E/varlib/link-certificates.log"
 }
 
+test_a_kept_certificate_survives_certbot_from_apt() {
+    # A purge of Ubuntu's certbot deletes /etc/letsencrypt (seen on a test server): with the certificate kept,
+    # certbot's packages are removed instead, and the rest is purged as usual.
+    local out
+    built_server
+    mkdir -p "$E/le/live/darban-ovpn-links" "$E/varlib"
+    echo cert > "$E/le/live/darban-ovpn-links/fullchain.pem"
+    printf 'certbot_cert darban-ovpn-links\npackage certbot\ndep python3-certbot\ndep python3-acme\n' >> "$E/cfg/.server-setup-started"
+    printf '#!/usr/bin/env bash\necho "certbot $*" >> "$STUB_LOG"\n' > "$E/bin/certbot"; chmod +x "$E/bin/certbot"
+    : > "$STUB_LOG"
+    out=$(printf '2\n1\n1\nremove-everything\n' | AUTOREMOVE='python3-certbot python3-acme' bash "$E/manager.sh" remove-all 2>&1)
+    has 'the certificate is kept' "Kept the Let's Encrypt certificate darban-ovpn-links" "$out"
+    grep -q -- '-y -q remove certbot$' "$STUB_LOG"; rc_is 'certbot is removed, not purged' 0 "$?"
+    grep -q -- '-y -q remove python3-certbot$' "$STUB_LOG"; rc_is 'and so is its library' 0 "$?"
+    if grep -Eq -- '-y -q purge .*\b(certbot|python3-certbot)\b' "$STUB_LOG"; then result 0 'neither is purged'; else result 1 'neither is purged'; fi
+    grep -q -- '-y -q purge python3-acme$' "$STUB_LOG"; rc_is 'other dependencies are purged as usual' 0 "$?"
+
+}
+
 test_remove_everything_can_delete_the_link_certificate() {
     local out
     built_server
     mkdir -p "$E/le/live/darban-ovpn-links" "$E/varlib"
     echo cert > "$E/le/live/darban-ovpn-links/fullchain.pem"
     echo '1 vpn.example.com' > "$E/varlib/link-certificates.log"
-    echo 'certbot_cert darban-ovpn-links' >> "$E/cfg/.server-setup-started"
+    printf 'certbot_cert darban-ovpn-links\npackage certbot\n' >> "$E/cfg/.server-setup-started"
     printf '#!/usr/bin/env bash\necho "certbot $*" >> "$STUB_LOG"\n' > "$E/bin/certbot"; chmod +x "$E/bin/certbot"
     : > "$STUB_LOG"
     out=$(printf '2\n2\n1\nremove-everything\n' | bash "$E/manager.sh" remove-all 2>&1)
+    grep -Eq -- '-y -q purge .*\bcertbot\b' "$STUB_LOG"; rc_is 'with the certificate deleted, certbot is purged as before' 0 "$?"
     has 'deleting is a choice' 'The certificate will be deleted.' "$out"
     grep -q 'certbot delete --non-interactive --cert-name darban-ovpn-links' "$STUB_LOG"; rc_is 'certbot deletes it' 0 "$?"
     ok_if 'with the record of issues' test ! -e "$E/varlib/link-certificates.log"
