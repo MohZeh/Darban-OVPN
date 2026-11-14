@@ -1401,7 +1401,7 @@ test_link_ends_at_the_first_connection() {
     link_mgmt_server
     start_links_stub
     out=$(menu '5\nalice\n1\n1\n0\n')
-    has 'with a management interface it says a connection ends it' 'or about 10 seconds after a connection with this profile is seen' "$out"
+    has 'with a management interface it says a connection ends it' 'works 24 hours, or until alice connects' "$out"
     has 'and so does the validity line' 'or until a connection with this profile is seen' "$out"
     url=$(grep -oE 'https://[^ ]+/l/[0-9a-f]{64}' <<<"$out")
     meta=$(ls "$E"/links/*.meta)
@@ -1623,7 +1623,7 @@ Enter: Temporary link => \r
 Enter: No password => \r
 Enter: Copy link and note => 2\r
 QRCODE-DRAWN
-Enter: Copy link and note => 2\r
+Enter: Copy link and note => 3\r
 Press Enter to return => \r
 Choose [0-9] => 0\r
 EOF
@@ -2575,16 +2575,18 @@ test_keep_on_server_copies_each_command_in_a_real_terminal() {
 Choose [0-9] => 5\r
 Number or name => alice\r
 Enter: Temporary link => 2\r
-Enter: Copy the Windows command => 2\r
+Enter: Windows => 2\r
+Enter: Copy the command => \r
 Press Enter to return => \r
 Choose [0-9] => 0\r
 EOF
     out=$(NO_COLOR=1 python3 "$HERE/pty-drive.py" --timeout 30 "$script" -- bash "$E/manager.sh" 2>&1); rc=$?
     rc_is 'keeping the file in a real terminal' 0 "$rc"
     lacks 'no password is asked' 'Lock the private key' "$out"
-    has 'the SFTP address can be copied too' 'Copy the SFTP address' "$out"
+    has 'it asks which computer downloads it' 'Which computer will download it?' "$out"
+    lacks 'and shows only that command' 'USERPROFILE' "$out"
     copied=$(grep -o $'\e]52;c;[A-Za-z0-9+/=]*' <<<"$out" | tail -n 1 | sed 's/^.*;//' | base64 -d 2>/dev/null)
-    [[ $copied == 'scp -P '*' ~/Downloads/' ]]; rc_is 'the second option copies the macOS and Linux command' 0 "$?"
+    [[ $copied == 'scp -P '*' ~/Downloads/' ]]; rc_is 'macOS or Linux gets its command, and Enter copies it' 0 "$?"
     has 'it says what to select if copying is not allowed' 'Select the command with the mouse instead.' "$out"
     if (( rc != 0 )); then printf '%s\n' "$out" | tail -n 25 | cut -c1-150 | sed 's/^/    | /'; fi
 }
