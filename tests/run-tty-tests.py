@@ -337,12 +337,14 @@ def share_chooser_moves_with_keys(m):
     m.press(DOWN, ENTER)
     check('it shows where the file is', m.wait_for('Kept on the server'), m.seen)
     check('without asking for a password', 'Lock the private key' not in plain(m.seen), m.seen)
-    assert m.wait_for('Esc: Cancel')
-    check('it asks which computer downloads it', 'Which computer will download it?' in plain(m.seen), m.seen)
+    # The question came with the line above, so it is already read: wait_for only looks at new output.
     m.drain()
+    check('it asks which computer downloads it', 'Which computer will download it?' in plain(m.seen), m.seen)
+    start = len(m.seen)
     m.press(ENTER)
     check('Windows gets its command', m.wait_for('Copy the command'), m.seen)
-    screen = plain(m.seen)
+    m.drain()
+    screen = plain(m.seen[start:])
     check('the Windows command is shown', 'USERPROFILE' in screen, screen)
     check('and only that one', '~/Downloads/' not in screen and 'sftp://' not in screen, screen)
 
