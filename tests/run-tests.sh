@@ -510,9 +510,10 @@ fake_release() {
     echo 9.9.9 > "$RELEASE/VERSION"
     cat > "$E/bin/curl" <<'STUB'
 #!/usr/bin/env bash
-out=''; url=''
-while (( $# )); do case $1 in -o) out=$2; shift 2 ;; --proto|--proto-redir|--tlsv1.2|--retry|--max-time) if [[ $1 == --tlsv1.2 ]]; then shift; else shift 2; fi ;; -*) shift ;; *) url=$1; shift ;; esac; done
+out=''; url=''; hdr=''
+while (( $# )); do case $1 in -o) out=$2; shift 2 ;; --proto|--proto-redir|--tlsv1.2|--retry|--max-time) if [[ $1 == --tlsv1.2 ]]; then shift; else shift 2; fi ;; -D) hdr=$2; shift 2 ;; -*) shift ;; *) url=$1; shift ;; esac; done
 echo "curl $url" >> "$STUB_LOG"
+if [[ -n ${hdr:-} && -n ${FAKE_HEADERS:-} ]]; then printf '%b' "$FAKE_HEADERS" > "$hdr"; fi
 if [[ -n ${CURL_FAIL:-} ]]; then exit "${CURL_RC:-22}"; fi
 if [[ -n $out ]]; then cp "$RELEASE/${url##*/}" "$out"; else cat "$RELEASE/${url##*/}"; fi
 STUB
@@ -1736,37 +1737,73 @@ test_settings_apply_in_the_same_session() {
 }
 
 test_update_notice_in_the_header() {
-    local out attempt
+    local out calls next reason cache=$E/cfg/.latest-version failed=$E/cfg/.update-check-failed
     fake_release
     set_installed_version 1.0.0
     lacks 'nothing is checked when it is off' 'Update available' "$(menu '0\n')"
-    ok_if 'no check was made' test ! -e "$E/cfg/.latest-version"
+    ok_if 'no check was made' test ! -e "$cache"
 
-    has 'Setup shows it is off' 'Daily update notice' "$(menu '9\n0\n0\n')"
+    out=$(menu '9\n0\n0\n')
+    has 'Setup shows the notice setting' 'Update notice' "$out"
+    has 'and says beside Check for updates that it is off' 'notice off' "$out"
     menu '9\n3\n0\n0\n' >/dev/null
     if grep -q '^UPDATE_CHECK=no' "$E/cfg/config"; then result 0 'the setting can be turned on'; else result 1 'the setting can be turned on'; fi
-    menu '0\n' >/dev/null
-    for attempt in 1 2 3 4 5 6 7 8 9 10; do [[ -s $E/cfg/.latest-version ]] && break; sleep 0.3; done
-    ok_if 'a background check stored the version' test -s "$E/cfg/.latest-version"
-    grep -Eq 'Update available: v9\.9\.9 .{1,3} Setup .{1,3} 2$' <<<"$(menu '0\n')"; rc_is 'the header announces it, with the Setup item to use' 0 "$?"
+    grep -Eq 'Update available: v9\.9\.9 .{1,3} Setup .{1,3} 2$' <<<"$(menu '0\n')"; rc_is 'the first screen after a start already announces it' 0 "$?"
+    ok_if 'the version was stored' test -s "$cache"
     ok_if 'nothing was installed by the notice' test ! -e "$MARKER"
-    grep -c 'releases/latest/download/VERSION' "$STUB_LOG" > "$E/calls.before"
-    menu '0\n' >/dev/null; sleep 0.5
-    [[ $(grep -c 'releases/latest/download/VERSION' "$STUB_LOG") == "$(cat "$E/calls.before")" ]]; rc_is 'it checks at most once a day' 0 "$?"
+    has 'Setup names the new version' 'v9.9.9 is available' "$(menu '9\n0\n0\n')"
+    calls=$(grep -c 'releases/latest/download/VERSION' "$STUB_LOG")
+    menu '0\n' >/dev/null
+    [[ $(grep -c 'releases/latest/download/VERSION' "$STUB_LOG") == "$calls" ]]; rc_is 'it checks at most once an hour' 0 "$?"
+    touch -d '2 hours ago' "$cache"
+    menu '0\n' >/dev/null
+    (( $(grep -c 'releases/latest/download/VERSION' "$STUB_LOG") > calls )); rc_is 'and again once the hour is over' 0 "$?"
 
-    echo 'bad; version' > "$E/cfg/.latest-version"
+    echo 'bad; version' > "$cache"
     lacks 'a damaged stored version is ignored' 'Update available' "$(menu '0\n')"
-    echo 0.0.1 > "$E/cfg/.latest-version"
+    echo 0.0.1 > "$cache"
     lacks 'an older version is not announced' 'Update available' "$(menu '0\n')"
+    echo 1.0.0 > "$RELEASE/VERSION"
+    rm -f "$cache"
+    has 'the same version is shown as up to date' 'up to date, checked' "$(menu '9\n0\n0\n')"
+    echo 9.9.9 > "$RELEASE/VERSION"
 
-    rm -f "$E/cfg/.latest-version"
-    CURL_FAIL=1 bash "$E/manager.sh" </dev/null >/dev/null 2>&1
-    for attempt in 1 2 3 4 5 6 7 8 9 10; do [[ -e $E/cfg/.latest-version ]] && break; sleep 0.3; done
-    ok_if 'a failed check is remembered too' test -e "$E/cfg/.latest-version"
-    lacks 'no internet shows nothing' 'Update available' "$(menu '0\n')"
+    # A failed check keeps what was known before, and is tried again minutes later, not the next day.
+    echo 9.9.9 > "$cache"; touch -d '2 hours ago' "$cache"
+    out=$(CURL_FAIL=1 CURL_RC=6 bash "$E/manager.sh" </dev/null 2>&1)
+    has 'a failed check keeps the version known before' 'Update available: v9.9.9' "$out"
+    ok_if 'the failure is recorded apart' test -s "$failed"
+    calls=$(grep -c 'releases/latest/download/VERSION' "$STUB_LOG")
+    CURL_FAIL=1 CURL_RC=6 bash "$E/manager.sh" </dev/null >/dev/null 2>&1
+    [[ $(grep -c 'releases/latest/download/VERSION' "$STUB_LOG") == "$calls" ]]; rc_is 'a failed check is not repeated at once' 0 "$?"
+    has 'Setup still names the version known before' 'v9.9.9 is available' "$(menu '9\n0\n0\n')"
+    rm -f "$cache"
+    has 'and without one, says the last check failed' 'not checked: GitHub could not be reached' "$(menu '9\n0\n0\n')"
+    # First no internet, then internet: the next start after the wait shows the new version.
+    printf '%s offline\n' "$(( $(date -u +%s) - 1 ))" > "$failed"
+    has 'once a failed check is due again, the next start shows the release' 'Update available: v9.9.9' "$(menu '0\n')"
+    ok_if 'and the failure record is gone' test ! -e "$failed"
+
+    # GitHub's own limit: its time is kept, and the manual check says why.
+    rm -f "$cache" "$failed"
+    out=$(CURL_FAIL=1 FAKE_HEADERS="HTTP/2 403\r\nx-ratelimit-remaining: 0\r\nx-ratelimit-reset: $(( $(date -u +%s) + 3000 ))\r\n" bash "$E/manager.sh" update </dev/null 2>&1)
+    has 'a refusal for the limit is named' 'GitHub asks this server to wait 50 minutes' "$out"
+    read -r next reason < "$failed"
+    [[ $reason == limited ]] && (( next >= $(date -u +%s) + 2900 )); rc_is 'and its time is kept for the next try' 0 "$?"
+    has 'Setup says why the state is not known' 'GitHub asked this server to wait' "$(menu '9\n0\n0\n')"
+    out=$(CURL_FAIL=1 FAKE_HEADERS="HTTP/2 429\r\nretry-after: 120\r\n" bash "$E/manager.sh" update </dev/null 2>&1)
+    has 'a 429 with Retry-After is a refusal too' 'wait 2 minutes' "$out"
+    out=$(CURL_FAIL=1 FAKE_HEADERS="HTTP/2 404\r\n" bash "$E/manager.sh" update </dev/null 2>&1)
+    has 'a 404 is not taken for the limit' 'No stable release is published yet' "$out"
+
+    # The manual check stores its answer, so the header says the same.
+    rm -f "$cache" "$failed"
+    bash "$E/manager.sh" update <<<'' >/dev/null 2>&1
+    [[ $(cat "$cache" 2>/dev/null) == 9.9.9 ]]; rc_is 'Check for updates stores what it found' 0 "$?"
 
     menu '9\n3\n0\n0\n' >/dev/null
     grep -q '^UPDATE_CHECK=no' "$E/cfg/config"; rc_is 'the setting can be turned off' 0 "$?"
+    ok_if 'and what was stored is removed' test ! -e "$cache" -a ! -e "$failed"
 }
 
 test_restore_previous_version() {

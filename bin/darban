@@ -19,6 +19,12 @@ OUT_DIR=/root/openvpn-clients
 CONFIG_DIR=/etc/darban
 DOMAIN_FILE=$CONFIG_DIR/domain
 UPDATE_CACHE=$CONFIG_DIR/.latest-version
+# After a failed check: "<epoch of the next try> <offline|limited|bad>". Gone once a check works again.
+UPDATE_FAILED=$CONFIG_DIR/.update-check-failed
+UPDATE_LOCK=$CONFIG_DIR/.update-check.lock
+# Seconds between checks after one worked, and after one failed.
+UPDATE_EVERY=3600
+UPDATE_RETRY=600
 LINK_ENV=$CONFIG_DIR/links.env
 LINK_CERT=$CONFIG_DIR/link-cert.pem
 LINK_KEY=$CONFIG_DIR/link-key.pem
@@ -49,7 +55,7 @@ CLIENT_CERT_DAYS=''
 LINK_PORT=''
 # Hours a temporary link works at most; empty means 24.
 LINK_HOURS=''
-# The menu looks for a new release at most once a day; no turns that off.
+# The menu looks for a new release when it starts, at most once an hour; no turns that off.
 UPDATE_CHECK=yes
 CONFIG_ISSUES=()
 # Normalized serial of the certificate OpenVPN serves; never listed, exported or revoked.
@@ -2410,17 +2416,21 @@ version_is_newer() {
     if [[ $b == "$base_b" ]]; then return 1; fi
     [[ $(printf '%s\n%s\n' "$a" "$b" | sort -V | tail -n 1) == "$a" ]]
 }
+release_fetch() {
+    # release_fetch <url> <header file>: the body, or curl's code. The headers tell why GitHub refused.
+    curl -fsSL --proto '=https' --proto-redir '=https' --tlsv1.2 --max-time 20 -D "$2" "$1"
+}
 latest_release_version() {
-    # A final version is offered only final versions. A test version follows test versions too, so a release
-    # candidate can be updated to the next one, and then to the final version.
-    if [[ $DARBAN_VERSION == *-* ]]; then newest_release_version; return; fi
-    curl -fsSL --proto '=https' --proto-redir '=https' --tlsv1.2 --max-time 20 "$DARBAN_URL/releases/latest/download/VERSION"
+    # latest_release_version [header file]: a final version is offered only final versions. A test version
+    # follows test versions too, so a release candidate can be updated to the next one, and then to the final one.
+    local headers=${1:-/dev/null}
+    if [[ $DARBAN_VERSION == *-* ]]; then newest_release_version "$headers"; return; fi
+    release_fetch "$DARBAN_URL/releases/latest/download/VERSION" "$headers"
 }
 newest_release_version() {
     # The highest version among the published releases, test versions included. GitHub lists no drafts here.
     local list tag newest=''
-    list=$(curl -fsSL --proto '=https' --proto-redir '=https' --tlsv1.2 --max-time 20 \
-        "https://api.github.com/repos/$DARBAN_REPO/releases?per_page=20") || return
+    list=$(release_fetch "https://api.github.com/repos/$DARBAN_REPO/releases?per_page=20" "${1:-/dev/null}") || return
     while IFS= read -r tag; do
         tag=${tag#v}
         valid_version "$tag" || continue
@@ -2429,28 +2439,129 @@ newest_release_version() {
     [[ -n $newest ]] || return 22
     printf '%s\n' "$newest"
 }
+github_wait() {
+    # github_wait <header file>: the seconds GitHub asked to wait, when it refused because of its limit. That
+    # limit counts every program on this server's address that has no token, the VPN clients' traffic included.
+    [[ -s $1 ]] || return 0
+    tr -d '\r' <"$1" | awk -v now="$(date -u +%s)" '
+        /^HTTP\// { status = $2; after = ""; reset = ""; left = "" }
+        tolower($1) == "retry-after:" { after = $2 }
+        tolower($1) == "x-ratelimit-reset:" { reset = $2 }
+        tolower($1) == "x-ratelimit-remaining:" { left = $2 }
+        END {
+            if (status != 429 && !(status == 403 && (after != "" || left == "0"))) exit
+            if (after ~ /^[0-9]+$/) print after + 0
+            else if (reset ~ /^[0-9]+$/ && reset + 0 > now + 0) print reset - now
+            else print 60
+        }'
+}
+update_record_success() {
+    [[ $UPDATE_CHECK == yes ]] || return 0
+    local temp
+    temp=$(mktemp "$UPDATE_CACHE.XXXXXX") || return 1
+    if printf '%s\n' "$1" >"$temp" && mv -f -- "$temp" "$UPDATE_CACHE"; then rm -f -- "$UPDATE_FAILED"; return 0; fi
+    rm -f -- "$temp"
+    return 1
+}
+update_record_failure() {
+    # update_record_failure <seconds until the next try> <reason>: the version known before stays.
+    [[ $UPDATE_CHECK == yes ]] || return 0
+    printf '%s %s\n' "$(( $(date -u +%s) + $1 ))" "$2" >"$UPDATE_FAILED" 2>/dev/null || true
+}
+check_release() {
+    # Asks GitHub for the newest release and remembers the answer. RELEASE_STATE is new, current, none (no
+    # release for this channel yet), limited (GitHub asked to wait RELEASE_WAIT seconds), offline, or bad.
+    local headers rc=0
+    RELEASE_LATEST='' RELEASE_WAIT=0 RELEASE_STATE=offline
+    headers=$(mktemp) || return 1
+    # curl's own error line would read like a failure, and the caller says what it means.
+    RELEASE_LATEST=$(latest_release_version "$headers" 2>/dev/null) || rc=$?
+    RELEASE_WAIT=$(github_wait "$headers")
+    rm -f -- "$headers"
+    if [[ -n $RELEASE_WAIT ]]; then
+        RELEASE_STATE=limited
+        update_record_failure "$(( RELEASE_WAIT > UPDATE_RETRY ? RELEASE_WAIT : UPDATE_RETRY ))" limited
+        return 1
+    fi
+    RELEASE_WAIT=0
+    # curl reports an HTTP error as 22: GitHub answered, and no release for this channel is there.
+    if (( rc == 22 )); then RELEASE_STATE=none; update_record_success "$DARBAN_VERSION"; return 0; fi
+    if (( rc != 0 )); then update_record_failure "$UPDATE_RETRY" offline; return 1; fi
+    if ! valid_version "$RELEASE_LATEST"; then RELEASE_STATE=bad; update_record_failure "$UPDATE_RETRY" bad; return 1; fi
+    update_record_success "$RELEASE_LATEST"
+    if version_is_newer "$RELEASE_LATEST" "$DARBAN_VERSION"; then RELEASE_STATE=new; else RELEASE_STATE=current; fi
+}
+update_check_due() {
+    local now next='' reason='' checked
+    now=$(date -u +%s)
+    if [[ -s $UPDATE_FAILED ]]; then
+        read -r next reason <"$UPDATE_FAILED" || true
+        # A damaged record, or one written while the clock was wrong, never stops the checks for long.
+        if [[ $next =~ ^[0-9]+$ ]] && (( now < next && next - now <= 2 * UPDATE_EVERY )); then return 1; fi
+        return 0
+    fi
+    checked=$(stat -c %Y -- "$UPDATE_CACHE" 2>/dev/null) || return 0
+    (( now - checked >= UPDATE_EVERY || checked > now ))
+}
 start_update_check() {
-    # In the background and at most once a day, so the menu never waits for the network.
+    # In the background, when the menu starts and the last check is older than an hour, or a failed one is
+    # due again. One check at a time, even with two menus open.
+    UPDATE_PID=''
     [[ $UPDATE_CHECK == yes ]] || return 0
     command -v curl >/dev/null || return 0
-    if [[ -n $(find "$UPDATE_CACHE" -mmin -1440 2>/dev/null) ]]; then return 0; fi
+    update_check_due || return 0
     (
-        latest=$(latest_release_version) || latest=''
-        if valid_version "$latest"; then
-            temp=$(mktemp "$UPDATE_CACHE.XXXXXX") && printf '%s\n' "$latest" >"$temp" && mv -f -- "$temp" "$UPDATE_CACHE"
-        else
-            # Remember the attempt too, so a server without internet does not retry on every start.
-            touch -- "$UPDATE_CACHE"
+        if ! mkdir -- "$UPDATE_LOCK" 2>/dev/null; then
+            # A lock left by a check that was killed is old: a running check takes about 20 seconds at most.
+            [[ -n $(find "$UPDATE_LOCK" -maxdepth 0 -mmin +2 2>/dev/null) ]] || exit 0
+            touch -- "$UPDATE_LOCK" || exit 0
         fi
+        trap 'rmdir -- "$UPDATE_LOCK" 2>/dev/null' EXIT
+        check_release
     ) >/dev/null 2>&1 </dev/null &
+    UPDATE_PID=$!
     disown
 }
+wait_for_update_check() {
+    # The first screen waits up to two seconds, so a release found now is shown at once. Without internet, it
+    # waits only when a failed check is due again.
+    local tries=20
+    [[ -n ${UPDATE_PID:-} ]] || return 0
+    while (( tries-- > 0 )) && kill -0 "$UPDATE_PID" 2>/dev/null; do sleep 0.1; done
+}
+update_check_running() { [[ -n ${UPDATE_PID:-} ]] && kill -0 "$UPDATE_PID" 2>/dev/null; }
 available_update() {
-    # Prints a newer version known from the last check; nothing otherwise.
+    # Prints a newer version known from the last check that worked; nothing otherwise.
     local cached=''
     [[ $UPDATE_CHECK == yes && -s $UPDATE_CACHE ]] || return 0
     IFS= read -r cached <"$UPDATE_CACHE" || true
     if valid_version "$cached" && version_is_newer "$cached" "$DARBAN_VERSION"; then printf '%s\n' "$cached"; fi
+}
+update_summary() {
+    # One of four: the notice is off, a new version, up to date, or not known (never checked, or the last
+    # check failed).
+    local e checked next='' reason=''
+    if [[ $UPDATE_CHECK != yes ]]; then printf 'notice off\n'; return; fi
+    if e=$(available_update) && [[ -n $e ]]; then printf 'v%s is available\n' "$e"; return; fi
+    if [[ -s $UPDATE_FAILED ]]; then
+        read -r next reason <"$UPDATE_FAILED" || true
+        case $reason in
+            limited) e='GitHub asked this server to wait' ;;
+            bad) e='the release did not state a version' ;;
+            *) e='GitHub could not be reached' ;;
+        esac
+        if [[ $next =~ ^[0-9]+$ ]]; then e+=", next try $(date -u -d "@$next" '+%H:%M UTC')"; fi
+        if [[ -s $UPDATE_CACHE ]] && checked=$(stat -c %Y -- "$UPDATE_CACHE" 2>/dev/null); then
+            e+="; up to date on $(date -u -d "@$checked" '+%Y-%m-%d')"
+        fi
+        printf 'not checked: %s\n' "$e"
+        return
+    fi
+    if [[ -s $UPDATE_CACHE ]] && checked=$(stat -c %Y -- "$UPDATE_CACHE" 2>/dev/null); then
+        printf 'up to date, checked %s\n' "$(date -u -d "@$checked" '+%Y-%m-%d %H:%M UTC')"
+        return
+    fi
+    printf 'not checked yet\n'
 }
 show_release_notes() {
     # Escape sequences are removed: this text comes from the network and goes straight to a root terminal.
@@ -2465,20 +2576,24 @@ show_release_notes() {
     fi
 }
 update_tool() {
-    local latest rc=0
+    local latest
     command -v curl >/dev/null || { fail 'curl is required to check for updates.'; return 1; }
     kv Installed "v$DARBAN_VERSION"
     info "Checking the latest release of $DARBAN_REPO${S_ELL}"
-    # curl's own error line would read like a failure, and the message below says what it means.
-    latest=$(latest_release_version 2>/dev/null) || rc=$?
-    # curl reports an HTTP error as 22: GitHub answered, and no stable release is there.
-    if (( rc == 22 )); then
-        ok "v$DARBAN_VERSION is up to date. No stable release is published yet."
-        info "Releases: $DARBAN_URL/releases"
-        return 0
-    fi
-    if (( rc != 0 )); then fail 'Could not reach GitHub. Check the internet connection of this server.'; return 1; fi
-    valid_version "$latest" || { fail 'The release does not state a valid version.'; return 1; }
+    # The answer is kept, so the menu's notice says the same as this check.
+    check_release || true
+    case $RELEASE_STATE in
+        none)
+            ok "v$DARBAN_VERSION is up to date. No stable release is published yet."
+            info "Releases: $DARBAN_URL/releases"
+            return 0 ;;
+        limited)
+            fail "GitHub asks this server to wait $(( (RELEASE_WAIT + 59) / 60 )) minutes before the next check. Its limit counts every program on this server's address, the VPN clients' traffic included."
+            return 1 ;;
+        offline) fail 'Could not reach GitHub. Check the internet connection of this server.'; return 1 ;;
+        bad) fail 'The release does not state a valid version.'; return 1 ;;
+    esac
+    latest=$RELEASE_LATEST
     kv Latest "v$latest"
     if ! version_is_newer "$latest" "$DARBAN_VERSION"; then
         ok 'This is the latest version.'
@@ -2529,9 +2644,9 @@ toggle_update_notice() {
     if [[ $UPDATE_CHECK == yes ]]; then UPDATE_CHECK=no; else UPDATE_CHECK=yes; fi
     save_config || { fail 'Could not save the setting.'; return 1; }
     if [[ $UPDATE_CHECK == yes ]]; then
-        ok 'The menu now looks for new releases once a day. Nothing is installed without your confirmation.'
+        ok 'The menu now looks for a new release when it starts, at most once an hour. Nothing is installed without your confirmation.'
     else
-        rm -f -- "$UPDATE_CACHE"
+        rm -f -- "$UPDATE_CACHE" "$UPDATE_FAILED"
         ok 'The menu no longer looks for new releases. "Check for updates" still works.'
     fi
 }
@@ -2810,6 +2925,8 @@ status_block() {
     } | while IFS= read -r alert; do
         if [[ -n $alert ]]; then printf '  %s%s %s%s\n' "$C_YELLOW" "$S_WARN" "$(with_action "$alert")" "$C_RESET"; fi
     done
+    # Only when the check takes longer than the first screen waits: the next screen has its answer.
+    if update_check_running; then printf '  %sChecking for a new release%s%s\n' "$C_DIM" "$S_ELL" "$C_RESET"; fi
 }
 menu_item() {
     # menu_item <key> <label> [danger]: a key to press, and its label, red when it cannot be undone.
@@ -2952,8 +3069,8 @@ draw_setup() {
     clear_screen
     title_bar Setup
     menu_item 1 'About'
-    menu_item 2 "$(printf '%-24s %s' 'Check for updates' "installed: v$DARBAN_VERSION")"
-    menu_item 3 "$(printf '%-24s %s' 'Daily update notice' "$UPDATE_CHECK")"
+    menu_item 2 "$(printf '%-24s %s' 'Check for updates' "installed: v$DARBAN_VERSION $S_SEP $(update_summary)")"
+    menu_item 3 "$(printf '%-24s %s' 'Update notice' "$UPDATE_CHECK")"
     menu_item 4 'Restore previous version'
     menu_item 5 'Uninstall this tool only' danger
     menu_item 6 'Remove everything (tool, OpenVPN, CA)' danger
@@ -3074,6 +3191,7 @@ main_menu() {
     local redraw=1
     menu_traps
     start_update_check
+    wait_for_update_check
     first_run
     while :; do
         if (( redraw )); then draw_main || true; fi
