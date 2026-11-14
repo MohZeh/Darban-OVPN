@@ -2494,6 +2494,22 @@ test_connected_clients() {
     has 'without the interface it says so' 'Not available' "$(mgr connected)"
 }
 
+test_pty_drive_reads_what_arrived_together() {
+    # Two texts in one read are both found, in order; a step never matches text from before the one it follows.
+    local script=$E/script out rc
+    # A line without " => " only waits.
+    printf 'first\nsecond\n' > "$script"
+    python3 "$HERE/pty-drive.py" --timeout 5 "$script" -- bash -c 'printf "first\nsecond\n"; sleep 1' >/dev/null 2>&1; rc=$?
+    rc_is 'a text that came in the same read as the step before is found' 0 "$rc"
+    printf 'second\nfirst\n' > "$script"
+    python3 "$HERE/pty-drive.py" --timeout 3 "$script" -- bash -c 'printf "first\nsecond\n"; sleep 4' >/dev/null 2>&1; rc=$?
+    rc_is 'and a text from before the step it follows is not' 3 "$rc"
+    printf 'ready => x\\r\nready => y\\r\ndone\n' > "$script"
+    out=$(python3 "$HERE/pty-drive.py" --timeout 5 "$script" -- bash -c 'echo ready; read -r a; echo ready; read -r b; echo "done $a$b"' 2>&1); rc=$?
+    rc_is 'after keys, a step waits for what they caused' 0 "$rc"
+    has 'each answer went to its own question' 'done xy' "$out"
+}
+
 test_first_client_in_a_real_terminal() {
     # From the end of the setup to a link and a confirmed connection: Enter at every step.
     local script=$E/script out rc

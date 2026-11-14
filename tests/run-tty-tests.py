@@ -50,21 +50,27 @@ class Manager:
                                      stderr=slave, env=env, start_new_session=True,
                                      preexec_fn=lambda: __import__('fcntl').ioctl(0, termios.TIOCSCTTY, 0))
         self.seen = ''
+        # Where the next wait_for looks: just after the text it last found, or, after keys were pressed, at what
+        # came after them. Text that arrived in the same read as the one before is still found, and a screen
+        # from before the keys never answers.
+        self.cursor = 0
 
     def wait_for(self, text, timeout=30):
-        """Reads until text appears in the new output; returns everything read so far."""
+        """Reads until text appears after the cursor, and moves the cursor past it."""
         end = time.time() + timeout
-        start = len(self.seen)
-        while time.time() < end:
-            if text in self.seen[start:]:
+        while True:
+            found = self.seen.find(text, self.cursor)
+            if found >= 0:
+                self.cursor = found + len(text)
                 return True
+            if time.time() >= end:
+                return False
             ready, _, _ = select.select([self.master], [], [], 0.1)
             if ready:
                 try:
                     self.seen += os.read(self.master, 65536).decode('utf-8', 'replace')
                 except OSError:
-                    break
-        return text in self.seen[start:]
+                    return self.seen.find(text, self.cursor) >= 0
 
     def drain(self, seconds=0.4):
         end = time.time() + seconds
@@ -80,6 +86,7 @@ class Manager:
         return out
 
     def press(self, *keys):
+        self.cursor = len(self.seen)
         for key in keys:
             os.write(self.master, key.encode())
             time.sleep(0.12)
