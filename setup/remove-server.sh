@@ -146,7 +146,9 @@ fi
 # Let's Encrypt gives 5 a week for one address, and deleting one does not give it back.
 if (( KEEP_CERT )); then
     for name in "${certificates[@]}"; do
-        printf 'Kept the Let'"'"'s Encrypt certificate %s in /etc/letsencrypt; a new install here uses it again.\n' "$name"
+        until=$(openssl x509 -in "/etc/letsencrypt/live/$name/cert.pem" -noout -enddate 2>/dev/null | cut -d= -f2)
+        until=$(date -u -d "$until" +%Y-%m-%d 2>/dev/null || true)
+        printf 'Kept the Let'"'"'s Encrypt certificate %s in /etc/letsencrypt%s; a new install here uses it again.\n' "$name" "${until:+, valid until $until}"
         printf 'To delete it: sudo rm -rf /etc/letsencrypt/live/%s /etc/letsencrypt/archive/%s /etc/letsencrypt/renewal/%s.conf %s\n' \
             "$name" "$name" "$name" "$CERT_LOG"
     done

@@ -2802,6 +2802,34 @@ test_link_certificate_screen() {
     has 'and explains' 'Let'"'"'s Encrypt cannot check a private address' "$out"
 }
 
+test_certbot_hook_reloads_the_link_service() {
+    # After a renewal, certbot's hook reloads the link service, so a download in progress finishes. An older hook
+    # that restarted it is moved to the reload.
+    local conf=$E/le/renewal/darban-ovpn-links.conf
+    start_links_stub
+    echo vpn.example.com > "$E/cfg/domain"
+    make_test_ca vpn.example.com "$E/le/live/darban-ovpn-links" fullchain.pem privkey.pem
+    mkdir -p "$E/le/renewal"
+    printf 'authenticator = standalone\nrenew_hook = systemctl try-restart darban-links.service\n' > "$conf"
+    menu '5\nalice\n1\n1\n0\n' >/dev/null
+    grep -qx "renew_hook = $E/sbin/darban reload-links" "$conf"; rc_is 'an old hook is moved to the reload' 0 "$?"
+    if grep -q 'try-restart' "$conf"; then result 0 'the restart is gone'; else result 1 'the restart is gone'; fi
+    printf 'authenticator = standalone\nrenew_hook = /usr/local/bin/my-own-hook\n' > "$conf"
+    menu '6\n1\n2\n0\n' >/dev/null
+    menu '5\nalice\n1\n1\n0\n' >/dev/null
+    grep -qx 'renew_hook = /usr/local/bin/my-own-hook' "$conf"; rc_is 'a hook someone else set stays' 0 "$?"
+
+    # The hook itself: a reload for a service that can take one, nothing when no link is open.
+    : > "$STUB_LOG"
+    bash "$E/manager.sh" reload-links </dev/null >/dev/null 2>&1; rc_is 'reload-links succeeds' 0 "$?"
+    grep -q 'reload darban-links.service' "$STUB_LOG"; rc_is 'and reloads the running service' 0 "$?"
+    menu '6\n1\n2\n0\n' >/dev/null
+    stop_links_stub; sleep 0.3
+    : > "$STUB_LOG"
+    bash "$E/manager.sh" reload-links </dev/null >/dev/null 2>&1; rc_is 'with no service running it does nothing, and succeeds' 0 "$?"
+    if grep -Eq 'systemctl (reload|restart) darban-links' "$STUB_LOG"; then result 0 'no reload or restart'; else result 1 'no reload or restart'; fi
+}
+
 test_a_kept_link_certificate_is_used_again() {
     # A certificate this tool got before a removal is taken back without a question or a new request.
     local out
@@ -2824,6 +2852,12 @@ test_a_kept_link_certificate_is_used_again() {
     echo other.example.com > "$E/cfg/domain"
     rm -f "$E/cfg/link-cert.pem" "$E/cfg/link-key.pem"
     has 'a kept certificate for another address says so' 'is for vpn.example.com, not other.example.com' "$(menu '5\nalice\n1\n2\n1\n0\n')"
+
+    # Without certbot's renewal file, one that ends before a link says so, in hours.
+    echo vpn.example.com > "$E/cfg/domain"
+    rm -f "$E/cfg/link-cert.pem" "$E/cfg/link-key.pem"
+    make_test_ca vpn.example.com "$E/le/live/darban-ovpn-links" fullchain.pem privkey.pem 1
+    has 'a kept certificate that ends too soon names the link' 'ends in less than 25 hours, sooner than a link may last' "$(menu '5\nalice\n1\n2\n1\n0\n')"
     stop_links_stub
 }
 
@@ -2837,11 +2871,11 @@ test_link_certificate_renews_and_counts_the_weekly_limit() {
     mkdir -p "$E/le/renewal"; echo 'authenticator = standalone' > "$E/le/renewal/darban-ovpn-links.conf"
     printf '#!/usr/bin/env bash\nif [[ $1 == --version ]]; then echo "certbot 5.9.0"; exit 0; fi\necho "certbot $*" >> "$STUB_LOG"; exit 0\n' > "$E/bin/certbot"
     chmod +x "$E/bin/certbot"
-    out=$(menu '5\nalice\n1\n1\n1\n0\n')
+    out=$(menu '5\nalice\n1\n1\n0\n')
     grep -q 'certbot renew --non-interactive --cert-name darban-ovpn-links' "$STUB_LOG"; rc_is 'an existing certificate is renewed' 0 "$?"
     if grep -q 'certbot certonly' "$STUB_LOG"; then result 0 'and not requested anew'; else result 1 'and not requested anew'; fi
-    has 'the kept certificate says why it is not used as it is' 'It can be renewed instead of asked for anew' "$out"
-    has 'the question names the renewal' "Renew the Let's Encrypt certificate this server got earlier?" "$out"
+    has 'a kept certificate that ends too soon is renewed' 'ends sooner than a link may last. Renewing it' "$out"
+    lacks 'without a question' "Renew the Let's Encrypt certificate this server got earlier?" "$out"
     has 'a renewal that changed nothing says so' 'Not due for renewal yet' "$out"
     ok_if 'and nothing is recorded' test ! -s "$E/varlib/link-certificates.log"
     menu '6\n1\n2\n0\n' >/dev/null
@@ -2851,7 +2885,7 @@ test_link_certificate_renews_and_counts_the_weekly_limit() {
     make_test_ca vpn.example.com "$E/renewed" fullchain.pem privkey.pem
     printf '#!/usr/bin/env bash\nif [[ $1 == --version ]]; then echo "certbot 5.9.0"; exit 0; fi\necho "certbot $*" >> "$STUB_LOG"\ncp "%s"/*.pem "%s"/\n' \
         "$E/renewed" "$E/le/live/darban-ovpn-links" > "$E/bin/certbot"
-    out=$(menu '5\nalice\n1\n1\n1\n0\n')
+    out=$(menu '5\nalice\n1\n1\n0\n')
     has 'a real renewal is named' 'Renewed: the certificate for vpn.example.com is valid until' "$out"
     grep -q ' vpn.example.com renew$' "$E/varlib/link-certificates.log"; rc_is 'and recorded as a renewal' 0 "$?"
     has 'Settings counts it apart' '0 new, 1 renewed' "$(menu '7\n5\n1\n0\n0\n')"
@@ -2865,6 +2899,7 @@ test_link_certificate_renews_and_counts_the_weekly_limit() {
         "$E/le/live/darban-ovpn-links" "$E/new-le" "$E/le/live/darban-ovpn-links" > "$E/bin/certbot"
     out=$(menu '5\nalice\n1\n1\n1\n0\n')
     has 'a new certificate is named' "New certificate from Let's Encrypt for vpn.example.com, valid until" "$out"
+    grep -q -- "--deploy-hook $E/sbin/darban reload-links" "$STUB_LOG"; rc_is 'certbot is told to reload the link service, not restart it' 0 "$?"
     grep -q ' vpn.example.com new$' "$E/varlib/link-certificates.log"; rc_is 'and recorded as new' 0 "$?"
     out=$(menu '7\n5\n1\n0\n0\n')
     has 'Settings counts it' '1 new, 0 renewed in the last 7 days, by this tool for vpn.example.com' "$out"

@@ -1144,6 +1144,7 @@ get_trusted_cert() {
     before=$(cert_fingerprint "$live")
     out=$(mktemp) || return 1
     if (( renewing )); then
+        update_link_renew_hook
         # Nothing is done when it is not due yet.
         kind=renew
         info "Renewing the certificate for $host${S_ELL}"
@@ -1157,7 +1158,7 @@ get_trusted_cert() {
         fi
         info "Requesting a certificate for $host${S_ELL}"
         "$certbot" certonly --standalone --non-interactive --agree-tos --register-unsafely-without-email --cert-name "$CERT_NAME" \
-            "${target[@]}" --deploy-hook 'systemctl try-restart darban-links.service' >"$out" 2>&1 || rc=$?
+            "${target[@]}" --deploy-hook "$SBIN_DIR/darban reload-links" >"$out" 2>&1 || rc=$?
     fi
     if (( rc != 0 )); then
         explain_certbot_failure "$out"
@@ -1229,7 +1230,12 @@ own_cert_usable() {
     # own_cert_usable <host>: the certificate this tool got earlier, kept through a removal, still serves host.
     local dir=$LE_DIR/live/$CERT_NAME
     [[ -s $dir/fullchain.pem && -s $dir/privkey.pem ]] || return 1
-    [[ -z $(cert_problem "$dir/fullchain.pem" "$dir/privkey.pem" "$1") ]]
+    [[ -z $(cert_problem "$dir/fullchain.pem" "$dir/privkey.pem" "$1" "$(link_lifetime_seconds)") ]]
+}
+link_lifetime_seconds() { printf '%s\n' "$(( ($(link_hours) + 1) * 3600 ))"; }
+own_cert_renewable() {
+    # This tool's certificate for host can be renewed: certbot knows it, and it names host.
+    [[ -s $LE_DIR/renewal/$CERT_NAME.conf ]] && cert_covers "$LE_DIR/live/$CERT_NAME/fullchain.pem" "$1"
 }
 explain_kept_cert() {
     # A Let's Encrypt certificate this tool got before, kept through a removal, that cannot serve host: why, so
@@ -1241,7 +1247,7 @@ explain_kept_cert() {
         info "The Let's Encrypt certificate kept on this server is for ${names:-another address}, not $host, so a new one is needed."
         return 0
     fi
-    problem=$(cert_problem "$dir/fullchain.pem" "$dir/privkey.pem" "$host")
+    problem=$(cert_problem "$dir/fullchain.pem" "$dir/privkey.pem" "$host" "$(link_lifetime_seconds)")
     [[ -n $problem ]] || return 0
     if [[ -s $LE_DIR/renewal/$CERT_NAME.conf ]]; then
         info "The Let's Encrypt certificate kept on this server for $host cannot be used as it is: $problem It can be renewed instead of asked for anew."
@@ -1340,13 +1346,22 @@ existing_cert_pairs() {
     done
 }
 cert_problem() {
-    # cert_problem <cert> <key> <host>: why this pair cannot serve links, or nothing when it can.
+    # cert_problem <cert> <key> <host> [seconds]: why this pair cannot serve links, or nothing when it can. It must
+    # stay valid that many seconds longer, a day and an hour by default.
     if [[ ! -s $1 ]]; then printf 'There is no certificate file at %s.\n' "$1"; return; fi
     if [[ ! -s $2 ]]; then printf 'There is no key file at %s.\n' "$2"; return; fi
     if ! openssl x509 -in "$1" -noout >/dev/null 2>&1; then printf '%s is not a PEM certificate.\n' "$1"; return; fi
     if ! cert_covers "$1" "$3"; then printf 'The certificate in %s is not for %s.\n' "$1" "$3"; return; fi
     if ! cert_key_matches "$1" "$2"; then printf 'The key in %s does not belong to that certificate.\n' "$2"; return; fi
-    if ! openssl x509 -in "$1" -noout -checkend 90000 >/dev/null 2>&1; then printf 'The certificate in %s ends within a day.\n' "$1"; return; fi
+    local seconds=${4:-90000} asked=${4:+1}
+    if ! openssl x509 -in "$1" -noout -checkend "$seconds" >/dev/null 2>&1; then
+        if [[ -z $asked ]]; then
+            printf 'The certificate in %s ends within a day.\n' "$1"
+        else
+            printf 'The certificate in %s ends in less than %s hours, sooner than a link may last.\n' "$1" "$(( seconds / 3600 ))"
+        fi
+        return
+    fi
     if cert_is_cloudflare_origin "$1"; then
         printf '%s\n' "The certificate in $1 is a Cloudflare Origin certificate. Browsers trust it only through Cloudflare's proxy, and the VPN address cannot go through that proxy, because OpenVPN uses UDP. The browser would still warn."
         return
@@ -1415,6 +1430,11 @@ offer_trusted_cert() {
     local host=$1 found cert key end
     # The one this tool got before, kept through a removal: taken back without a question or a new request.
     if own_cert_usable "$host"; then use_own_cert; return; fi
+    if own_cert_renewable "$host"; then
+        info "The Let's Encrypt certificate kept on this server for $host ends sooner than a link may last. Renewing it${S_ELL}"
+        get_trusted_cert "$host" asked
+        return
+    fi
     explain_kept_cert "$host"
     if found=$(find_existing_cert "$host"); then
         IFS=$'\t' read -r cert key end <<<"$found"
@@ -1430,8 +1450,23 @@ offer_trusted_cert() {
     explain_untrusted_certs "$host"
     get_trusted_cert "$host"
 }
+LINK_RENEW_HOOK_OLD='systemctl try-restart darban-links.service'
+update_link_renew_hook() {
+    # Up to v1.0.0-rc.10, certbot's hook restarted the link service after a renewal, which ended a download in
+    # progress. The hook kept in certbot's renewal file is moved to the reload.
+    local conf=$LE_DIR/renewal/$CERT_NAME.conf
+    [[ -s $conf ]] && grep -qxF "renew_hook = $LINK_RENEW_HOOK_OLD" "$conf" || return 0
+    sed -i "s#^renew_hook = $LINK_RENEW_HOOK_OLD\$#renew_hook = $SBIN_DIR/darban reload-links#" "$conf" 2>/dev/null || true
+}
+reload_links_now() {
+    # certbot's deploy hook: a renewed certificate reaches open links, and a download in progress finishes. A link
+    # service from before v1.0.0-rc.9 would end on a reload, so it is restarted instead.
+    systemctl is-active --quiet darban-links.service 2>/dev/null || return 0
+    if link_service_reloadable; then systemctl reload darban-links.service; else systemctl restart darban-links.service; fi
+}
 ensure_link_cert() {
     local host=$1
+    update_link_renew_hook
     local ends
     refresh_copied_cert "$host"
     if link_cert_usable "$host"; then
@@ -3471,6 +3506,8 @@ main() {
             -h|--help|help) usage; exit 0 ;;
             -V|--version|version) printf '%s\n' "$DARBAN_VERSION"; exit 0 ;;
             about) about_text; exit 0 ;;
+            # For certbot's deploy hook only; it needs nothing else from the tool.
+            reload-links) reload_links_now; exit $? ;;
             list|status|repair-crl|connected|update|uninstall|remove-all|welcome) [[ -z $cmd ]] || { usage >&2; exit 2; }; cmd=$1 ;;
             *) printf 'Unknown argument: %s\n\n' "$1" >&2; usage >&2; exit 2 ;;
         esac
