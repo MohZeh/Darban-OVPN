@@ -100,6 +100,8 @@ if [[ ! -e $CONFIG_DIR/config ]]; then
     printf 'DOWNLOAD_SSH_HOST=%s\nDOWNLOAD_SSH_PORT=%s\nDOWNLOAD_SSH_USER=%s\n' "$ssh_host" "${ssh_port:-22}" "$ssh_user" >"$CONFIG_DIR/config"
     chmod 600 "$CONFIG_DIR/config"
 fi
+# The CRL check below takes the same lock itself.
+flock -u 9; exec 9>&-
 
 systemctl enable --now darban-crl.timer >/dev/null 2>&1 || true
 if ! systemctl is-active --quiet darban-crl.timer; then
@@ -118,6 +120,7 @@ fi
 # The NAT file is written again from server.conf, so an install from before clients were kept apart gets
 # that rule, and a network change that stopped half way is put right. Without success the install is not
 # marked complete, so running the same command again tries once more.
+darban_lock 60 || { echo 'INSTALL INCOMPLETE: another Darban operation holds the lock. Run the same command again.' >&2; exit 1; }
 NAT_FILE=/etc/darban/nat.nft
 NAT_UNIT=/etc/systemd/system/darban-nat.service
 # A file that is gone, while the unit that loads it at boot is still there, is written again: the rules run now,
