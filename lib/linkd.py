@@ -3,8 +3,9 @@
 
 A link file is <sha256 of token>.meta plus <same>.ovpn in the store directory, so this service finds a link
 without keeping its token. darban keeps the whole address in <same>.url, readable by root only, so it can show
-a link again; this service never reads that file, and removes it with the link. A link works until the client it was made for connects to the VPN for the first time, or until it
-expires, whichever comes first. Until then the page and the file can be opened again, so a mistake on the
+a link again; this service never reads that file, and removes it with the link. A link works until the client it was made for connects to the VPN for the first time, as this
+service sees it in OpenVPN's management interface, or until it expires, whichever comes first. Without that
+interface, or when it misses a short connection, the link lasts until it expires. Until then the page and the file can be opened again, so a mistake on the
 phone costs nothing. Opening the page never uses anything up: messengers fetch links for their previews.
 Standard library only. The process ends by itself once no link is left. SIGHUP reads the certificate again:
 new connections get the new one, and a download in progress finishes on the old one.

@@ -2179,7 +2179,7 @@ test_status_exit_code_follows_the_checklist() {
     rm "$CRL"
     out=$(mgr status); rc=$?
     rc_is 'a problem means 1' 1 "$rc"
-    has 'and the checklist shows it' 'Published CRL problem' "$out"
+    has 'and the checklist shows it' "The CRL file $CRL is missing" "$out"
 }
 
 test_management_is_only_reported_when_it_works() {
@@ -3796,6 +3796,87 @@ test_uninstall_keeps_the_certificate_and_removes_only_this_hook() {
     fi
     if grep -q '^renew_hook' "$conf"; then result 0 'the hook line is gone after Remove everything'; else result 1 'the hook line is gone after Remove everything'; fi
     cmp -s "$other" "$E/other.before"; rc_is 'and the other hook stays' 0 "$?"
+}
+
+# ---------- PR 4: Diagnostics say what is really wrong, and the docs claim only what is true ----------
+test_diagnostics_check_the_crl_as_openvpn_reads_it() {
+    # N8 and T16: missing, unreadable for the user OpenVPN runs as, and close to its next update: each is named.
+    local out rc
+    echo 'user nobody' >> "$SERVER_CONF"
+    out=$(mgr status); rc=$?
+    has 'a healthy CRL is valid' 'Published CRL valid and complete' "$out"
+    lacks 'and readable' 'cannot read the CRL' "$out"
+
+    out=$(FAKE_RUNUSER_DENY=1 mgr status); rc=$?
+    has 'a CRL nobody cannot read is named' 'OpenVPN runs as nobody and cannot read the CRL' "$out"
+    has 'with what it means' 'every connection may be refused, or the last list it read stays in use' "$out"
+    has 'and the fix' "sudo chmod 644 $CRL" "$out"
+    rc_is 'it is a problem, not a warning' 1 "$rc"
+
+    sed -i '/^user nobody$/d' "$SERVER_CONF"
+    out=$(FAKE_RUNUSER_DENY=1 mgr status)
+    lacks 'without a user, OpenVPN stays root and reads it' 'cannot read the CRL' "$out"
+
+    mv "$CRL" "$E/crl.away"
+    out=$(mgr status); rc=$?
+    has 'a missing CRL is named' "The CRL file $CRL is missing" "$out"
+    has 'with what OpenVPN then does' 'OpenVPN does not start without it, and a running one keeps the last list it read' "$out"
+    rc_is 'and it is a problem' 1 "$rc"
+    lacks 'it is never called harmless' 'accept' "$(grep -i 'CRL' <<<"$out")"
+    mv "$E/crl.away" "$CRL"
+
+    # A CRL whose next update is due within a week.
+    if [[ -n ${DARBAN_REAL_EASYRSA:-} ]]; then
+        EASYRSA_CRL_DAYS=3 easyrsa gen-crl >/dev/null 2>&1
+    else
+        (cd "$PKI" && openssl ca -batch -config openssl.cnf -gencrl -crldays 3 -out crl.pem 2>/dev/null)
+    fi
+    cp "$PKI/crl.pem" "$CRL"
+    out=$(mgr status)
+    has 'a CRL close to its next update is a warning' 'but its next update is due' "$out"
+    has 'with what happens then' 'Once it passes, every connection is refused' "$out"
+}
+
+test_status_cut_short_stops_quietly() {
+    # N4, E7 and T10: a reader that goes away ends the output, with SIGPIPE's status, and no word of an abort.
+    local rc
+    # With SIGPIPE as a person's shell has it: a runner may start the tests with it ignored, which no shell can undo.
+    { sleep 0.5; env --default-signal=PIPE bash "$E/manager.sh" status </dev/null; } 2>"$E/status.err" | true
+    rc=${PIPESTATUS[0]}
+    rc_is 'the status is SIGPIPE, neither a pass nor a fail' 141 "$rc"
+    lacks 'nothing is called an abort' 'aborted unexpectedly' "$(cat "$E/status.err")"
+    mgr status >/dev/null; rc=$?
+    [[ $rc == 0 || $rc == 1 ]]; rc_is 'read to the end, it is still a pass or a fail' 0 "$?"
+}
+
+test_diagnostics_check_the_open_link_over_https() {
+    # F09 and T9: while a link is open, the service's HTTPS answer is checked; with no link, nothing is wrong.
+    local out rc
+    out=$(mgr status)
+    has 'no link, no service: said, and no problem' 'No link is open, so the link service is not running' "$out"
+    lacks 'no false alarm' 'does not answer over HTTPS' "$out"
+    start_links_stub
+    menu '5\nalice\n1\n1\n0\n' >/dev/null
+    sleep 0.5
+    out=$(mgr status)
+    has 'an open link is checked over HTTPS' 'The link service answers over HTTPS on TCP' "$out"
+    # A key that does not belong to the certificate: the next link would not open.
+    openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes -keyout "$E/other.key" -out "$E/other.pem" \
+        -days 30 -subj /CN=127.0.0.1 >/dev/null 2>&1
+    cp "$E/other.key" "$E/cfg/link-key.pem"
+    out=$(mgr status); rc=$?
+    has 'a pair that does not match is a problem' 'The link certificate and its key do not belong together' "$out"
+    lacks 'and is not called fine' 'All checks passed' "$out"
+    rc_is 'with the status of a problem' 1 "$rc"
+    stop_links_stub
+}
+
+test_docs_claim_no_more_than_the_tool_does() {
+    # F04 and D1: no guide says only a hash of a link stays, or that an install is verified.
+    local found
+    found=$(grep -rniE 'only a hash|verified install' "$REPO/README.md" "$REPO/README.fa.md" "$REPO/docs" || true)
+    [[ -z $found ]]; rc_is 'no such claim is left' 0 "$?"
+    if [[ -n $found ]]; then printf '%s\n' "$found" | sed 's/^/    | /'; fi
 }
 
 mapfile -t TESTS < <(declare -F | awk '$3 ~ /^test_/ {print $3}' | sort)

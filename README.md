@@ -1,4 +1,4 @@
-<img src="docs/assets/hero.png" alt="Darban OVPN: your own OpenVPN server, run from one terminal menu. Temporary links that end at the first connection, verified revocation and automatic rollback on Ubuntu 24.04 and 26.04." width="100%">
+<img src="docs/assets/hero.png" alt="Darban OVPN: your own OpenVPN server, run from one terminal menu. Temporary links that end at the first connection the server sees, verified revocation and automatic rollback on Ubuntu 24.04 and 26.04." width="100%">
 
 <div align="center">
 
@@ -69,7 +69,7 @@ sudo darban
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/assets/how-it-works-dark.png">
-  <img src="docs/assets/how-it-works-light.png" alt="Architecture diagram. An admin reaches the darban tool over SSH. The tool issues and revokes certificates in the Easy-RSA PKI, which produces a verified CRL in crl.pem; a daily timer renews that file. The tool also edits server.conf and rolls back on failure. OpenVPN reads both files. For sharing, the tool creates a temporary link in the link service, and the VPN user downloads the profile over HTTPS; the link ends at the first connection. The VPN user connects to OpenVPN through a UDP tunnel, and traffic reaches the internet through NAT." width="100%">
+  <img src="docs/assets/how-it-works-light.png" alt="Architecture diagram. An admin reaches the darban tool over SSH. The tool issues and revokes certificates in the Easy-RSA PKI, which produces a verified CRL in crl.pem; a daily timer renews that file. The tool also edits server.conf and rolls back on failure. OpenVPN reads both files. For sharing, the tool creates a temporary link in the link service, and the VPN user downloads the profile over HTTPS; the link ends at the first connection the server sees. The VPN user connects to OpenVPN through a UDP tunnel, and traffic reaches the internet through NAT." width="100%">
 </picture>
 
 Green is management, blue is profile delivery and orange is VPN traffic. The tool is written in Bash, with a small standard-library Python service that runs only while a link exists. See [the case study](docs/case-study.md) for the reasoning behind the main decisions.
@@ -78,7 +78,7 @@ Green is management, blue is profile delivery and orange is VPN traffic. The too
 
 - A profile holds a private key, so every link has a time limit, and there are no permanent links. A short password on the key can be added for a link without a trusted certificate, and sent another way.
 - Clients cannot reach each other, or the cloud provider's metadata service, through the server.
-- Only a hash of each link token stays on the server, and tokens never reach the logs.
+- The link service finds a link by a hash of its token and never keeps the token itself. The tool keeps the whole address, readable by root only, so **Links and files** can show it again. Tokens never reach the logs.
 - The CA key has no passphrase, because the daily CRL renewal must run unattended. **Anyone who gains root on the server can issue certificates**, so protect the server and keep an encrypted backup elsewhere.
 - Updates are checked against a checksum published with the release. This detects a damaged download, not a compromised GitHub account.
 

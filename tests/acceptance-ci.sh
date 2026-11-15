@@ -153,6 +153,8 @@ disconnect
 
 if connect "$LOG/old.ovpn" "$LOG/b.log"; then echo 'FAIL: the revoked profile still connects.'; exit 1; fi
 disconnect
+# T68: refused by the CRL that revoke published, and OpenVPN says why.
+journalctl -u "$UNIT" --since '-120s' --no-pager | grep -i 'certificate revoked' >/dev/null
 echo 'PASS: the revoked profile was refused.'
 
 printf '1\naccept1\n0\n' | darban
@@ -162,6 +164,20 @@ disconnect
 if connect "$LOG/old.ovpn" "$LOG/d.log"; then echo 'FAIL: the old profile connects after the name was reused.'; exit 1; fi
 disconnect
 echo 'PASS: the old profile stays refused after the name was reused.'
+
+# A CRL that OpenVPN, which runs as nobody, cannot read once it changed: Diagnostics name it, and even a valid client
+# is refused. Readable again, the client connects.
+CRL_FILE=/etc/openvpn/server/crl.pem
+chmod 600 "$CRL_FILE"; touch "$CRL_FILE"
+if darban status >"$LOG/crl-600.log"; then echo 'FAIL: a CRL OpenVPN cannot read passed the diagnostics.'; exit 1; fi
+grep 'OpenVPN runs as nobody and cannot read the CRL' "$LOG/crl-600.log" >/dev/null
+if connect /root/openvpn-clients/accept1.ovpn "$LOG/crl-600-client.log"; then echo 'FAIL: a client connected with a CRL OpenVPN cannot read.'; exit 1; fi
+disconnect
+chmod 644 "$CRL_FILE"; touch "$CRL_FILE"
+connect /root/openvpn-clients/accept1.ovpn "$LOG/crl-644-client.log"
+disconnect
+darban status >/dev/null
+echo 'PASS: a CRL OpenVPN cannot read is named, refuses every client, and works again once readable.'
 
 darban list --all
 
@@ -399,6 +415,18 @@ grep -q 'NOTE: the NAT rules were not checked' "$LOG/skip-install.log"
 cp -a "$LOG/nat.kept" /etc/darban/nat.nft
 darban status >/dev/null
 echo 'PASS: a NAT file the installer cannot check is reported, not passed over.'
+
+# The NAT file is gone while its rules still run: Diagnostics warn before a reboot would cut clients off, and the
+# installer writes it again.
+rm -f /etc/darban/nat.nft
+darban status >"$LOG/nat-gone.log" || true
+grep 'is gone, so after a reboot clients have no internet' "$LOG/nat-gone.log" >/dev/null
+bash setup/install.sh | tee "$LOG/nat-gone-install.log"
+[[ -s /etc/darban/nat.nft ]]
+grep 'was missing; it is written again from server.conf' "$LOG/nat-gone-install.log" >/dev/null
+darban status >"$LOG/nat-back.log"
+if grep 'is gone' "$LOG/nat-back.log" >/dev/null; then echo 'FAIL: the NAT file is still called gone.'; exit 1; fi
+echo 'PASS: a NAT file that is gone is reported before a reboot, and the installer writes it again.'
 
 # This tool's Let's Encrypt certificate from a real ACME server: Pebble, Let's Encrypt's test server, and certbot
 # from Ubuntu, which the tool installs itself. Issued with this tool's hook; a renewal by certbot reaches the open
