@@ -1809,6 +1809,14 @@ change_link_cert_choice() {
 valid_abs_path() { [[ $1 == /* && $1 != *$'\n'* ]]; }
 
 # ---------- the running link service takes a changed certificate ----------
+served_link_cert_fingerprint() {
+    # The certificate the link service answers with now, asked for the way a browser asks.
+    local port
+    port=$(awk -F= '$1 == "LINK_PORT" {print $2; exit}' "$LINK_ENV" 2>/dev/null)
+    [[ $port =~ ^[0-9]+$ ]] || return 1
+    timeout 5 openssl s_client -connect "127.0.0.1:$port" -servername "$(domain)" </dev/null 2>/dev/null \
+        | openssl x509 -noout -fingerprint -sha256 2>/dev/null | sed 's/^.*=//'
+}
 link_service_serves() {
     # link_service_serves <fingerprint>: the running service answers with it, within a few seconds.
     local attempt
