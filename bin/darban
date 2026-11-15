@@ -391,14 +391,6 @@ revocation_pending_names() {
         if (( e > now )); then printf '%s\n' "$cn"; fi
     done <<<"$rows"
 }
-revoked_with_profile() {
-    # A normal revocation deletes the server copy, so a copy left behind marks an unfinished one.
-    local cn status expiry serial rows
-    rows=$(client_effective_rows) || return 1
-    while IFS=$'\t' read -r cn status expiry serial; do
-        if [[ $status == R ]] && profile_path "$cn" >/dev/null; then printf '%s\n' "$cn"; fi
-    done <<<"$rows"
-}
 client_stats() {
     # Prints: valid revoked expired expiring-soon
     local cn status expiry serial e now valid=0 revoked=0 expired=0 soon=0
@@ -717,7 +709,7 @@ list_menu() {
 name_reuse_block_reason() {
     # Why a name already in the CA history cannot get a new certificate; empty when it safely can.
     # OpenVPN rejects the old certificate by serial, so the old one must be proven blocked first.
-    local name=$1 state serial file
+    local name=$1 state serial file rows
     state=$(client_index_status "$name")
     case $state in
         V|AMBIGUOUS) printf 'it still has a valid certificate.\n'; return 0 ;;
@@ -725,7 +717,10 @@ name_reuse_block_reason() {
     serial=$(client_index_serial "$name")
     if [[ -n $serial ]] && is_server_serial "$serial"; then printf 'it belongs to the server certificate.\n'; return 0; fi
     if ! darban_verify_crl "$DARBAN_CRL" >/dev/null 2>&1; then printf 'the published CRL has a problem; fix it first: Maintenance %s 2.\n' "$S_CRUMB"; return 0; fi
-    if [[ -n $(revoked_with_profile | grep -Fx -- "$name") ]]; then printf 'its revocation is unfinished; finish it first: Maintenance %s 2.\n' "$S_CRUMB"; return 0; fi
+    # A link or file of an earlier certificate would leave two of them in use under one name.
+    rows=$(share_rows 2>/dev/null) || rows=''
+    if share_names revoked "$rows" | grep -Fx -- "$name" >/dev/null; then printf 'its revocation is unfinished; finish it first: Maintenance %s 2.\n' "$S_CRUMB"; return 0; fi
+    if share_names unknown "$rows" | grep -Fx -- "$name" >/dev/null; then printf 'a link or file of it holds a certificate this tool cannot identify; check it, then delete it in Links and files (menu 6).\n'; return 0; fi
     # Each of these would make Easy-RSA refuse, or would pair the new certificate with an old file.
     for file in "issued/$name.crt" "private/$name.key" "reqs/$name.req"; do
         if [[ -e $DARBAN_PKI/$file ]]; then printf 'pki/%s is still there.\n' "$file"; return 0; fi
@@ -1741,7 +1736,7 @@ links_locked() {
     # links_locked <command>...: changes the link files while holding the lock the link service takes too, so a
     # download in progress never writes back a link that is being removed.
     [[ -d $LINK_DIR ]] || { "$@"; return; }
-    ( flock -w 10 8 || { warn 'The link service did not let go of its files; try again.'; exit 1; }; "$@" ) 8>"$LINK_DIR/.lock"
+    ( flock -w 10 8 || { warn 'The link service did not let go of its files.'; exit 1; }; "$@" ) 8>"$LINK_DIR/.lock"
 }
 remove_links_for() {
     # A revoked client must not stay reachable through a link that is still open.
@@ -1749,11 +1744,118 @@ remove_links_for() {
     links_locked drop_links_of "$1"
 }
 drop_links_of() {
+    # Every link of the name: only revoke calls this, when no other certificate of the name is valid.
     local meta
     for meta in "$LINK_DIR"/*.meta; do
         [[ -e $meta ]] || continue
-        if grep -qx "name=$1" "$meta"; then rm -f -- "$meta" "${meta%.meta}.ovpn" "${meta%.meta}.url"; fi
+        if grep -qFx "name=$1" "$meta"; then rm -f -- "$meta" "${meta%.meta}.ovpn" "${meta%.meta}.url" "${meta%.meta}.tmp"; fi
     done
+}
+
+# ---------- shares: the copies of a profile this tool keeps ----------
+# A share is a profile that can still reach someone: an open link, the copy kept on the server, or the copy made
+# for the SSH user. The certificate inside it says which certificate it belongs to, so nothing else records it.
+ssh_user_home() {
+    local home
+    [[ $DOWNLOAD_SSH_USER != root ]] || return 1
+    home=$(getent passwd "$DOWNLOAD_SSH_USER" 2>/dev/null | cut -d: -f6) || return 1
+    [[ -n $home && -d $home ]] || return 1
+    printf '%s\n' "$home"
+}
+share_serial() {
+    # share_serial <profile> <name>: the serial of the certificate in the profile, normalized, when it parses, this
+    # CA issued it and it is for <name>. Its dates are not checked, so an expired certificate is still known.
+    # Anything else prints nothing and returns 1: the share is "unknown".
+    local cert facts serial cn
+    [[ -f $1 && ! -L $1 ]] || return 1
+    cert=$(awk '/^<\/cert>\r?$/ {f=0} f {print} /^<cert>\r?$/ {f=1}' "$1" 2>/dev/null) || return 1
+    [[ -n $cert ]] || return 1
+    facts=$(openssl x509 -noout -serial -subject -nameopt multiline <<<"$cert" 2>/dev/null) || return 1
+    serial=$(awk -F= '$1=="serial" {print $2; exit}' <<<"$facts")
+    serial=$(darban_norm_serial "$serial") || return 1
+    # Exactly one common name, and it must be the name the share is filed under.
+    cn=$(awk '$1=="commonName" {n++; sub(/^[^=]*= /, ""); v=$0} END {if (n == 1) print v}' <<<"$facts")
+    [[ -n $cn && $cn == "$2" ]] || return 1
+    openssl verify -no_check_time -CAfile "$DARBAN_PKI/ca.crt" <<<"$cert" >/dev/null 2>&1 || return 1
+    printf '%s\n' "$serial"
+}
+share_rows() {
+    # share_rows: one line per share, "<state>\t<kind>\t<name>\t<file>". kind: link (file is its .meta), server
+    # or home. state: revoked or current from the CA index; unknown when the certificate cannot be identified;
+    # orphan for a link record without its profile, which holds no secret. A file in the SSH user's home that is
+    # not this CA's profile for that name is not a share, so it is not listed.
+    local meta name file home state
+    if [[ -d $LINK_DIR ]]; then
+        for meta in "$LINK_DIR"/*.meta; do
+            [[ -e $meta ]] || continue
+            name=$(awk -F= '$1=="name" {print substr($0, 6); exit}' "$meta")
+            if [[ ! -e ${meta%.meta}.ovpn ]]; then printf 'orphan\tlink\t%s\t%s\n' "$name" "$meta"; continue; fi
+            printf '%s\tlink\t%s\t%s\n' "$(share_state "${meta%.meta}.ovpn" "$name")" "$name" "$meta"
+        done
+    fi
+    for file in "$OUT_DIR"/*.ovpn; do
+        [[ -f $file ]] || continue
+        name=${file##*/}; name=${name%.ovpn}
+        printf '%s\tserver\t%s\t%s\n' "$(share_state "$file" "$name")" "$name" "$file"
+    done
+    home=$(ssh_user_home) || return 0
+    for file in "$home"/*.ovpn; do
+        [[ -f $file ]] || continue
+        name=${file##*/}; name=${name%.ovpn}
+        state=$(share_state "$file" "$name")
+        if [[ $state != unknown ]]; then printf '%s\thome\t%s\t%s\n' "$state" "$name" "$file"; fi
+    done
+}
+share_state() {
+    # share_state <profile> <name>: revoked, current or unknown.
+    local serial state
+    if serial=$(share_serial "$1" "$2") && state=$(index_state_of_serial "$serial"); then
+        if [[ $state == R ]]; then printf 'revoked\n'; else printf 'current\n'; fi
+    else
+        printf 'unknown\n'
+    fi
+}
+share_names() {
+    # share_names <state> [rows]: the names with a share in that state, one per line.
+    local rows=${2-}
+    if [[ -z ${2+set} ]]; then rows=$(share_rows 2>/dev/null) || rows=''; fi
+    awk -F '\t' -v want="$1" '$1==want && $3!="" {print $3}' <<<"$rows" | sort -u
+}
+revoked_share_names() {
+    # A finished revocation leaves no share behind, so one left behind marks an unfinished one.
+    share_names revoked
+}
+drop_share() {
+    # drop_share <kind> <file>: a link goes with all its files, under the lock the link service takes too.
+    if [[ $1 == link ]]; then
+        links_locked rm -f -- "$2" "${2%.meta}.ovpn" "${2%.meta}.url" "${2%.meta}.tmp"
+    else
+        rm -f -- "$2"
+    fi
+}
+finish_revoked_shares() {
+    # Deletes every share whose certificate the CA lists as revoked, and every link record left without its
+    # profile. A share whose certificate cannot be identified stays, and is named. Returns 1 when something could
+    # not be deleted; everything else is still done.
+    local rows state kind name file rc=0
+    rows=$(share_rows) || return 1
+    while IFS=$'\t' read -r state kind name file; do
+        case $state in
+            orphan) drop_share link "$file" || rc=1 ;;
+            revoked)
+                if ! drop_share "$kind" "$file"; then rc=1; continue; fi
+                case $kind in
+                    link) ok "Open link of $(safe_text "$name") ended."; audit "temporary link ended, its certificate is revoked: $name" ;;
+                    server) ok "Server copy deleted: $file"; audit "profile deleted from server: $file" ;;
+                    home) ok "Copy for $DOWNLOAD_SSH_USER deleted: $file"; audit "profile deleted from server: $file" ;;
+                esac ;;
+        esac
+    done <<<"$rows"
+    name=$(share_names unknown "$rows" | join_lines)
+    if [[ -n $name ]]; then
+        warn "A link or file of $(safe_text "$name") holds a certificate this tool cannot identify, so it was kept. Check it, then delete it in Links and files (menu 6)."
+    fi
+    return "$rc"
 }
 prepare_link() {
     # Everything a link needs before the questions about it: python, the address, a port and a certificate.
@@ -2191,15 +2293,18 @@ revoke_and_publish() {
 repair_crl() {
     # Finishes whatever an interrupted revocation left: the index and published files show what is
     # missing, so there is no separate state to get out of step with them.
-    local pending leftovers name path publish=0 rc=0
-    local -a targets=() leftover_names=()
+    local pending leftovers rows name publish=0 rc=0 cleanup=0
+    local -a targets=()
     darban_crl_configured || { warn "server.conf lacks a single 'crl-verify $DARBAN_CRL'; OpenVPN would ignore a CRL. Fix the server first."; return 1; }
     ca_lock || return 1
     pending=$(revocation_pending_names) || { fail 'Could not read the CA index.'; return 1; }
-    leftovers=$(revoked_with_profile) || { fail 'Could not read the CA index.'; return 1; }
+    rows=$(share_rows) || { fail 'Could not read the links and files on the server.'; return 1; }
+    leftovers=$(share_names revoked "$rows")
     if ! darban_verify_crl "$DARBAN_CRL"; then publish=1; fi
     if [[ -n $pending ]]; then publish=1; fi
     if (( ! publish )) && [[ -z $leftovers ]]; then
+        # A link record without its profile holds no secret; it goes without a word.
+        finish_revoked_shares || true
         ok 'The CRL is healthy and no revocation is unfinished. Nothing to repair.'
         return 0
     fi
@@ -2214,25 +2319,26 @@ repair_crl() {
         fi
         audit 'CRL repaired and republished'
     fi
-    if [[ -n $leftovers ]]; then mapfile -t leftover_names <<<"$leftovers"; fi
-    for name in "${leftover_names[@]}"; do
-        path=$OUT_DIR/$name.ovpn
-        if rm -f -- "$path"; then
-            ok "Server copy deleted: $path"
-            audit "profile deleted from server: $path"
-        else
-            warn "Could not delete the server copy: $path"
-        fi
-    done
+    # By certificate, not by name: a link or file of a name issued again belongs to the new certificate and stays.
+    finish_revoked_shares || cleanup=1
     ca_unlock
     # Read into an array first: the prompts in disconnect_revoked must read the terminal, not this list.
+    # A name with a valid certificate again is left alone: its session belongs to the new certificate.
     mapfile -t targets < <(printf '%s\n' "$pending" "$leftovers" | awk 'NF' | sort -u)
-    for name in "${targets[@]}"; do disconnect_revoked "$name"; done
+    for name in "${targets[@]}"; do
+        if [[ $(client_index_status "$name") == V ]] && ! grep -qFx -- "$name" <<<"$pending"; then continue; fi
+        disconnect_revoked "$name"
+    done
     say
+    if (( cleanup )); then
+        fail 'Some links or files could not be deleted; see above. Run the repair again: Maintenance '"$S_CRUMB"' 2, or: sudo darban repair-crl'
+        audit 'revocation cleanup unfinished after repair'
+        return 1
+    fi
     if (( publish )); then ok 'The CRL is repaired.'; else ok 'The unfinished revocation is complete.'; fi
 }
 revoke_client() {
-    local name state client_serial db_serial path pending unknown home_copy rc=0
+    local name state client_serial db_serial path pending unknown home_copy rc=0 links_left=0
     pending=$(revocation_pending_names | join_lines) || pending=''
     if [[ -n $pending ]]; then
         urgent "Revoked but NOT blocked yet: $(safe_text "$pending"). Finish this first: Maintenance $S_CRUMB 2, or: sudo darban repair-crl"
@@ -2279,8 +2385,13 @@ revoke_client() {
     critical_begin
     revoke_and_publish "$name" "$client_serial" || rc=$?
     critical_end
-    remove_links_for "$name"
-    (( rc == 0 )) || return 1
+    # The CA has revoked it either way, so its links go now. If the link service holds their files, everything
+    # else still happens, and the repair removes the links later.
+    remove_links_for "$name" || links_left=1
+    if (( rc != 0 )); then
+        if (( links_left )); then warn 'Its open links could not be removed either; the same repair removes them.'; fi
+        return 1
+    fi
     if path=$(profile_path "$name"); then
         if rm -f -- "$path"; then ok "Server copy deleted: $path"; else warn 'Could not delete the server copy; the revocation still succeeded.'; fi
     fi
@@ -2288,6 +2399,11 @@ revoke_client() {
     ca_unlock
     disconnect_revoked "$name"
     say
+    if (( links_left )); then
+        warn "$name is revoked; link cleanup unfinished. Finish it: Maintenance $S_CRUMB 2, or: sudo darban repair-crl"
+        audit "revocation cleanup unfinished, links still open: $name"
+        return 1
+    fi
     ok "$name is revoked."
 }
 port_listening() {
@@ -3170,7 +3286,7 @@ network_rules_health() {
     fi
 }
 health() {
-    local version state enabled dco port e crl_err host resolved next last value issue exports pending
+    local version state enabled dco port e crl_err host resolved next last value issue exports pending rows
     if [[ -n $SERVER_PROBLEM ]]; then
         group 'Server'
         check bad "$SERVER_PROBLEM"
@@ -3212,8 +3328,11 @@ health() {
     fi
     pending=$(revocation_pending_names 2>/dev/null | join_lines) || pending=''
     if [[ -n $pending ]]; then check bad "Revoked but NOT blocked yet: $(safe_text "$pending") $S_ARROW Maintenance $S_CRUMB 2"; fi
-    pending=$(revoked_with_profile 2>/dev/null | join_lines) || pending=''
-    if [[ -n $pending ]]; then check warn "Revocation unfinished, profile still on server: $(safe_text "$pending") $S_ARROW Maintenance $S_CRUMB 2"; fi
+    rows=$(share_rows 2>/dev/null) || rows=''
+    pending=$(share_names revoked "$rows" | join_lines) || pending=''
+    if [[ -n $pending ]]; then check bad "Revocation unfinished, link or profile still on server: $(safe_text "$pending") $S_ARROW Maintenance $S_CRUMB 2"; fi
+    pending=$(share_names unknown "$rows" | join_lines) || pending=''
+    if [[ -n $pending ]]; then check warn "Link or file with a certificate this tool cannot identify: $(safe_text "$pending") $S_ARROW Links and files (menu 6)"; fi
     if systemctl is-active --quiet darban-crl.timer 2>/dev/null; then
         next=$(systemctl show -p NextElapseUSecRealtime --value darban-crl.timer 2>/dev/null || true)
         check ok "Daily renewal timer active${next:+; next run $next}"
@@ -3317,7 +3436,7 @@ status_block() {
         kv Blocklist "$C_RED$S_BAD problem$C_RESET $S_ARROW details: Maintenance $S_CRUMB 1, repair: Maintenance $S_CRUMB 2"
     fi
     pending=$(revocation_pending_names 2>/dev/null | join_lines) || pending=''
-    leftovers=$(revoked_with_profile 2>/dev/null | join_lines) || leftovers=''
+    leftovers=$(revoked_share_names 2>/dev/null | join_lines) || leftovers=''
     read -r valid revoked expired soon < <(client_stats)
     clients="$valid valid $S_SEP $revoked revoked"
     if (( expired > 0 )); then clients+=" $S_SEP $expired expired"; fi
@@ -3328,7 +3447,7 @@ status_block() {
     {
         if e=$(available_update) && [[ -n $e ]]; then printf '%s\n' "Update available: v$e $S_ARROW Setup $S_CRUMB 2"; fi
         if [[ -n $pending ]]; then printf '%s\n' "Revoked but NOT blocked yet: $(safe_text "$pending") $S_ARROW Maintenance $S_CRUMB 2"; fi
-        if [[ -n $leftovers ]]; then printf '%s\n' "Revocation unfinished, profile still on server: $(safe_text "$leftovers") $S_ARROW Maintenance $S_CRUMB 2"; fi
+        if [[ -n $leftovers ]]; then printf '%s\n' "Revocation unfinished, link or profile still on server: $(safe_text "$leftovers") $S_ARROW Maintenance $S_CRUMB 2"; fi
         if systemctl is-failed --quiet darban-crl.service 2>/dev/null; then printf '%s\n' "Last automatic CRL run FAILED $S_ARROW Maintenance $S_CRUMB 1"; fi
         if ! systemctl is-active --quiet darban-crl.timer 2>/dev/null; then printf '%s\n' "CRL renewal timer is not active $S_ARROW Maintenance $S_CRUMB 1"; fi
         if e=$(cert_end_epoch "$DARBAN_PKI/ca.crt") && (( $(days_until "$e") <= EXPIRY_WARN_DAYS )); then printf '%s\n' "CA certificate expires $(date -u -d "@$e" +%Y-%m-%d)"; fi

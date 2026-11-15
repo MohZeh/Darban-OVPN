@@ -149,6 +149,8 @@ sudo journalctl -u darban-crl.service -n 20 --no-pager
 
 If a certificate is revoked in the CA but the CRL is not published, **that client can still connect**. The menu, the list and the diagnostics name it until this is fixed. After fixing the cause, run **Maintenance › Fix the blocklist** or `sudo darban repair-crl`. It publishes the CRL, removes the leftover profile and handles the active session.
 
+The repair finds what is left by the certificate inside each file, not by the name: an open link, the profile kept on the server, and the copy made for the SSH user. Only those that hold a revoked certificate are deleted, so the links and files of a client created again with the same name stay. A link or file whose certificate cannot be identified, for example a damaged one or one from another CA, is not deleted. The diagnostics name it, a new client with that name cannot be created, and you can delete it yourself in **Links and files**.
+
 ### Restoring an old backup of the CA
 
 Restoring an older `index.txt` could make revoked clients valid again. The tool treats this as an error and refuses to publish a CRL that drops an unexpired revoked certificate, even in the timer and in repair. **Restore the current `index.txt`.** Only if you really want the revocation undone:
