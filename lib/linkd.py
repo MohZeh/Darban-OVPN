@@ -30,7 +30,7 @@ import time
 TOKEN_RE = re.compile(r'^[0-9a-f]{64}$')
 FIELD_RE = re.compile(r'^[a-z][a-z0-9_]{0,31}$')
 KNOWN_FIELDS = ('name', 'expires', 'created', 'downloads')
-EVENT_SCRIPT = 'darban-ovpn-event'
+EVENT_SCRIPT = '/usr/local/libexec/darban-ovpn-event'
 NAME_RE = re.compile(r'^[A-Za-z0-9][A-Za-z0-9._@+-]{0,127}$')
 PATH_RE = re.compile(r'^/l/([0-9a-f]{64})(/file)?$')
 LANG_RE = re.compile(r'^\s*([A-Za-z]{1,8})(?:-[A-Za-z0-9]{1,8})*\s*(?:;\s*q\s*=\s*([0-9.]{1,5}))?\s*$')
@@ -152,15 +152,21 @@ class Store:
             return remaining
 
 
-def events_on(server_conf):
-    """True when server.conf runs darban's connection event script: darban then ends a link at the first connection
-    itself, and this service stays away from the management interface."""
+def events_on(server_conf, script=EVENT_SCRIPT):
+    """True when server.conf runs darban's connection event script, by the same rule darban uses: one
+    client-connect and one client-disconnect line, each with exactly that script. darban then ends a link at the
+    first connection itself, and this service stays away from the management interface. Anything else, such as one
+    of the two lines alone or another path, leaves the link service watching that interface as before."""
     try:
         with open(server_conf, encoding='utf-8', errors='replace') as handle:
             words = [line.split() for line in handle]
     except OSError:
         return False
-    return any(len(w) == 2 and w[0] == 'client-connect' and os.path.basename(w[1]) == EVENT_SCRIPT for w in words)
+    for directive in ('client-connect', 'client-disconnect'):
+        lines = [w for w in words if w[:1] == [directive]]
+        if len(lines) != 1 or lines[0] != [directive, script]:
+            return False
+    return True
 
 
 def management_address(server_conf):
@@ -447,6 +453,7 @@ def main():
     parser.add_argument('--server-conf', default='/etc/openvpn/server/server.conf')
     parser.add_argument('--idle-exit', type=int, default=60)
     parser.add_argument('--interval', type=float, default=10)
+    parser.add_argument('--event-script', default=EVENT_SCRIPT)
     args = parser.parse_args()
 
     store = Store(args.dir)
@@ -454,7 +461,7 @@ def main():
     server.store = store
     server.context = tls_context(args.cert, args.key)
     reload_on_hangup(server, args.cert, args.key, os.path.join(args.dir, '.reloadable'))
-    management = None if events_on(args.server_conf) else management_address(args.server_conf)
+    management = None if events_on(args.server_conf, args.event_script) else management_address(args.server_conf)
     threading.Thread(target=watch, args=(server, store, args.idle_exit, args.interval, management), daemon=True).start()
     print(f'listening on TCP {args.port}', flush=True)
     server.serve_forever()

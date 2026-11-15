@@ -241,11 +241,9 @@ took=$(wait_session_end "$before" 150) || { echo 'FAIL: a new session of the sam
 echo "T67: the same name connecting again: the old session's end recorded after ${took} s"
 before=$(session_end)
 systemctl restart "$UNIT"
-if took=$(wait_session_end "$before" 30); then
-    echo "T67: server restarted: the end recorded after ${took} s"
-else
-    echo 'T67: server restarted: no end of the session was recorded within 30 s'
-fi
+# OpenVPN closes every session when it stops, so the end is recorded at once (PR 0 and round 17).
+took=$(wait_session_end "$before" 30) || { echo 'FAIL: the end of a session at a server restart was not recorded in 30 seconds.'; exit 1; }
+echo "T67: server restarted: the end recorded after ${took} s"
 disconnect
 journalctl -u "$UNIT" --since '-10min' --no-pager | grep -Ei 'client-disconnect|Inactivity timeout|SIGTERM|exit notification|soft,|restart' | tail -n 12 || true
 echo 'PASS: the end of every session was recorded, a killed one within 130 seconds.'
