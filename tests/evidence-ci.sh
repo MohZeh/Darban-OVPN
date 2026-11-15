@@ -63,7 +63,7 @@ open(out, 'w').write(text)
 PY
 }
 easyrsa() { env EASYRSA_PKI="$PKI" EASYRSA_BATCH=1 "$EASYRSA" "$@" </dev/null >>"$LOG/easyrsa.log" 2>&1; }
-publish_crl() { install -o root -g root -m "${1:-644}" "$PKI/crl.pem" /etc/openvpn/server/crl.pem; }
+publish_crl() { install -o root -g root -m 644 "$PKI/crl.pem" /etc/openvpn/server/crl.pem; }
 
 # ---------- 1. versions ----------
 section 'Versions and system facts'
