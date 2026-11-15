@@ -273,7 +273,17 @@ echo 'PASS: 500 events at once and real connections: none lost, the queue emptie
 # T28, T45, T59 and C.15.7: without its mount, or before its folders are ready, or when it is full, the script
 # writes nothing on /run itself, exits 0, and the client connects; Diagnostics say so.
 systemctl stop 'run-darban\x2devents.mount'
-[[ -z $(findmnt -n "$EVENTS") ]]
+for attempt in $(seq 1 10); do
+    if ! mountpoint -q "$EVENTS"; then break; fi
+    sleep 1
+done
+if mountpoint -q "$EVENTS"; then
+    echo 'FAIL: the queue is still mounted after its unit stopped:'
+    findmnt -n "$EVENTS" || true
+    systemctl status 'run-darban\x2devents.mount' darban-events-setup.service darban-events.path --no-pager || true
+    systemctl list-dependencies --reverse 'run-darban\x2devents.mount' --no-pager || true
+    exit 1
+fi
 runuser -u nobody -- env -i script_type=client-connect common_name=accept1 "$EVENT_SCRIPT"
 [[ -z $(ls -A "$EVENTS" 2>/dev/null) ]]
 connect "$PROFILE" "$LOG/no-mount.log"; disconnect
