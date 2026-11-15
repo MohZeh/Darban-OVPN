@@ -28,6 +28,7 @@ export DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=l
 FAILED=()
 KEPT=()
 KEPT_FILES=''
+TO_PURGE=()
 try() { "$@" || FAILED+=("$*"); }
 recorded() { awk -v kind="$1" '$1==kind && $2 ~ /^[a-z0-9][a-z0-9+.:-]+$/ {print $2}' "$MARKER" | sort -u; }
 base_names() { sed 's/:.*//' | sort -u; }
@@ -60,15 +61,16 @@ purge_exact() { apt_exact purge "$@"; }
 CERTBOT_PACKAGES='certbot|python3-certbot'
 remove_kept_certbot() {
     # remove_kept_certbot <package>...: when the certificate is kept, certbot's packages are removed, not purged,
-    # so /etc/letsencrypt stays. Prints the other packages, for a purge as usual.
-    local -a keep=() rest=()
+    # so /etc/letsencrypt stays. The other packages land in TO_PURGE, for a purge as usual. It runs in this shell,
+    # not in a subshell, so what apt_exact adds to FAILED and KEPT reaches the summary.
+    local -a keep=()
     local pkg
+    TO_PURGE=()
     for pkg in "$@"; do
         [[ -n $pkg ]] || continue
-        if (( KEEP_CERT )) && [[ ${pkg%%:*} =~ ^($CERTBOT_PACKAGES)$ ]]; then keep+=("$pkg"); else rest+=("$pkg"); fi
+        if (( KEEP_CERT )) && [[ ${pkg%%:*} =~ ^($CERTBOT_PACKAGES)$ ]]; then keep+=("$pkg"); else TO_PURGE+=("$pkg"); fi
     done
     apt_exact remove "${keep[@]}" >&2
-    if (( ${#rest[@]} > 0 )); then printf '%s\n' "${rest[@]}"; fi
 }
 
 ALLOW=0 BACKUP=0 KERNEL=0 KEEP_CERT=0
@@ -166,13 +168,13 @@ if grep -qx 'snap certbot' "$MARKER" && command -v snap >/dev/null; then try sna
 if [[ $certbot_venv == /opt/darban-certbot ]]; then try rm -rf -- "$certbot_venv"; fi
 
 echo 'Removing packages this setup added...'
-mapfile -t to_purge < <(remove_kept_certbot "${added_packages[@]}")
-purge_exact "${to_purge[@]}"
+remove_kept_certbot "${added_packages[@]}"
+purge_exact "${TO_PURGE[@]}"
 if (( ${#added_deps[@]} > 0 )); then
     # Only dependencies nothing else uses any more, and never another program's orphans.
     mapfile -t orphans < <(apt-get -s autoremove | awk '$1=="Remv" {print $2}' | base_names | grep -Fx -f <(printf '%s\n' "${added_deps[@]}" | base_names) || true)
-    mapfile -t to_purge < <(remove_kept_certbot "${orphans[@]}")
-    purge_exact "${to_purge[@]}"
+    remove_kept_certbot "${orphans[@]}"
+    purge_exact "${TO_PURGE[@]}"
 fi
 if (( KERNEL )); then
     purge_exact "${added_kernel[@]}"

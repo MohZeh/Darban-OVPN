@@ -669,10 +669,12 @@ STUB
     cat > "$E/bin/apt-get" <<'STUB'
 #!/usr/bin/env bash
 echo "apt-get $*" >> "$STUB_LOG"
+# FAIL_APT_REMOVE: a real "remove" fails, as when dpkg is broken.
+if [[ -n ${FAIL_APT_REMOVE:-} && " $* " != *" -s "* && " $* " == *" remove "* ]]; then exit 100; fi
 if [[ " $* " == *" -s "* ]]; then
     case " $* " in
       *" purge "*) on=0; for a; do if (( on )); then echo "Remv $a"; fi; [[ $a == purge ]] && on=1; done; if [[ -n ${REMV_EXTRA:-} ]]; then echo "Remv $REMV_EXTRA"; fi ;;
-      *" remove "*) on=0; for a; do if (( on )); then echo "Remv $a"; fi; [[ $a == remove ]] && on=1; done ;;
+      *" remove "*) on=0; for a; do if (( on )); then echo "Remv $a"; fi; [[ $a == remove ]] && on=1; done; if [[ -n ${REMV_EXTRA_REMOVE:-} ]]; then echo "Remv $REMV_EXTRA_REMOVE"; fi ;;
       *" autoremove "*) for a in ${AUTOREMOVE:-}; do echo "Remv $a"; done ;;
       *" install openvpn "*) for a in openvpn easy-rsa socat nftables liblzo2-2; do echo "Inst $a"; done; if [[ -n ${APT_UPGRADE:-} ]]; then echo "Inst dep-$APT_UPGRADE [1.0] (2.0 Ubuntu [amd64])"; fi ;;
       *" install certbot "*) echo 'Inst certbot'; echo 'Inst python3-certbot' ;;
@@ -3365,6 +3367,168 @@ test_repo_checks_find_problems() {
     chmod +x "$dir/setup/a.sh"
     printf 'a\r\nb\r\n' >"$dir/docs/en/usage.md"
     out=$(check); rc_not0 'CRLF line endings fail' "$?"; has 'it names the file' 'usage.md: has CRLF' "$out"
+}
+
+# ---------- PR 1: revocation cleanup by certificate, and Remove everything that reports every failure ----------
+plant_link() {
+    # plant_link <name> [profile]: a link record as the tool writes one, without the link service. Prints its key.
+    local key
+    key=$(openssl rand -hex 32)
+    mkdir -p "$E/links"
+    printf 'name=%s\nexpires=%s\ncreated=%s\ndownloads=0\n' "$1" "$(( $(date -u +%s) + 3600 ))" "$(date -u +%s)" > "$E/links/$key.meta"
+    if [[ -n ${2:-} ]]; then cp "$2" "$E/links/$key.ovpn"; fi
+    printf '%s\n' "$key"
+}
+with_cert() {
+    # with_cert <profile> <pem file>: the profile with its <cert> block replaced by the file.
+    awk -v c="$2" 'BEGIN {while ((getline l < c) > 0) cert = cert l "\n"} /^<\/cert>$/ {skip = 0} !skip {print} /^<cert>$/ {printf "%s", cert; skip = 1}' "$1"
+}
+ca_before_links() {
+    # The CA lock (fd 9) is asked for before the lock of the link files (fd 8).
+    awk '/^flock (-n|-w [0-9]+) 9$/ && !ca {ca = NR} /^flock -w 10 8$/ && !ln {ln = NR} END {exit !(ca && ln && ca < ln)}' "$STUB_LOG"
+}
+
+test_revocation_finishes_even_when_the_link_service_holds_the_links() {
+    local out rc key key2
+    menu '5\nalice\n2\n0\n' >/dev/null
+    cp "$E/clients/alice.ovpn" "$E/alice-1.ovpn"
+    key=$(plant_link alice "$E/alice-1.ovpn")
+    : > "$STUB_LOG"
+    out=$(printf '4\nalice\nalice\n0\n' | FLOCK_FAIL='-w 10 8' bash "$E/manager.sh" 2>&1)
+    has 'the CA revokes it' 'Marked revoked in the CA index' "$out"
+    has 'the CRL is published all the same' 'New CRL published to OpenVPN and verified' "$out"
+    has 'it says the link cleanup is unfinished' 'alice is revoked; link cleanup unfinished' "$out"
+    has 'and names the next step' 'sudo darban repair-crl' "$out"
+    lacks 'it does not say "try again"' 'try again' "$out"
+    lacks 'no plain success' 'alice is revoked.' "$out"
+    ok_if 'the server copy is deleted all the same' test ! -e "$E/clients/alice.ovpn"
+    has 'the session step runs all the same' 'cannot start new connections' "$out"
+    ok_if 'the link is still there' test -e "$E/links/$key.ovpn"
+    ca_before_links; rc_is 'revoke takes the CA lock before the link lock' 0 "$?"
+    grep -q 'revocation cleanup unfinished, links still open: alice' "$STUB_LOG"; rc_is 'it is audited' 0 "$?"
+
+    out=$(mgr status)
+    has 'the diagnostics name it' 'Revocation unfinished, link or profile still on server: alice' "$out"
+    has 'the menu header names it' 'link or profile still on server: alice' "$(menu '0\n')"
+    out=$(menu '1\nalice\n\n0\n')
+    has 'a new certificate for the name is refused' 'its revocation is unfinished' "$out"
+    ok_if 'nothing is issued' test ! -e "$PKI/issued/alice.crt"
+
+    : > "$STUB_LOG"
+    out=$(mgr repair-crl); rc=$?
+    rc_is 'the repair finishes' 0 "$rc"
+    has 'it ends the link' 'Open link of alice ended.' "$out"
+    ok_if 'the link is gone, with all its files' test -z "$(find "$E/links" -name "$key.*")"
+    ca_before_links; rc_is 'the repair takes the CA lock before the link lock' 0 "$?"
+    lacks 'the diagnostics are clear' 'link or profile still on server' "$(mgr status)"
+    has 'a second repair has nothing to do' 'Nothing to repair' "$(mgr repair-crl)"
+
+    # The name again: a link of the new certificate stays, a link of the old one goes.
+    out=$(menu '1\nalice\n0\n')
+    has 'the name can be used again' 'Client "alice" created and verified' "$out"
+    key2=$(plant_link alice "$E/clients/alice.ovpn")
+    key=$(plant_link alice "$E/alice-1.ovpn")
+    out=$(mgr repair-crl); rc=$?
+    rc_is 'the repair finishes again' 0 "$rc"
+    ok_if 'the link of the revoked certificate goes' test ! -e "$E/links/$key.meta"
+    ok_if 'the link of the new certificate stays' test -e "$E/links/$key2.ovpn"
+    ok_if 'the file of the new certificate stays' test -s "$E/clients/alice.ovpn"
+    lacks 'the session of the new certificate is not ended' 'Disconnecting any active session of alice' "$out"
+    has 'and a second repair has nothing to do' 'Nothing to repair' "$(mgr repair-crl)"
+    ok_if 'the new link is still there' test -e "$E/links/$key2.ovpn"
+}
+
+test_a_share_whose_certificate_is_unknown_is_kept() {
+    local out rc dir=$E/other kdamaged kother kbob korphan krevoked kexpired
+    menu '1\nbob\n0\n' >/dev/null
+    menu '5\nalice\n2\n0\n' >/dev/null
+    cp "$E/clients/alice.ovpn" "$E/alice-1.ovpn"
+    revoke_menu alice >/dev/null
+    # Left behind by an earlier version, or put there by hand. The records hold no serial, as in rc.10.
+    mkdir -p "$dir"
+    echo garbage > "$dir/garbage.pem"
+    with_cert "$E/alice-1.ovpn" "$dir/garbage.pem" > "$dir/damaged.ovpn"
+    openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes -keyout "$dir/ca.key" -out "$dir/ca.crt" -subj /CN=OtherCA -days 30 2>/dev/null
+    openssl req -new -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes -keyout "$dir/alice.key" -out "$dir/alice.csr" -subj /CN=alice 2>/dev/null
+    openssl x509 -req -in "$dir/alice.csr" -CA "$dir/ca.crt" -CAkey "$dir/ca.key" -CAcreateserial -out "$dir/alice.crt" -days 30 2>/dev/null
+    with_cert "$E/alice-1.ovpn" "$dir/alice.crt" > "$dir/other-ca.ovpn"
+    kdamaged=$(plant_link alice "$dir/damaged.ovpn")
+    kother=$(plant_link alice "$dir/other-ca.ovpn")
+    kbob=$(plant_link alice "$E/clients/bob.ovpn")
+    korphan=$(plant_link alice)
+    echo 'https://example.invalid/l/x' > "$E/links/$korphan.url"
+    krevoked=$(plant_link alice "$E/alice-1.ovpn")
+
+    # A certificate of this CA that expired, then was revoked: it is still known by its serial.
+    cat > "$dir/ca.cnf" <<CNF
+[ca]
+default_ca = d
+[d]
+dir = $PKI
+database = $PKI/index.txt
+new_certs_dir = $dir
+certificate = $PKI/ca.crt
+private_key = $PKI/private/ca.key
+serial = $PKI/serial
+default_md = sha256
+policy = p
+unique_subject = no
+[p]
+commonName = supplied
+CNF
+    openssl req -new -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes -keyout "$dir/carol.key" -out "$dir/carol.csr" -subj /CN=carol 2>/dev/null
+    openssl ca -batch -config "$dir/ca.cnf" -in "$dir/carol.csr" -out "$dir/carol.crt" -notext -startdate 20200101000000Z -enddate 20200201000000Z 2>/dev/null
+    openssl ca -batch -config "$dir/ca.cnf" -revoke "$dir/carol.crt" 2>/dev/null
+    with_cert "$E/alice-1.ovpn" "$dir/carol.crt" > "$dir/carol.ovpn"
+    kexpired=$(plant_link carol "$dir/carol.ovpn")
+
+    out=$(mgr status)
+    has 'the diagnostics name the revoked one' 'link or profile still on server: alice' "$out"
+    has 'and the unknown ones' 'Link or file with a certificate this tool cannot identify: alice' "$out"
+    out=$(menu '1\nalice\n\n0\n')
+    has 'the name stays blocked' 'its revocation is unfinished' "$out"
+
+    out=$(mgr repair-crl); rc=$?
+    rc_is 'the repair finishes' 0 "$rc"
+    ok_if 'a link of the revoked certificate goes' test ! -e "$E/links/$krevoked.meta"
+    ok_if 'so does one whose certificate expired before it was revoked' test ! -e "$E/links/$kexpired.meta"
+    ok_if 'a link record without its profile goes, with its address' test -z "$(find "$E/links" -name "$korphan.*")"
+    ok_if 'a damaged certificate stays' test -e "$E/links/$kdamaged.ovpn"
+    ok_if 'one from another CA stays' test -e "$E/links/$kother.ovpn"
+    ok_if 'one for another name stays' test -e "$E/links/$kbob.ovpn"
+    has 'the repair names what it kept' 'holds a certificate this tool cannot identify, so it was kept' "$out"
+    ok_if 'the valid client keeps its file' test -s "$E/clients/bob.ovpn"
+
+    out=$(menu '1\nalice\n\n0\n')
+    has 'the name stays blocked while one is unknown' 'cannot identify; check it, then delete it in Links and files' "$out"
+    ok_if 'nothing is issued' test ! -e "$PKI/issued/alice.crt"
+    # Cancelled by hand from menu 6, one at a time: the first row is always a link while one is left.
+    menu '6\n1\n1\n0\n' >/dev/null; menu '6\n1\n1\n0\n' >/dev/null; menu '6\n1\n1\n0\n' >/dev/null
+    ok_if 'menu 6 removes them' test -z "$(find "$E/links" -name '*.meta')"
+    lacks 'the diagnostics are clear' 'cannot identify' "$(mgr status)"
+    out=$(menu '1\nalice\n0\n')
+    has 'then the name can be used again' 'Client "alice" created and verified' "$out"
+}
+
+test_remove_everything_reports_a_failed_certbot_removal() {
+    # With the certificate kept, certbot is removed rather than purged. Each failure of that must reach the summary.
+    local out rc
+    built_server
+    printf 'package certbot\ndep python3-certbot\n' >> "$E/cfg/.server-setup-started"
+    : > "$STUB_LOG"
+    out=$(FAIL_APT_REMOVE=1 AUTOREMOVE='python3-certbot' bash "$E/lib/remove-server.sh" --yes --keep-certificate 2>&1 </dev/null); rc=$?
+    rc_not0 'the removal reports the failure' "$rc"
+    has 'it says steps failed' 'Some steps failed' "$out"
+    has 'it names the failed removal of certbot' 'remove certbot' "$out"
+    has 'and of its library' 'remove python3-certbot' "$out"
+    ok_if 'the record of the setup stays, so it can run again' test -s "$E/cfg/.server-setup-started"
+
+    built_server
+    printf 'package certbot\n' >> "$E/cfg/.server-setup-started"
+    out=$(REMV_EXTRA_REMOVE=some-other-tool bash "$E/lib/remove-server.sh" --yes --keep-certificate 2>&1 </dev/null); rc=$?
+    rc_is 'a package kept for another program is no failure' 0 "$rc"
+    has 'it says what was kept' 'Kept because other software depends on them' "$out"
+    has 'and why' 'certbot (removing them would also remove: some-other-tool)' "$out"
 }
 
 mapfile -t TESTS < <(declare -F | awk '$3 ~ /^test_/ {print $3}' | sort)

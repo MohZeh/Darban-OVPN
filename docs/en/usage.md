@@ -47,6 +47,8 @@ For example, after a new phone or a changed server address:
 
 The old profile can no longer connect, on any device. The tool also ends the open connection of that client alone, while other users stay connected. If ending that one connection is not possible, for example on a server this tool did not set up, the tool says so and asks whether to restart OpenVPN, which drops everyone for a few seconds. If you answer No, the open connection can last up to an hour. This cannot be undone, but you can later create a new client with the same name.
 
+Revoking also ends the open links of that client and deletes the copies of its profile kept on the server. If the link service holds the link files at that moment, the revocation still finishes and the tool says `link cleanup unfinished`. Then run **Maintenance › Fix the blocklist**, or `sudo darban repair-crl`. Until then, the menu and the diagnostics name the client, and a new client with that name cannot be created.
+
 ## See a link again, cancel it, or delete a file left on the server
 
 Press `6` **Links and files**. It lists the open links, with the time left and whether the file was downloaded, and then the profile files kept on the server. Choose one, and the tool shows what you can do with it:
