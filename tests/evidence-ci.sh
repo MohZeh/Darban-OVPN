@@ -46,7 +46,9 @@ connect() {
     local attempt
     disconnect
     rm -f "$PIDFILE" "$2"
-    openvpn --config "$1" --route-nopull --dev tun9 --daemon --writepid "$PIDFILE" --log "$2" --verb 3 </dev/null >/dev/null 2>&1
+    # explicit-exit-notify: a stopped client tells the server at once, so client-disconnect runs now, not after
+    # the keepalive timeout.
+    openvpn --config "$1" --route-nopull --dev tun9 --explicit-exit-notify 2 --daemon --writepid "$PIDFILE" --log "$2" --verb 3 </dev/null >/dev/null 2>&1
     for attempt in $(seq 1 15); do
         if grep -q 'Initialization Sequence Completed' "$2" 2>/dev/null; then echo connected; return 0; fi
         if grep -q 'AUTH_FAILED\|TLS Error\|VERIFY ERROR' "$2" 2>/dev/null; then break; fi
@@ -182,7 +184,11 @@ rm -f "$ENVDIR"/*.env
 connect "$LOG/alice.ovpn" "$LOG/c2.log" >/dev/null
 systemctl stop "$UNIT"
 sleep 2
-record 'Server stop: client-disconnect ran' "$([[ -n $(compgen -G "$ENVDIR/client-disconnect.*.env") ]] && echo yes || echo no)"
+for f in "$ENVDIR"/client-disconnect.*.env; do
+    [[ -e $f ]] || continue
+    record 'Server stop: client-disconnect' "$(grep -vE '^(IV_PLAT|IV_VER)=<unset>$' "$f" | tr '\n' ' ')"
+done
+[[ -n $(compgen -G "$ENVDIR/client-disconnect.*.env") ]] || record 'Server stop: client-disconnect' 'did not run'
 disconnect
 rm -f "$ENVDIR"/*.env
 systemctl start "$UNIT"; sleep 2
@@ -287,11 +293,21 @@ if command -v faketime >/dev/null; then
 else
     record 'Expired CRL' 'skipped: faketime not available'
 fi
+# OpenVPN keeps the last CRL it loaded; one connection with the good CRL first, so "missing" is measured against
+# a good CRL in memory, not the expired one.
+crl_case 'Valid CRL again (loads it)'
 mv /etc/openvpn/server/crl.pem "$LOG/crl.moved"
-crl_case 'Missing CRL'
+crl_case 'Missing CRL, a good one loaded before'
+restart_server || true
+record 'Missing CRL at OpenVPN start: service active' "$(systemctl is-active "$UNIT") / server: $(server_says 15 'CRL|crl')"
+crl_case 'Missing CRL since OpenVPN started'
 install -o root -g root -m 600 "$LOG/crl.moved" /etc/openvpn/server/crl.pem
 crl_case 'CRL unreadable by nobody (600 root)'
+restart_server || true
+record 'Unreadable CRL at OpenVPN start: service active' "$(systemctl is-active "$UNIT")"
+crl_case 'CRL unreadable since OpenVPN started'
 publish_crl
+restart_server || true
 record 'Diagnostics after restoring the CRL' "$(darban status 2>&1 | grep -iE 'CRL' | head -n 2 | tr -s ' ')"
 
 # ---------- 8. systemd.path, a separate tmpfs and the claim by rename ----------
@@ -349,6 +365,38 @@ record 'One event: left in new/, claimed into work/, worker runs' "$(find $Q/new
 for i in $(seq 1 50); do enqueue "burst$i"; done
 sleep 3
 record '50 events at once: left in new/, in work/, worker runs, path state' "$(find $Q/new -mindepth 1 | wc -l) / $(find $Q/work -mindepth 1 | wc -l) / $(grep -c run /var/tmp/darban-evidence-worker.log) / $(systemctl is-active darban-evidence.path)"
+# The fix to try: the worker drains until new/ is empty, and its service has no start limit.
+cat >/usr/local/libexec/darban-evidence-worker <<EOF
+#!/bin/bash
+# Evidence only: drains the queue until it is empty, claiming each file under a name root chooses.
+n=0
+while :; do
+    moved=0
+    for f in $Q/new/*; do
+        [[ -e \$f || -L \$f ]] || continue
+        n=\$((n + 1)); moved=1
+        mv -T -- "\$f" "$Q/work/\$\$-\$n"
+    done
+    (( moved )) || break
+done
+echo "run moved=\$n" >>/var/tmp/darban-evidence-worker.log
+EOF
+cat >/etc/systemd/system/darban-evidence-worker.service <<'EOF'
+[Unit]
+StartLimitIntervalSec=0
+[Service]
+Type=oneshot
+ExecStart=/usr/local/libexec/darban-evidence-worker
+EOF
+systemctl daemon-reload
+systemctl reset-failed darban-evidence.path darban-evidence-worker.service 2>/dev/null || true
+systemctl start darban-evidence.path
+sleep 2
+rm -f "$Q"/work/*
+: >/var/tmp/darban-evidence-worker.log
+for i in $(seq 1 200); do enqueue "drain$i"; done
+sleep 5
+record 'Drain loop, no start limit: 200 events, left in new/, in work/, worker runs, path state' "$(find $Q/new -mindepth 1 | wc -l) / $(find $Q/work -mindepth 1 | wc -l) / $(grep -c run /var/tmp/darban-evidence-worker.log) / $(systemctl is-active darban-evidence.path)"
 # W01: what a rename does when the destination exists.
 runuser -u nobody -- bash -c "printf a >$Q/tmp/x"
 printf b >"$Q/work/x"
