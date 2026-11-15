@@ -3765,7 +3765,6 @@ test_uninstall_keeps_the_certificate_and_removes_only_this_hook() {
     has 'the kept certificate is used' "Links use the Let's Encrypt certificate this server got earlier" "$out"
     grep -qx "renew_hook = $E/sbin/darban reload-links" "$conf"; rc_is 'using it puts this tool'"'"'s hook in its renewal file' 0 "$?"
     menu '6\n1\n2\n0\n' >/dev/null
-    stop_links_stub
     cp "$other" "$E/other.before"
 
     out=$(bash "$E/lib/uninstall.sh" --yes 2>&1 </dev/null); rc_is 'uninstall succeeds' 0 "$?"
@@ -3777,8 +3776,8 @@ test_uninstall_keeps_the_certificate_and_removes_only_this_hook() {
     has 'and how to delete it' 'sudo certbot delete --cert-name darban-ovpn-links' "$out"
     lacks 'no failure is reported' 'could not remove' "$out"
 
-    # Installed again: the next link that uses the certificate gives the hook back.
-    start_links_stub
+    # Installed again: the next link that uses the certificate gives the hook back. The stand-in link service
+    # is started once per test: a second start would make its systemctl call itself.
     menu '5\nfirst\n1\n1\n0\n' >/dev/null
     grep -qx "renew_hook = $E/sbin/darban reload-links" "$conf"; rc_is 'the hook comes back' 0 "$?"
     menu '6\n1\n2\n0\n' >/dev/null
