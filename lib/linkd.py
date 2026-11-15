@@ -3,10 +3,12 @@
 
 A link file is <sha256 of token>.meta plus <same>.ovpn in the store directory, so this service finds a link
 without keeping its token. darban keeps the whole address in <same>.url, readable by root only, so it can show
-a link again; this service never reads that file, and removes it with the link. A link works until the client it was made for connects to the VPN for the first time, as this
-service sees it in OpenVPN's management interface, or until it expires, whichever comes first. Without that
-interface, or when it misses a short connection, the link lasts until it expires. Until then the page and the file can be opened again, so a mistake on the
-phone costs nothing. Opening the page never uses anything up: messengers fetch links for their previews.
+a link again; this service never reads that file, and removes it with the link. A link works until the client it
+was made for connects to the VPN for the first time, or until it expires, whichever comes first. With connection
+events on, darban sees that connection and ends the link itself. Without them, this service looks in OpenVPN's
+management interface; without that interface either, or when it misses a short connection, the link lasts until
+it expires. Until then the page and the file can be opened again, so a mistake on the phone costs nothing.
+Opening the page never uses anything up: messengers fetch links for their previews.
 Standard library only. The process ends by itself once no link is left. SIGHUP reads the certificate again:
 new connections get the new one, and a download in progress finishes on the old one.
 """
@@ -26,6 +28,9 @@ import threading
 import time
 
 TOKEN_RE = re.compile(r'^[0-9a-f]{64}$')
+FIELD_RE = re.compile(r'^[a-z][a-z0-9_]{0,31}$')
+KNOWN_FIELDS = ('name', 'expires', 'created', 'downloads')
+EVENT_SCRIPT = 'darban-ovpn-event'
 NAME_RE = re.compile(r'^[A-Za-z0-9][A-Za-z0-9._@+-]{0,127}$')
 PATH_RE = re.compile(r'^/l/([0-9a-f]{64})(/file)?$')
 LANG_RE = re.compile(r'^\s*([A-Za-z]{1,8})(?:-[A-Za-z0-9]{1,8})*\s*(?:;\s*q\s*=\s*([0-9.]{1,5}))?\s*$')
@@ -70,10 +75,15 @@ class Store:
         return meta
 
     def _write(self, key, meta):
+        """Writes the record back with every field it had: darban adds fields this version may not know, such as
+        when a link was made by a clock NTP cannot move, and a download must not lose them."""
         temp = self._path(key, '.tmp')
         with open(os.open(temp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600), 'w', encoding='ascii') as handle:
-            for field in ('name', 'expires', 'created', 'downloads'):
+            for field in KNOWN_FIELDS:
                 handle.write(f'{field}={meta[field]}\n')
+            for field, value in meta.items():
+                if field not in KNOWN_FIELDS and FIELD_RE.match(field) and '\n' not in str(value):
+                    handle.write(f'{field}={value}\n')
         os.replace(temp, self._path(key, '.meta'))
 
     def _drop(self, key):
@@ -140,6 +150,17 @@ class Store:
                 else:
                     self._drop(key)
             return remaining
+
+
+def events_on(server_conf):
+    """True when server.conf runs darban's connection event script: darban then ends a link at the first connection
+    itself, and this service stays away from the management interface."""
+    try:
+        with open(server_conf, encoding='utf-8', errors='replace') as handle:
+            words = [line.split() for line in handle]
+    except OSError:
+        return False
+    return any(len(w) == 2 and w[0] == 'client-connect' and os.path.basename(w[1]) == EVENT_SCRIPT for w in words)
 
 
 def management_address(server_conf):
@@ -433,7 +454,7 @@ def main():
     server.store = store
     server.context = tls_context(args.cert, args.key)
     reload_on_hangup(server, args.cert, args.key, os.path.join(args.dir, '.reloadable'))
-    management = management_address(args.server_conf)
+    management = None if events_on(args.server_conf) else management_address(args.server_conf)
     threading.Thread(target=watch, args=(server, store, args.idle_exit, args.interval, management), daemon=True).start()
     print(f'listening on TCP {args.port}', flush=True)
     server.serve_forever()

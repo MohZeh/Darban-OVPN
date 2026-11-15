@@ -1,0 +1,15 @@
+[Unit]
+Description=Darban OVPN connection event folders
+# The folders and the .mounted mark are made inside the tmpfs, never on /run itself: without the mount this
+# does not run, and the event script, which needs the mark, writes nothing.
+RequiresMountsFor=/run/darban-events
+ConditionPathIsMountPoint=/run/darban-events
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/darban events-setup
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

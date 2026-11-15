@@ -963,9 +963,11 @@ install_removal_scripts() {
         -e "s#^MODULES_FILE=.*#MODULES_FILE=$root/modules/darban.conf#" -e "s#^NAT_UNIT=.*#NAT_UNIT=$root/units/nat.service#" \
         -e "s#^BACKUP_DIR=.*#BACKUP_DIR=$E/backups#" -e "s#^TOOL_BACKUPS=.*#TOOL_BACKUPS=$E/tool-backups#" \
         -e "s#^SETUP_LOG=.*#SETUP_LOG=$E/setup.log#" -e "s#^LOCK_FILE=.*#LOCK_FILE=$E/run/lock#" \
-        -e "s#^CERT_LOG=.*#CERT_LOG=$E/varlib/link-certificates.log#" "$REPO/setup/remove-server.sh" > "$E/lib/remove-server.sh"
+        -e "s#^CERT_LOG=.*#CERT_LOG=$E/varlib/link-certificates.log#" -e "s#^EVENT_SCRIPT=.*#EVENT_SCRIPT=$E/libexec/darban-ovpn-event#" \
+        -e "s#^LEDGER_DIR=.*#LEDGER_DIR=$E/varlib/clients#" "$REPO/setup/remove-server.sh" > "$E/lib/remove-server.sh"
     sed -e "s#^LIB=.*#LIB=$E/fake-lib#" -e "s#^SBIN=.*#SBIN=$E/fake-sbin#" -e "s#^UNITS=.*#UNITS=$E/fake-units#" \
         -e "s#^CONFIG_DIR=.*#CONFIG_DIR=$E/cfg#" -e "s#^LE_DIR=.*#LE_DIR=$E/le#" -e "s#^RENEW_HOOK=.*#RENEW_HOOK='$E/sbin/darban reload-links'#" \
+        -e "s#^EVENT_SCRIPT=.*#EVENT_SCRIPT=$E/libexec/darban-ovpn-event#" \
         -e 's/^\[\[ \$EUID == 0 \]\] .*/:/' "$REPO/setup/uninstall.sh" > "$E/lib/uninstall.sh"
 }
 built_server() {
@@ -979,6 +981,8 @@ built_server() {
 test_remove_everything_removes_only_what_setup_added() {
     local out rc log
     built_server
+    # Connection events: their script, their units and the record of when each client was seen go too.
+    mkdir -p "$E/varlib/clients"; echo 'first_seen=1' > "$E/varlib/clients/first"; : > "$E/fake-units/darban-events.path"
     : > "$STUB_LOG"
     echo 'other tool data' > "$E/unrelated"
 
@@ -996,7 +1000,7 @@ test_remove_everything_removes_only_what_setup_added() {
     lacks 'a package that was already there stays (any order)' 'socat nftables' "$log"
     if grep -q 'autoremove$' <<<"$(grep -v -- ' -s ' <<<"$log")"; then result 0 'real autoremove is never run'; else result 1 'real autoremove is never run'; fi
     lacks 'the kernel stays unless asked' 'purge linux-' "$log"
-    for path in "$PKI" "$E/server" "$E/clients" "$E/cfg" "$SETUP_ROOT/sources/openvpn.list" "$SETUP_ROOT/keyrings/key.asc" "$SETUP_ROOT/sysctl/darban.conf" "$SETUP_ROOT/modules/darban.conf" "$SETUP_ROOT/units/nat.service" "$E/fake-sbin/darban" "$E/fake-units/darban-crl.timer" "$E/tool-backups"; do
+    for path in "$PKI" "$E/server" "$E/clients" "$E/cfg" "$SETUP_ROOT/sources/openvpn.list" "$SETUP_ROOT/keyrings/key.asc" "$SETUP_ROOT/sysctl/darban.conf" "$SETUP_ROOT/modules/darban.conf" "$SETUP_ROOT/units/nat.service" "$E/fake-sbin/darban" "$E/fake-units/darban-crl.timer" "$E/tool-backups" "$E/libexec/darban-ovpn-event" "$E/varlib/clients" "$E/fake-units/darban-events.path"; do
         ok_if "gone: ${path##*/}" test ! -e "$path"
     done
     ok_if 'unrelated files stay' test -s "$E/unrelated"
@@ -3877,6 +3881,428 @@ test_docs_claim_no_more_than_the_tool_does() {
     found=$(grep -rniE 'only a hash|verified install' "$REPO/README.md" "$REPO/README.fa.md" "$REPO/docs" || true)
     [[ -z $found ]]; rc_is 'no such claim is left' 0 "$?"
     if [[ -n $found ]]; then printf '%s\n' "$found" | sed 's/^/    | /'; fi
+}
+
+# ---------- connection events ----------
+events_here() {
+    # Connection events on in this fake server: the three lines in server.conf, the units, and the queue as
+    # darban-events-setup.service makes it, owned by the user running the tests, here OpenVPN's user.
+    mkdir -p "$E/events/tmp" "$E/events/new" "$E/events/work" "$E/events/bad" "$E/units"
+    : > "$E/events/.mounted"
+    : > "$E/units/darban-events.path"
+    printf 'script-security 2\nclient-connect %s\nclient-disconnect %s\n' "$E/libexec/darban-ovpn-event" "$E/libexec/darban-ovpn-event" >> "$SERVER_CONF"
+}
+event() {
+    # event <connect|disconnect> <name> [VAR=value]...: the real script, as OpenVPN runs it.
+    local kind=$1 name=$2
+    shift 2
+    env -i PATH="$PATH" script_type="client-$kind" common_name="$name" trusted_ip=198.51.100.7 "$@" bash "$E/libexec/darban-ovpn-event"
+}
+this_boot() { local boot; read -r boot </proc/sys/kernel/random/boot_id; printf '%s' "$boot"; }
+now_cs() { local up; read -r up _ </proc/uptime; up=${up/./}; printf '%s' "$((10#$up))"; }
+raw_event() {
+    # raw_event <file> <kind> <name> <cs> [serial] [us]: an event line as the script writes it, with chosen values.
+    printf 'darban-event 1 %s %s %s %s %s 198.51.100.7 %s - - - -\n' "$2" "$3" "$(this_boot)" "$4" "${6:-${EPOCHREALTIME//[!0-9]/}}" "${5:--}" > "$E/events/new/$1"
+}
+queue_left() { find "$E/events/new" "$E/events/work" -mindepth 1 2>/dev/null; }
+link_code() { web -o /dev/null -w '%{http_code}' "$1"; }
+
+test_event_script_never_refuses_a_connection() {
+    # E1, E1', E2, C.1 and C.13.2: the script OpenVPN runs exits 0 whatever happens, and writes one well-formed
+    # line, only into a queue that is mounted and not full.
+    local file line i
+    event connect alice; rc_is 'no queue: it exits 0' 0 "$?"
+    mkdir -p "$E/events/tmp" "$E/events/new"
+    event connect alice; rc_is 'a queue without its mark: 0' 0 "$?"
+    ok_if 'and nothing is written without the mark' test -z "$(find "$E/events" -mindepth 2)"
+    : > "$E/events/.mounted"
+    event connect 'bad name!'; rc_is 'a name OpenVPN should never give: 0' 0 "$?"
+    env -i PATH="$PATH" script_type=up bash "$E/libexec/darban-ovpn-event"; rc_is 'another hook: 0' 0 "$?"
+    ok_if 'and neither writes anything' test -z "$(find "$E/events" -mindepth 2)"
+    event connect alice tls_serial_hex_0=0a:1B:2c; rc_is 'a connection: 0' 0 "$?"
+    file=$(ls "$E/events/new")
+    [[ $file =~ ^[0-9a-f-]{36}-[0-9]+-[0-9]+-[0-9]+$ ]]; rc_is 'its name is the boot, the time, the process and a random number' 0 "$?"
+    line=$(cat "$E/events/new/$file")
+    [[ $line =~ ^darban-event\ 1\ connect\ alice\ [0-9a-f-]{36}\ [0-9]+\ [0-9]{16}\ 198\.51\.100\.7\ 0a:1B:2c\ -\ -\ -\ -$ ]]
+    rc_is 'its line holds the client, both clocks, the address and the serial' 0 "$?"
+    ok_if 'and nothing is left half way' test -z "$(ls -A "$E/events/tmp")"
+    rm -f "$E/events/new/"*
+    event disconnect alice bytes_received=10 bytes_sent=20 time_duration=30 time_unix=1700000000 tls_serial_hex_0=zz
+    line=$(cat "$E/events/new/"*)
+    [[ $line == *' 198.51.100.7 - 10 20 30 1700000000' ]]; rc_is 'the end of a session holds its traffic, length and start; a bad serial is left out' 0 "$?"
+    rm -f "$E/events/new/"*
+    chmod 500 "$E/events/tmp"
+    event connect alice; rc_is 'a folder it cannot write to: 0' 0 "$?"
+    chmod 700 "$E/events/tmp"
+    for i in $(seq 1 1000); do : > "$E/events/new/x$i"; done
+    event connect alice; rc_is 'a full queue: 0' 0 "$?"
+    [[ $(find "$E/events/new" -type f | wc -l) == 1000 ]]; rc_is 'and a full queue gets nothing more' 0 "$?"
+}
+
+test_event_worker_applies_and_sets_aside() {
+    # T30, T36, T44, T58, C.12.2 and C.15.6: the worker takes each entry under a name of its own, applies a good event,
+    # and sets aside with its reason anything that is not one. Nothing outside the queue is touched.
+    local out target=$E/outside why pid
+    events_here
+    event connect alice
+    event disconnect alice bytes_received=5 bytes_sent=6 time_duration=7 time_unix=1700000000
+    echo keep > "$target"
+    ln -s "$target" "$E/events/new/link"
+    mkfifo "$E/events/new/fifo"
+    raw_event hard connect bob 5; ln "$E/events/new/hard" "$E/events/hard-copy"
+    head -c 600 /dev/zero | tr '\0' a > "$E/events/new/long"
+    echo 'secret-content-123' > "$E/events/new/garbage"
+    raw_event .hidden connect carol 5
+    # An entry already in work/, from a run that stopped half way: it is applied, never overwritten.
+    raw_event pending connect dave 5; mv "$E/events/new/pending" "$E/events/work/1-1"
+    out=$(mgr events); rc_is 'the worker succeeds' 0 "$?"
+    ok_if 'the queue is empty and nothing waits' test -z "$(queue_left)"
+    has 'the client record has the connection' 'last_connect=' "$(cat "$E/varlib/clients/alice")"
+    has 'and the end of the session' 'session_received=5' "$(cat "$E/varlib/clients/alice")"
+    ok_if 'a hidden entry is applied too' test -s "$E/varlib/clients/carol"
+    ok_if 'and the one that waited in work/' test -s "$E/varlib/clients/dave"
+    ok_if 'a file with two hard links is not applied' test ! -e "$E/varlib/clients/bob"
+    [[ $(cat "$target") == keep ]]; rc_is 'the target of a symbolic link is untouched' 0 "$?"
+    [[ $(find "$E/events/bad" -name '*.why' | wc -l) == 5 ]]; rc_is 'five entries are set aside' 0 "$?"
+    why=$(cat "$E"/events/bad/*.why)
+    for reason in 'a symbolic link' 'not a regular file' 'more than one hard link' 'longer than 512 bytes' 'not an event line'; do
+        has "the reason is kept: $reason" "$reason" "$why"
+    done
+    grep -q 'connection events set aside as malformed: 5' "$STUB_LOG"; rc_is 'they are counted in the journal' 0 "$?"
+    lacks 'their content never reaches the journal' 'secret-content-123' "$(cat "$STUB_LOG")"
+    raw_event old connect erin 5
+    sed -i 's/ [0-9a-f-]\{36\} / 00000000-0000-0000-0000-000000000000 /' "$E/events/new/old"
+    mgr events >/dev/null
+    has 'an event of another boot is set aside' 'from another boot' "$(cat "$E"/events/bad/*.why)"
+
+    # Two workers and the five-minute check at once, and a worker killed half way: every event is applied, once.
+    for i in $(seq 1 40); do raw_event "e$i" connect "cc$i" $((100 + i)); done
+    { mgr events & mgr sweep & mgr events & wait; } >/dev/null 2>&1
+    [[ $(find "$E/varlib/clients" -name 'cc*' | wc -l) == 40 ]]; rc_is 'two workers and the check at once apply every event' 0 "$?"
+    ok_if 'and leave nothing behind' test -z "$(queue_left)"
+    for i in $(seq 1 200); do raw_event "k$i" connect "k$i" $((100 + i)); done
+    setsid bash "$E/manager.sh" events >/dev/null 2>&1 </dev/null &
+    pid=$!
+    sleep 0.3
+    kill -9 -- "-$pid" 2>/dev/null; wait "$pid" 2>/dev/null
+    mgr events >/dev/null
+    [[ $(find "$E/varlib/clients" -name 'k*' | wc -l) == 200 ]]; rc_is 'a worker killed half way: the next run applies the rest' 0 "$?"
+    ok_if 'and nothing is left' test -z "$(queue_left)"
+}
+
+test_a_connection_event_ends_only_links_made_before_it() {
+    # C.12.5, C.13.3, T29 and T47: a link records when it was made by a clock NTP cannot move. A connection after
+    # that ends it; one at the same hundredth, one before it, or another client's leaves it. A link of an earlier
+    # boot ends at any connection, and a link without that record waits for its time.
+    local url meta cs out old plain
+    events_here
+    start_links_stub
+    out=$(menu '5\nalice\n1\n1\n0\n')
+    has 'with events on it says a connection ends it' 'or until alice connects' "$out"
+    url=$(grep -oE 'https://[^ ]+/l/[0-9a-f]{64}' <<<"$out")
+    meta=$(ls "$E"/links/*.meta)
+    cs=$(sed -n 's/^created_cs=//p' "$meta")
+    [[ $(sed -n 's/^created_boot=//p' "$meta") == "$(this_boot)" && $cs =~ ^[0-9]+$ ]]; rc_is 'the link records its boot and its hundredth of a second' 0 "$?"
+    [[ $(link_code "$url/file") == 200 ]]; rc_is 'the link works' 0 "$?"
+    has 'a download keeps the fields the link service does not know' "created_cs=$cs" "$(cat "$meta")"
+    raw_event same connect alice "$cs"; raw_event before connect alice $((cs - 1)); raw_event other connect bob $((cs + 5))
+    mgr events >/dev/null
+    [[ $(link_code "$url") == 200 ]]; rc_is 'the same hundredth, before it, or another client: it stays' 0 "$?"
+    raw_event after connect alice $((cs + 1))
+    mgr events >/dev/null
+    [[ $(link_code "$url") == 410 ]]; rc_is 'a connection after it ends it' 0 "$?"
+    ok_if 'and leaves no copy of the profile' test -z "$(find "$E/links" -name '*.ovpn')"
+    grep -q 'temporary link ended: alice connected' "$STUB_LOG"; rc_is 'the end is in the journal' 0 "$?"
+
+    old=$(new_link alice)
+    sed -i 's/^created_boot=.*/created_boot=00000000-0000-0000-0000-000000000000/' "$(ls -t "$E"/links/*.meta | head -n 1)"
+    plain=$(new_link alice)
+    sed -i '/^created_/d' "$(ls -t "$E"/links/*.meta | head -n 1)"
+    raw_event later connect alice "$(now_cs)"
+    mgr events >/dev/null
+    [[ $(link_code "$old") == 410 ]]; rc_is 'a link of an earlier boot ends' 0 "$?"
+    [[ $(link_code "$plain") == 200 ]]; rc_is 'a link made before the update waits for its time' 0 "$?"
+    stop_links_stub
+}
+
+test_the_link_service_leaves_connections_to_the_events() {
+    # C.7.3: with connection events on, the link service does not read the management interface, so a session it
+    # would have seen ends nothing; the events do.
+    local url meta created
+    link_mgmt_server
+    events_here
+    start_links_stub
+    url=$(new_link alice)
+    meta=$(ls "$E"/links/*.meta)
+    created=$(sed -n 's/^created=//p' "$meta")
+    printf 'TITLE\tOpenVPN\nCLIENT_LIST\talice\t198.51.100.7:1\t10.8.0.2\t\t1\t1\tnow\t%s\tUNDEF\t0\t0\tAES-256-GCM\nEND\n' "$(( created + 1 ))" > "$E/mgmt-status"
+    sleep 1.5
+    [[ $(link_code "$url") == 200 ]]; rc_is 'the link service did not end it' 0 "$?"
+    stop_links_stub
+    kill "$MGMT_PID" 2>/dev/null
+}
+
+test_the_serial_of_a_connection_only_narrows() {
+    # C.15.4 and T69: a serial OpenVPN gives is compared as text, in one form. It keeps the link of another
+    # certificate of the name, never ends one the rule keeps, and a malformed one ends nothing.
+    local url meta cs serial lower
+    events_here
+    start_links_stub
+    url=$(new_link alice)
+    meta=$(ls "$E"/links/*.meta)
+    cs=$(( $(sed -n 's/^created_cs=//p' "$meta") + 1 ))
+    serial=$(openssl x509 -in "$PKI/issued/alice.crt" -noout -serial | sed 's/^serial=//')
+    raw_event other connect alice "$cs" 7F:00:01
+    mgr events >/dev/null
+    [[ $(link_code "$url") == 200 ]]; rc_is 'the serial of another certificate keeps it' 0 "$?"
+    raw_event bad connect alice "$cs" not-hex
+    mgr events >/dev/null
+    [[ $(link_code "$url") == 200 ]]; rc_is 'a malformed serial ends nothing' 0 "$?"
+    has 'and is set aside' 'not an event line' "$(cat "$E"/events/bad/*.why)"
+    # The same serial as OpenVPN writes it: lower case, with colons and a leading zero.
+    lower=$(printf '0%s' "$serial" | tr 'A-F' 'a-f' | sed 's/../&:/g; s/:$//')
+    raw_event same connect alice "$cs" "$lower"
+    mgr events >/dev/null
+    [[ $(link_code "$url") == 410 ]]; rc_is 'its own serial, in another form, ends it' 0 "$?"
+    stop_links_stub
+}
+
+test_an_event_that_cannot_be_applied_now_waits() {
+    # C.13.4, T35, T48 and T62: while the link files are held, a good event waits in work/ for its next try, however
+    # often that fails, and is never called malformed. Once they are free, it ends the link.
+    local url meta cs i out
+    events_here
+    start_links_stub
+    url=$(new_link alice)
+    meta=$(ls "$E"/links/*.meta)
+    cs=$(( $(sed -n 's/^created_cs=//p' "$meta") + 1 ))
+    raw_event go connect alice "$cs"
+    for i in 1 2 3 4 5 6; do
+        FLOCK_FAIL='-w 10 8' mgr events >/dev/null
+        # Due again at once, as after its wait.
+        sed -i 's/^\([0-9]*\) [0-9]*/\1 0/' "$E"/events/work/*.next
+    done
+    ok_if 'it waits in work/' test -n "$(find "$E/events/work" -name '*.next')"
+    ok_if 'and is never set aside' test -z "$(ls -A "$E/events/bad")"
+    has 'its tries are counted' '6 0 ' "$(cat "$E"/events/work/*.next)"
+    has 'with the reason' 'the link files were busy' "$(cat "$E"/events/work/*.next)"
+    ok_if 'the client record is written already' test -s "$E/varlib/clients/alice"
+    [[ $(link_code "$url") == 200 ]]; rc_is 'the link is still open' 0 "$?"
+    touch -d '-11 minutes' "$(find "$E/events/work" -type f ! -name '*.next')"
+    out=$(mgr status)
+    has 'an event waiting over 10 minutes is a problem, with why' 'waited more than 10 minutes (the last failure: the link files were busy)' "$out"
+    mgr events >/dev/null
+    [[ $(link_code "$url") == 410 ]]; rc_is 'once the files are free, the event ends the link' 0 "$?"
+    ok_if 'and nothing waits any more' test -z "$(queue_left)"
+    stop_links_stub
+}
+
+test_the_client_list_says_when_each_was_last_seen() {
+    # E9, C.5 and C.15.1: LAST SEEN from the connection events, the same whatever their order or repeats; never
+    # only once events are on.
+    local row us
+    has 'the list has the column' 'LAST SEEN' "$(mgr list)"
+    row=$(mgr list | grep -E '^  alice ')
+    lacks 'without events it claims nothing' 'never' "$row"
+    events_here
+    has 'with events on, a client not seen says so' 'never' "$(mgr list | grep -E '^  alice ')"
+    us=${EPOCHREALTIME//[!0-9]/}
+    printf 'darban-event 1 disconnect alice %s 9 %s 198.51.100.7 - 300 400 50 1700000100\n' "$(this_boot)" "$us" > "$E/events/new/b"
+    mgr events >/dev/null
+    printf 'darban-event 1 disconnect alice %s 8 %s 198.51.100.7 - 100 200 40 1700000000\n' "$(this_boot)" "$(( us - 5000000 ))" > "$E/events/new/a"
+    printf 'darban-event 1 disconnect alice %s 9 %s 198.51.100.7 - 300 400 50 1700000100\n' "$(this_boot)" "$us" > "$E/events/new/b2"
+    mgr events >/dev/null
+    has 'an older session after a newer one changes nothing' 'session_received=300' "$(cat "$E/varlib/clients/alice")"
+    has 'and the first time seen is the earliest' "first_seen=$(( us - 5000000 ))" "$(cat "$E/varlib/clients/alice")"
+    has 'the end of a session says when it was seen' '1 min ago' "$(mgr list | grep -E '^  alice ')"
+    mgmt_stub
+    printf 'TITLE\tOpenVPN\nCLIENT_LIST\talice\t198.51.100.7:1\t10.8.0.2\t\t1\t1\tnow\t%s\tUNDEF\t0\t0\tAES-256-GCM\nEND\n' "$(date -u +%s)" > "$E/mgmt-reply"
+    has 'a client connected now says so' ' now ' "$(mgr list | grep -E '^  alice ')"
+}
+
+test_the_link_service_keeps_fields_it_does_not_know() {
+    # N17 and T42: a download writes the record back with the fields darban added; and the link service knows when
+    # connection events are on.
+    local dir=$E/keep key out
+    mkdir -p "$dir"
+    key=$(printf '%s' "$(printf 'b%.0s' {1..64})" | sha256sum | awk '{print $1}')
+    printf 'name=alice\nexpires=%s\ncreated=1\ndownloads=0\ncreated_boot=abc\ncreated_cs=42\ncreated_us=1700000000000000\n' "$(( $(date -u +%s) + 3600 ))" > "$dir/$key.meta"
+    echo profile > "$dir/$key.ovpn"
+    python3 -I -c 'import sys; sys.path.insert(0, sys.argv[1]); import linkd; print(linkd.Store(sys.argv[2]).take("b" * 64)[0])' "$REPO/lib" "$dir" >/dev/null
+    out=$(cat "$dir/$key.meta")
+    has 'the download is counted' 'downloads=1' "$out"
+    has 'and the fields it does not know stay' 'created_cs=42' "$out"
+    has 'all of them' 'created_us=1700000000000000' "$out"
+    out=$(python3 -I -c 'import sys; sys.path.insert(0, sys.argv[1]); import linkd; print(linkd.events_on(sys.argv[2]))' "$REPO/lib" "$SERVER_CONF")
+    [[ $out == False ]]; rc_is 'without the lines it reads the management interface' 0 "$?"
+    events_here
+    out=$(python3 -I -c 'import sys; sys.path.insert(0, sys.argv[1]); import linkd; print(linkd.events_on(sys.argv[2]))' "$REPO/lib" "$SERVER_CONF")
+    [[ $out == True ]]; rc_is 'with them it leaves that to the events' 0 "$?"
+}
+
+test_the_five_minute_check() {
+    # C.7, C.12.5 and C.15.5: the check ends expired links and the files a link left, ends the link of a client
+    # connected with no event, but only while the clock has not jumped, starts a failed watcher again, and cleans
+    # the queue.
+    local key boot cs us since i
+    events_here
+    mkdir -p "$E/links"
+    boot=$(this_boot); cs=$(now_cs); us=${EPOCHREALTIME//[!0-9]/}
+    printf 'name=alice\nexpires=1000\ncreated=1\ndownloads=0\n' > "$E/links/expired.meta"; : > "$E/links/expired.ovpn"
+    : > "$E/links/left.ovpn"; touch -d '-2 minutes' "$E/links/left.ovpn"
+    : > "$E/links/fresh.ovpn"
+    link_record() { printf 'name=%s\nexpires=%s\ncreated=%s\ndownloads=0\ncreated_boot=%s\ncreated_cs=%s\ncreated_us=%s\n' "$2" "$(( $(date -u +%s) + 3600 ))" "$(( us / 1000000 ))" "$boot" "$cs" "$3" > "$E/links/$1.meta"; : > "$E/links/$1.ovpn"; }
+    link_record seen alice "$us"
+    link_record jumped bob $(( us + 10000000 ))
+    link_record later carol "$us"
+    mgmt_stub
+    since=$(( us / 1000000 + 5 ))
+    printf 'TITLE\tOpenVPN\nCLIENT_LIST\talice\t198.51.100.7:1\t10.8.0.2\t\t1\t1\tnow\t%s\tUNDEF\t0\t0\tAES-256-GCM\nCLIENT_LIST\tbob\t198.51.100.8:1\t10.8.0.3\t\t1\t1\tnow\t%s\tUNDEF\t0\t0\tAES-256-GCM\nCLIENT_LIST\tcarol\t198.51.100.9:1\t10.8.0.4\t\t1\t1\tnow\t%s\tUNDEF\t0\t0\tAES-256-GCM\nEND\n' \
+        "$since" "$(( since + 20 ))" "$(( us / 1000000 - 100 ))" > "$E/mgmt-reply"
+    : > "$E/events/tmp/half"; touch -d '-11 minutes' "$E/events/tmp/half"
+    : > "$E/events/bad/old"; touch -d '-8 days' "$E/events/bad/old"
+    for i in $(seq 1 105); do : > "$E/events/bad/b$i"; done
+    FAKE_FAILED=darban-events.path mgr sweep >/dev/null; rc_is 'the check succeeds' 0 "$?"
+    ok_if 'an expired link is gone' test ! -e "$E/links/expired.meta"
+    ok_if 'with its profile' test ! -e "$E/links/expired.ovpn"
+    ok_if 'a profile left without its record for a while is gone' test ! -e "$E/links/left.ovpn"
+    ok_if 'one just written stays' test -e "$E/links/fresh.ovpn"
+    ok_if 'a client connected after its link was made ends it' test ! -e "$E/links/seen.meta"
+    ok_if 'but not while the clock has jumped since' test -e "$E/links/jumped.meta"
+    ok_if 'nor with a session from before the link' test -e "$E/links/later.meta"
+    grep -q 'seen by the five-minute check, with no event' "$STUB_LOG"; rc_is 'the end is in the journal' 0 "$?"
+    grep -q 'systemctl reset-failed darban-events.path' "$STUB_LOG"; rc_is 'a failed watcher is reset' 0 "$?"
+    grep -q 'systemctl start darban-events.path' "$STUB_LOG"; rc_is 'and started again' 0 "$?"
+    ok_if 'what the script left half way is gone' test ! -e "$E/events/tmp/half"
+    ok_if 'an entry set aside over a week ago is gone' test ! -e "$E/events/bad/old"
+    [[ $(find "$E/events/bad" -mindepth 1 | wc -l) == 100 ]]; rc_is 'at most 100 stay set aside' 0 "$?"
+}
+
+test_diagnostics_of_connection_events() {
+    # C.12.7, C.13.2, C.15.3, C.15.7, T39 and T49: what can be seen of the way from OpenVPN to this tool.
+    local out
+    : > "$E/units/darban-events.path" 2>/dev/null || { mkdir -p "$E/units"; : > "$E/units/darban-events.path"; }
+    out=$(mgr status)
+    has 'lines off: said, with why' "Connection events are off: server.conf was not made by this tool's setup" "$out"
+    rm -f "$E/units/darban-events.path"
+    events_here
+    out=$(mgr status); rc_is 'healthy events pass' 0 "$?"
+    has 'and say so' 'Connection events are seen: a link ends at the first connection' "$out"
+    has 'the process limits are shown' 'Process limits of OpenVPN: LimitNPROC infinity, TasksMax 20' "$out"
+    out=$(FAKE_NO_TMPFS=1 mgr status); rc_is 'a queue that is not mounted is a problem' 1 "$?"
+    has 'named as such' "The event queue $E/events is not mounted" "$out"
+    rm -f "$E/events/.mounted"
+    has 'a mount without its folders ready is the same' 'is not mounted' "$(mgr status)"
+    : > "$E/events/.mounted"
+    has 'a failed watcher is a problem' 'darban-events.path is not running' "$(FAKE_FAILED=darban-events.path mgr status)"
+    has 'a stopped check too' 'darban-sweep.timer is not active' "$(FAKE_FAILED=darban-sweep.timer mgr status)"
+    has 'a small process limit is a problem' 'lets root run only 10 processes (LimitNPROC)' "$(FAKE_LIMITNPROC=10 mgr status)"
+    raw_event x connect alice 5; touch -d '-11 minutes' "$E/events/new/x"
+    has 'an event waiting over 10 minutes is a problem' '1 connection event(s) waited more than 10 minutes' "$(mgr status)"
+    rm -f "$E/events/new/x"
+    : > "$E/events/bad/y"
+    out=$(mgr status); rc_is 'an entry set aside is only a warning' 0 "$?"
+    has 'named' '1 malformed connection event(s) were set aside' "$out"
+    rm -f "$E/events/bad/y"
+    chmod 644 "$E/libexec/darban-ovpn-event"
+    out=$(mgr status); rc_is 'a script OpenVPN cannot run is a problem' 1 "$?"
+    has 'named, with its effect' 'but root cannot run it, so connections may be refused' "$out"
+    chmod 755 "$E/libexec/darban-ovpn-event"
+    sed -i '/^script-security/d' "$SERVER_CONF"
+    has 'the lines without script-security refuse every connection' 'but script-security is not set, so OpenVPN refuses every connection' "$(mgr status)"
+    printf 'script-security 2\n' >> "$SERVER_CONF"
+    # A session the server lists for over a minute, with no connect event.
+    mgmt_stub
+    printf 'TITLE\tOpenVPN\nCLIENT_LIST\talice\t198.51.100.7:1\t10.8.0.2\t\t1\t1\tthen\t%s\tUNDEF\t0\t0\tAES-256-GCM\nEND\n' "$(( $(date -u +%s) - 120 ))" > "$E/mgmt-reply"
+    out=$(mgr status); rc_is 'a session with no event is a warning' 0 "$?"
+    has 'it names the client' 'Connected, but no connection event was seen: alice' "$out"
+    rm -f "$E/units/darban-events.path"
+    has 'units removed on purpose are not called broken' 'Connection events are not processed' "$(mgr status)"
+}
+
+test_enable_events_writes_the_lines_only_when_safe() {
+    # C.1, C.9, C.14.1, C.15.3, C.15.12, T26, T41 and T43: the lines go into server.conf with one restart only when
+    # every check passes; anything in the way is named, and nothing changes.
+    local out before
+    mkdir -p "$E/events/tmp" "$E/events/new" "$E/events/work" "$E/events/bad" "$E/units"
+    : > "$E/events/.mounted"; : > "$E/units/darban-events.path"
+    out=$(mgr enable-events); rc_is 'a server.conf this tool did not make: no failure' 0 "$?"
+    has 'it is named' "Connection events stay off: server.conf was not made by this tool's setup" "$out"
+    sed -i '1i # Created by Darban OVPN server-setup.' "$SERVER_CONF"
+    before=$(cat "$SERVER_CONF")
+    printf 'client-connect /usr/local/bin/other-hook\n' >> "$SERVER_CONF"
+    has 'another script stays the only one' 'already runs another client-connect or client-disconnect script' "$(mgr enable-events)"
+    printf '%s\n' "$before" > "$SERVER_CONF"; printf 'script-security 1\n' >> "$SERVER_CONF"
+    has 'script-security 1 allows no script' 'sets script-security 1, which lets OpenVPN run no script' "$(mgr enable-events)"
+    printf '%s\n' "$before" > "$SERVER_CONF"
+    has 'a small process limit is named' 'lets root run only 10 processes (LimitNPROC)' "$(FAKE_LIMITNPROC=10 mgr enable-events)"
+    chmod 644 "$E/libexec/darban-ovpn-event"
+    has 'a script that cannot run is named' "cannot run $E/libexec/darban-ovpn-event" "$(mgr enable-events)"
+    chmod 755 "$E/libexec/darban-ovpn-event"
+    has 'a queue that is not mounted is named' 'is not mounted' "$(FAKE_NO_TMPFS=1 mgr enable-events)"
+    [[ $(cat "$SERVER_CONF") == "$before" ]]; rc_is 'none of these changed server.conf' 0 "$?"
+    lacks 'or restarted OpenVPN' 'restart openvpn' "$(cat "$STUB_LOG")"
+
+    out=$(FAIL_RESTART=1 mgr enable-events)
+    has 'a restart that fails is rolled back' 'Connection events stay off' "$out"
+    lacks 'and the lines are not left' 'client-connect' "$(cat "$SERVER_CONF")"
+    : > "$STUB_LOG"
+    out=$(mgr enable-events); rc_is 'all clear: it succeeds' 0 "$?"
+    has 'it says the restart first' 'OpenVPN restarts once' "$out"
+    has 'and that events are on' 'Connection events are on: a link now ends at the first connection the server sees' "$out"
+    grep -qx 'script-security 2' "$SERVER_CONF"; rc_is 'script-security 2 is written' 0 "$?"
+    grep -qx "client-connect $E/libexec/darban-ovpn-event" "$SERVER_CONF"; rc_is 'the connect line is written' 0 "$?"
+    grep -qx "client-disconnect $E/libexec/darban-ovpn-event" "$SERVER_CONF"; rc_is 'the disconnect line is written' 0 "$?"
+    [[ $(grep -c 'restart openvpn-server@server' "$STUB_LOG") == 1 ]]; rc_is 'with one restart' 0 "$?"
+    grep -qx 'script-security 2' "$E/cfg/.event-lines"; rc_is 'what it added is recorded' 0 "$?"
+    : > "$STUB_LOG"
+    has 'again: nothing to do' 'Connection events are on.' "$(mgr enable-events)"
+    lacks 'and no restart' 'restart' "$(cat "$STUB_LOG")"
+    sed -i '1d' "$SERVER_CONF"
+    sed -i '/^script-security/d' "$SERVER_CONF"; printf 'script-security 3\n' >> "$SERVER_CONF"
+    has 'a higher script-security of the owner stays as it is' 'Connection events are on.' "$(mgr enable-events)"
+}
+
+test_uninstall_keeps_the_event_script_and_its_lines() {
+    # Q2, C.9 and C.13.8: removing only the tool takes the units and the queue of connection events away, and
+    # keeps the script and its lines, so OpenVPN needs no restart. The summary says how to remove them.
+    local out units=$E/fake-units before
+    install_removal_scripts
+    events_here
+    printf 'script-security 2\n' > "$E/cfg/.event-lines"
+    for unit in darban-events.path darban-sweep.timer darban-events.service darban-sweep.service darban-events-setup.service 'run-darban\x2devents.mount'; do : > "$units/$unit"; done
+    before=$(cat "$SERVER_CONF")
+    : > "$STUB_LOG"
+    out=$(bash "$E/lib/uninstall.sh" --yes 2>&1 </dev/null); rc_is 'uninstall succeeds' 0 "$?"
+    ok_if 'the units of connection events are gone' test -z "$(find "$units" -name 'darban-events*' -o -name 'darban-sweep*' -o -name 'run-darban*')"
+    grep -q 'systemctl disable --now darban-events.path' "$STUB_LOG"; rc_is 'the watcher is stopped' 0 "$?"
+    ok_if 'the script stays' test -x "$E/libexec/darban-ovpn-event"
+    [[ $(cat "$SERVER_CONF") == "$before" ]]; rc_is 'server.conf is untouched' 0 "$?"
+    lacks 'OpenVPN is not restarted' 'restart openvpn' "$(cat "$STUB_LOG")"
+    has 'the summary names the script' "$E/libexec/darban-ovpn-event" "$out"
+    has 'and its lines' 'client-connect and client-disconnect, and script-security 2' "$out"
+    has 'and how to remove them, in order' "sudo sed -i '\\#$E/libexec/darban-ovpn-event#d; /^script-security 2\$/d' $SERVER_CONF && sudo systemctl restart openvpn-server@server && sudo rm $E/libexec/darban-ovpn-event" "$out"
+    event connect alice; rc_is 'the script still exits 0' 0 "$?"
+}
+
+test_restore_previous_turns_events_off_for_an_older_version() {
+    # C.9, C.12.12 and C.13.8: going back to a version without connection events removes their units first, by
+    # this version, and says what stays and how to remove it.
+    local out backup=$E/backups-tool/20260101T000000
+    mkdir -p "$E/sbin" "$backup/sbin" "$backup/lib" "$backup/units"
+    printf '#!/usr/bin/env bash\nDARBAN_VERSION=1.0.0-rc.10\n' > "$backup/sbin/darban"
+    echo 'old unit' > "$backup/units/darban-crl.timer"
+    events_here
+    for unit in darban-sweep.timer darban-events.service darban-sweep.service darban-events-setup.service 'run-darban\x2devents.mount'; do : > "$E/units/$unit"; done
+    out=$(menu '9\n4\n1\n0\n0\n')
+    has 'it says the older version does not use them' 'v1.0.0-rc.10 does not use connection events' "$out"
+    has 'and what stays' "These stay, so connections keep working: $E/libexec/darban-ovpn-event" "$out"
+    ok_if 'nothing is removed on No' test -e "$E/units/darban-events.path"
+    out=$(menu '9\n4\n2\n')
+    has 'it restores' 'Restored v1.0.0-rc.10' "$out"
+    ok_if 'the units of connection events are gone' test -z "$(find "$E/units" -name 'darban-events*' -o -name 'darban-sweep*' -o -name 'run-darban*')"
+    ok_if 'the script stays' test -x "$E/libexec/darban-ovpn-event"
+    grep -q 'client-connect' "$SERVER_CONF"; rc_is 'and its lines' 0 "$?"
 }
 
 mapfile -t TESTS < <(declare -F | awk '$3 ~ /^test_/ {print $3}' | sort)

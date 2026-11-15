@@ -70,7 +70,7 @@ A client is one person or device. The tool asks right after the install:
 5. **Lock the private key with a password?** Press Enter for no password. See [A password on the key](sharing.md#a-password-on-the-key) for when one helps.
 6. **Copy it to your clipboard?** Press Enter to copy the link, and the password and the note when there are any.
 
-**You should see:** under `Send this to the person`, a link that starts with `https://`, and above it the TCP port the link uses. The link works for at most 24 hours, and usually stops sooner, about 10 seconds after a connection with this profile is seen. **Settings › Link lifetime** changes the 24 hours.
+**You should see:** under `Send this to the person`, a link that starts with `https://`, and above it the TCP port the link uses. The link works for at most 24 hours, and usually stops sooner: once the server sees a connection with this profile, usually within a few seconds. **Settings › Link lifetime** changes the 24 hours.
 
 **If not:** see [Troubleshooting](troubleshooting.md#the-link-does-not-open).
 

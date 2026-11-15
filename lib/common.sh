@@ -15,7 +15,18 @@ DARBAN_TMP_FILES=()
 # Only 'darban-crl-maintain --renew --allow-crl-shrink' sets this; it is never read from the environment.
 DARBAN_ALLOW_CRL_SHRINK=0
 
+# The units of connection events, in the order they stop: the watchers, the jobs, then the queue and its tmpfs.
+DARBAN_EVENT_UNITS='darban-events.path darban-sweep.timer darban-events.service darban-sweep.service darban-events-setup.service run-darban\x2devents.mount'
 darban_error() { printf 'ERROR: %s\n' "$*" >&2 || true; }
+darban_events_units_remove() {
+    # darban_events_units_remove <unit folder>: stops and removes the units of connection events and their queue.
+    # The script and its lines in server.conf stay: without its queue the script writes nothing, and connections
+    # go on as before.
+    local unit
+    for unit in $DARBAN_EVENT_UNITS; do systemctl disable --now "$unit" >/dev/null 2>&1 || true; done
+    for unit in $DARBAN_EVENT_UNITS; do rm -f -- "$1/$unit"; done
+    systemctl daemon-reload >/dev/null 2>&1 || true
+}
 darban_require_root() { (( EUID == 0 )) || { darban_error 'Run with sudo/root.'; return 1; }; }
 darban_lock() {
     local wait=${1:-15}

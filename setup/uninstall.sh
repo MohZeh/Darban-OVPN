@@ -10,6 +10,8 @@ LE_DIR=/etc/letsencrypt
 # The deploy hook this tool puts in certbot's renewal file of the links' certificate.
 RENEW_HOOK='/usr/local/sbin/darban reload-links'
 CERT_NAME=darban-ovpn-links
+# The script OpenVPN runs for connection events; it stays, with its lines in server.conf.
+EVENT_SCRIPT=/usr/local/libexec/darban-ovpn-event
 
 [[ ${1:-} == --yes ]] || { echo 'This removes the Darban OVPN tool. To confirm: uninstall.sh --yes' >&2; exit 2; }
 [[ $EUID == 0 ]] || { echo 'Run with sudo/root.' >&2; exit 1; }
@@ -32,6 +34,19 @@ while IFS= read -r name; do
     fi
 done < <({ printf '%s\n' "$CERT_NAME"; awk '$1=="certbot_cert" && $2 ~ /^[A-Za-z0-9._-]+$/ {print $2}' "$CONFIG_DIR/.server-setup-started" 2>/dev/null || true; } | sort -u)
 
+# Connection events: their units and queue go. The script and its lines in server.conf stay, so OpenVPN needs no
+# restart and every connection goes on: without its queue, the script writes nothing and exits 0.
+events_kept=0
+server_conf=${DARBAN_SERVER_CONF:-/etc/openvpn/server/server.conf}
+if grep -q "^client-connect $EVENT_SCRIPT\$" "$server_conf" 2>/dev/null; then events_kept=1; fi
+if declare -F darban_events_units_remove >/dev/null; then
+    darban_events_units_remove "$UNITS"
+else
+    for unit in darban-events.path darban-sweep.timer darban-events.service darban-sweep.service darban-events-setup.service 'run-darban\x2devents.mount'; do
+        systemctl disable --now "$unit" >/dev/null 2>&1 || true
+        rm -f -- "$UNITS/$unit"
+    done
+fi
 systemctl disable --now darban-crl.timer >/dev/null 2>&1 || true
 systemctl stop darban-links.service >/dev/null 2>&1 || true
 rm -f -- "$UNITS/darban-crl.timer" "$UNITS/darban-crl.service" "$UNITS/darban-links.service"
@@ -54,6 +69,17 @@ for name in "${kept_certs[@]}"; do
     printf '  %s/live/%s   (the links'"'"' Let'"'"'s Encrypt certificate; certbot still renews it)\n' "$LE_DIR" "$name"
     printf '    To delete it: sudo certbot delete --cert-name %s\n' "$name"
 done
+if (( events_kept )); then
+    removal="\\#$EVENT_SCRIPT#d"
+    if grep -qx 'script-security 2' "$CONFIG_DIR/.event-lines" 2>/dev/null; then removal+='; /^script-security 2$/d'; fi
+    printf '\nKept, so connections go on without a restart:\n'
+    printf '  %s   (OpenVPN runs it at each connection; it no longer records anything)\n' "$EVENT_SCRIPT"
+    printf '  its lines in %s: client-connect and client-disconnect%s\n' "$server_conf" \
+        "$(grep -qx 'script-security 2' "$CONFIG_DIR/.event-lines" 2>/dev/null && printf ', and script-security 2')"
+    printf '  A new install of the tool uses them again.\n'
+    printf "  To remove them, in this order: sudo sed -i '%s' %s && sudo systemctl restart openvpn-server@server && sudo rm %s\n" \
+        "$removal" "$server_conf" "$EVENT_SCRIPT"
+fi
 for name in "${hook_left[@]}"; do
     printf 'WARNING: could not remove this tool'"'"'s hook from %s/renewal/%s.conf. Delete the line "renew_hook = %s" there yourself.\n' "$LE_DIR" "$name" "$RENEW_HOOK" >&2
 done

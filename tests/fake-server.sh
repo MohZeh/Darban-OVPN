@@ -71,11 +71,12 @@ echo "systemctl $*" >> "$STUB_LOG"
 q=0; for a; do [[ $a == --quiet ]] && q=1; done
 case " $* " in
   *" restart "*) if [[ -n ${FAIL_RESTART:-} ]]; then exit 1; fi ;;
-  *" is-failed "*) ((q)) || echo active; exit 1 ;;
+  # FAKE_FAILED names a unit that has failed. FAKE_LIMITNPROC is the process limit of OpenVPN's unit.
+  *" is-failed "*) if [[ -n ${FAKE_FAILED:-} && " $* " == *" $FAKE_FAILED "* ]]; then ((q)) || echo failed; exit 0; fi; ((q)) || echo active; exit 1 ;;
   *" is-active "*darban-links*) ((q)) || echo inactive; exit 3 ;;
-  *" is-active "*) ((q)) || echo active; exit 0 ;;
+  *" is-active "*) if [[ -n ${FAKE_FAILED:-} && " $* " == *" $FAKE_FAILED "* ]]; then ((q)) || echo failed; exit 3; fi; ((q)) || echo active; exit 0 ;;
   *" is-enabled "*) echo enabled; exit 0 ;;
-  *" show "*) [[ $* == *Result* ]] && echo success; exit 0 ;;
+  *" show "*) [[ $* == *Result* ]] && echo success; [[ $* == *LimitNPROC* ]] && echo "${FAKE_LIMITNPROC:-infinity}"; [[ $* == *TasksMax* ]] && echo 20; exit 0 ;;
 esac
 exit 0
 STUB
@@ -105,6 +106,12 @@ if [[ -n ${FAKE_RUNUSER_DENY:-} ]]; then exit 1; fi
 while (( $# )) && [[ $1 != -- ]]; do shift; done
 shift
 exec "$@"
+STUB
+# The queue of connection events counts as its own tmpfs while its folder exists; FAKE_NO_TMPFS: it is not mounted.
+cat > "$E/bin/findmnt" <<STUB
+#!/usr/bin/env bash
+[[ -z \${FAKE_NO_TMPFS:-} && \${*: -1} == "$E/events" && -d "$E/events" ]] || exit 1
+echo tmpfs
 STUB
 printf '#!/usr/bin/env bash\nif [[ ${1:-} == -n ]]; then echo 1; fi\n' > "$E/bin/sysctl"
 printf '#!/usr/bin/env bash\necho "logger $*" >> "$STUB_LOG"\n' > "$E/bin/logger"
@@ -152,5 +159,11 @@ cp "$SRC/lib/ui.sh" "$E/lib/ui.sh"
 sed -e "s#^source /usr/local/lib/darban/#source $E/lib/#" -e "s#^OUT_DIR=.*#OUT_DIR=$E/clients#" -e "s#^LINK_DIR=.*#LINK_DIR=$E/links#" -e "s#^BACKUP_ROOT=.*#BACKUP_ROOT=$E/backups-tool#" -e "s#^SBIN_DIR=.*#SBIN_DIR=$E/sbin#" -e "s#^UNIT_DIR=.*#UNIT_DIR=$E/units#" -e "s#^CONFIG_DIR=.*#CONFIG_DIR=$E/cfg#" \
     -e "s#^SYSTEM_CA_FILE=.*#SYSTEM_CA_FILE=$E/system-ca.pem#" -e "s#^CERT_SEARCH_DIRS=.*#CERT_SEARCH_DIRS='$E/le-live $E/panel-cert $E/acme'#" \
     -e "s#^LE_DIR=.*#LE_DIR=$E/le#" -e "s#^LINK_CERT_LOG=.*#LINK_CERT_LOG=$E/varlib/link-certificates.log#" \
+    -e "s#^EVENT_SCRIPT=.*#EVENT_SCRIPT=$E/libexec/darban-ovpn-event#" -e "s#^EVENT_DIR=.*#EVENT_DIR=$E/events#" \
+    -e "s#^LEDGER_DIR=.*#LEDGER_DIR=$E/varlib/clients#" \
     "$SRC/bin/darban" > "$E/manager.sh"
+# The event script as install.sh places it, writing into this fake server's queue.
+mkdir -p "$E/libexec"
+sed -e "s#^queue=.*#queue=$E/events#" "$SRC/bin/darban-ovpn-event" > "$E/libexec/darban-ovpn-event"
+chmod 755 "$E/libexec/darban-ovpn-event"
 sed -e "s#^source /usr/local/lib/darban/#source $E/lib/#" "$SRC/bin/darban-crl-maintain" > "$E/crl-maintain"

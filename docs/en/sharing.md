@@ -16,7 +16,7 @@ A profile (`.ovpn` file) holds a private key: whoever has it can connect as that
 3. Open the TCP port the tool shows in your provider's firewall.
 4. Send what the tool shows under **Send this to the person**: the link, and the password and the note when there are any. Enter copies them all; see [Copying what you send](#copying-what-you-send).
 
-The link stops working when its time is up, or about 10 seconds after a connection with this profile is seen, whichever comes first. Until then, the person can open it and download the file again, so a mistake on the phone costs nothing. The person follows [Connect a device](connect-devices.md). There are no permanent links, because a link stays in chat histories.
+The link stops working when its time is up, or once the server sees a connection with this profile, usually within a few seconds, whichever comes first. Until then, the person can open it and download the file again, so a mistake on the phone costs nothing. The person follows [Connect a device](connect-devices.md). There are no permanent links, because a link stays in chat histories.
 
 **If the link stopped working before the person connected:** someone else may have connected with it. Revoke the client and create a new one.
 
@@ -124,7 +124,8 @@ If you send the password separately, add:
 ## How links are protected
 
 - Opening a link or downloading the file does not use it up, so a messenger's preview or a mistake costs nothing.
-- The link ends when a connection with the profile is seen after the link was made. The link service asks OpenVPN's management interface about this every 10 seconds, so a connection shorter than that can be missed. A server without a local management interface, such as one this tool did not set up, cannot see connections: its links work until their time is up, and the tool says so when it makes one. Menu `6` shows whether the file was downloaded.
+- The link ends when the server sees a connection with the profile after the link was made. With [connection events](advanced.md#connection-events) on, as the install sets them up on a server its setup made, OpenVPN tells this tool of each connection, and the link ends within seconds. A connection in the same 10 milliseconds as the link was made does not end it; only a device that already has the certificate can connect that soon. Darban shows the faults it can see, under **Connection events** in the diagnostics. If one connection's event is lost silently, that link stays open until it expires; a client that is still connected then is found by the five-minute check.
+- Without connection events, the link service asks OpenVPN's management interface every 10 seconds, so a shorter connection can be missed. A server with neither, such as one this tool did not set up and without a local management interface, cannot see connections: its links work until their time is up, and the tool says so when it makes one. Menu `6` shows whether the file was downloaded.
 - The page is in Persian when the device's language is Persian, and in English otherwise.
 - The link service finds a link by a hash of its token and never keeps the token. The tool keeps the whole address, readable by root only, so menu 6 can show it again; a link made before `v1.0.0-rc.8` cannot be shown again.
 - The copy of the profile is kept in `/run/darban-links`, which a reboot clears.

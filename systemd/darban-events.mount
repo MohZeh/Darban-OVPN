@@ -1,0 +1,16 @@
+# Installed as run-darban\x2devents.mount: the name systemd gives /run/darban-events.
+[Unit]
+Description=Darban OVPN connection event queue
+# A tmpfs of its own and of a fixed size: a full queue stops only the events, never /run itself.
+DefaultDependencies=no
+Conflicts=umount.target
+Before=umount.target
+
+[Mount]
+What=tmpfs
+Where=/run/darban-events
+Type=tmpfs
+Options=size=2M,nr_inodes=4096,mode=0755,nosuid,nodev,noexec
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,11 @@
+[Unit]
+Description=Darban OVPN five-minute check of links and connection events
+
+[Timer]
+OnBootSec=1min
+OnUnitActiveSec=5min
+AccuracySec=10s
+Unit=darban-sweep.service
+
+[Install]
+WantedBy=timers.target

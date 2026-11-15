@@ -101,6 +101,23 @@ systemctl is-active --quiet darban-crl.timer
 systemctl is-active --quiet darban-nat.service
 nft list table ip darban >/dev/null
 darban status
+# Connection events: the install turned them on, with the lines in server.conf and the queue in a tmpfs of its own.
+CONF=/etc/openvpn/server/server.conf
+EVENT_SCRIPT=/usr/local/libexec/darban-ovpn-event
+EVENTS=/run/darban-events
+LEDGER=/var/lib/darban/clients
+grep -qx 'script-security 2' "$CONF"
+grep -qx "client-connect $EVENT_SCRIPT" "$CONF"
+grep -qx "client-disconnect $EVENT_SCRIPT" "$CONF"
+[[ $(findmnt -n -o FSTYPE "$EVENTS") == tmpfs ]]
+[[ -e $EVENTS/.mounted ]]
+[[ $(stat -c '%U %a' "$EVENTS/new") == 'nobody 700' && $(stat -c '%U %a' "$EVENTS/work") == 'root 700' ]]
+systemctl is-active --quiet darban-events.path
+systemctl is-active --quiet darban-sweep.timer
+runuser -u nobody -- test -x "$EVENT_SCRIPT"
+darban status >"$LOG/events-on.log"
+grep 'Connection events are seen' "$LOG/events-on.log" >/dev/null
+echo 'PASS: the install turns on connection events, with their queue in a tmpfs of its own.'
 
 cat > "$LOG/welcome.keys" <<'EOF'
 Open UDP 1194 in your server
@@ -119,6 +136,14 @@ echo 'PASS: the first client was created from the end of the install.'
 
 connect "$LOG/old.ovpn" "$LOG/a.log"
 echo 'PASS: a real client connected.'
+# E10' and T19: the connection reaches the client record within seconds, from the hook OpenVPN really ran.
+for attempt in $(seq 1 10); do
+    if grep -q '^last_connect=' "$LEDGER/accept1" 2>/dev/null; then break; fi
+    sleep 1
+done
+grep -q '^last_connect=' "$LEDGER/accept1"
+grep -qx 'last_address=127.0.0.1' "$LEDGER/accept1"
+echo "PASS: the real connection reached the client record in about $attempt s: $(tr '\n' ' ' <"$LEDGER/accept1")"
 for attempt in $(seq 1 10); do
     if darban connected | grep accept1 >/dev/null; then break; fi
     sleep 1
@@ -178,6 +203,133 @@ connect /root/openvpn-clients/accept1.ovpn "$LOG/crl-644-client.log"
 disconnect
 darban status >/dev/null
 echo 'PASS: a CRL OpenVPN cannot read is named, refuses every client, and works again once readable.'
+
+# T67 and C.15.1: when the server records the end of a session. It runs client-disconnect when it closes the
+# session, which may be well after the device went away; a kill -9 must still be recorded within 130 seconds.
+PROFILE=/root/openvpn-clients/accept1.ovpn
+session_end() { awk -F= '$1=="session_end" {print $2}' "$LEDGER/accept1" 2>/dev/null || true; }
+wait_session_end() {
+    # wait_session_end <value before> <seconds>: prints how long the record took, or fails.
+    local start=$SECONDS
+    while (( SECONDS - start < $2 )); do
+        if [[ -n $(session_end) && $(session_end) != "$1" ]]; then echo $(( SECONDS - start )); return 0; fi
+        sleep 1
+    done
+    return 1
+}
+connect "$PROFILE" "$LOG/t67-term.log"; before=$(session_end)
+kill -TERM "$(cat "$PIDFILE")"
+took=$(wait_session_end "$before" 150) || { echo 'FAIL: the end of a session after SIGTERM was not recorded in 150 seconds.'; exit 1; }
+echo "T67: client stopped by SIGTERM: the end recorded after ${took} s"
+sleep 1
+connect "$PROFILE" "$LOG/t67-kill.log"; before=$(session_end)
+kill -9 "$(cat "$PIDFILE")"
+took=$(wait_session_end "$before" 150) || { echo 'FAIL: the end of a session after kill -9 was not recorded in 150 seconds.'; exit 1; }
+echo "T67: client killed with kill -9: the end recorded after ${took} s"
+if (( took >= 130 )); then echo 'FAIL: the end of a killed session took 130 seconds or more.'; exit 1; fi
+sleep 1
+connect "$PROFILE" "$LOG/t67-again.log"; before=$(session_end)
+kill -9 "$(cat "$PIDFILE")"; sleep 1
+connect "$PROFILE" "$LOG/t67-again2.log"
+took=$(wait_session_end "$before" 150) || { echo 'FAIL: a new session of the same name did not end the old one in 150 seconds.'; exit 1; }
+echo "T67: the same name connecting again: the old session's end recorded after ${took} s"
+before=$(session_end)
+systemctl restart "$UNIT"
+if took=$(wait_session_end "$before" 30); then
+    echo "T67: server restarted: the end recorded after ${took} s"
+else
+    echo 'T67: server restarted: no end of the session was recorded within 30 s'
+fi
+disconnect
+journalctl -u "$UNIT" --since '-10min' --no-pager | grep -Ei 'client-disconnect|Inactivity timeout|SIGTERM|exit notification|soft,|restart' | tail -n 12 || true
+echo 'PASS: the end of every session was recorded, a killed one within 130 seconds.'
+
+# T70, EV1, C.14.2 and C.15.5: 500 events from the product's own script, as nobody, all at once, while real clients
+# connect again and again. The real worker takes them all: none is lost, the queue empties, its watcher stays up.
+before=$(awk -F= '$1=="last_connect" {print $2}' "$LEDGER/accept1")
+for batch in 0 1 2 3 4; do
+    for i in $(seq $(( batch * 100 + 1 )) $(( batch * 100 + 100 ))); do
+        runuser -u nobody -- env -i script_type=client-connect common_name="load$i" trusted_ip=192.0.2.1 "$EVENT_SCRIPT" &
+    done
+    connect "$PROFILE" "$LOG/t70-$batch.log"; disconnect
+done
+wait
+for attempt in $(seq 1 60); do
+    if [[ -z $(find "$EVENTS/new" "$EVENTS/work" -mindepth 1 2>/dev/null) ]]; then break; fi
+    sleep 1
+done
+left=$(find "$EVENTS/new" "$EVENTS/work" -mindepth 1 2>/dev/null | wc -l)
+seen=$(find "$LEDGER" -name 'load*' | wc -l)
+echo "T70: after ${attempt} s: $seen of 500 events applied, $left left in the queue"
+[[ $left == 0 && $seen == 500 ]]
+[[ -z $(ls -A "$EVENTS/bad") ]]
+systemctl is-active --quiet darban-events.path
+[[ $(awk -F= '$1=="last_connect" {print $2}' "$LEDGER/accept1") != "$before" ]]
+rm -f "$LEDGER"/load*
+echo 'PASS: 500 events at once and real connections: none lost, the queue empties, and its watcher stays up.'
+
+# T28, T45, T59 and C.15.7: without its mount, or before its folders are ready, or when it is full, the script
+# writes nothing on /run itself, exits 0, and the client connects; Diagnostics say so.
+systemctl stop 'run-darban\x2devents.mount'
+[[ -z $(findmnt -n "$EVENTS") ]]
+runuser -u nobody -- env -i script_type=client-connect common_name=accept1 "$EVENT_SCRIPT"
+[[ -z $(ls -A "$EVENTS" 2>/dev/null) ]]
+connect "$PROFILE" "$LOG/no-mount.log"; disconnect
+darban status >"$LOG/no-mount-status.log" || true
+grep "The event queue $EVENTS is not mounted" "$LOG/no-mount-status.log" >/dev/null
+systemctl restart darban-events-setup.service darban-events.path
+[[ -e $EVENTS/.mounted ]]
+rm -f "$EVENTS/.mounted"
+runuser -u nobody -- env -i script_type=client-connect common_name=accept1 "$EVENT_SCRIPT"
+[[ -z $(find "$EVENTS/tmp" "$EVENTS/new" -mindepth 1) ]]
+darban status >"$LOG/no-mark.log" || true
+grep 'is not mounted' "$LOG/no-mark.log" >/dev/null
+systemctl restart darban-events-setup.service
+head -c 3M /dev/zero >"$EVENTS/work/fill" 2>/dev/null || true
+connect "$PROFILE" "$LOG/full.log"; disconnect
+darban status >"$LOG/full-status.log" || true
+grep 'is full, so new connections are not seen' "$LOG/full-status.log" >/dev/null
+rm -f "$EVENTS/work/fill" "$EVENTS"/bad/*
+darban status >/dev/null
+echo 'PASS: no mount, no mark or a full queue: nothing lands on /run, every client still connects, and Diagnostics say so.'
+
+# T26, T41, T43, T57, C.15.3 and C.15.12: the checks before the lines are written. A small process limit refuses a
+# connection through the hook, so it keeps the lines out; so does script-security 1; and a restart that fails is
+# rolled back.
+cp -a "$CONF" "$LOG/server.conf.events"
+mkdir -p "/etc/systemd/system/$UNIT.d"
+printf '[Service]\nLimitNPROC=10\n' >"/etc/systemd/system/$UNIT.d/acceptance-nproc.conf"
+systemctl daemon-reload && systemctl restart "$UNIT"
+sleepers=()
+for i in $(seq 1 10); do runuser -u nobody -- sleep 300 & sleepers+=($!); done
+sleep 1
+if connect "$PROFILE" "$LOG/nproc.log"; then echo 'FAIL: a client connected although the hook could not start.'; exit 1; fi
+disconnect
+darban status >"$LOG/nproc-status.log" || true
+grep 'lets nobody run only 10 processes (LimitNPROC)' "$LOG/nproc-status.log" >/dev/null
+sed -i '/darban-ovpn-event/d; /^script-security 2$/d' "$CONF"; systemctl restart "$UNIT"
+darban enable-events | tee "$LOG/nproc-enable.log"
+grep 'lets nobody run only 10 processes (LimitNPROC)' "$LOG/nproc-enable.log" >/dev/null
+if grep -q darban-ovpn-event "$CONF"; then echo 'FAIL: the lines were written under a small process limit.'; exit 1; fi
+kill "${sleepers[@]}" 2>/dev/null || true; wait "${sleepers[@]}" 2>/dev/null || true
+rm -f "/etc/systemd/system/$UNIT.d/acceptance-nproc.conf"; systemctl daemon-reload
+printf 'script-security 1\n' >>"$CONF"; systemctl restart "$UNIT"
+darban enable-events | tee "$LOG/ss1.log"
+grep 'sets script-security 1, which lets OpenVPN run no script' "$LOG/ss1.log" >/dev/null
+if grep -q darban-ovpn-event "$CONF"; then echo 'FAIL: the lines were written with script-security 1.'; exit 1; fi
+sed -i '/^script-security 1$/d' "$CONF"
+printf '[Service]\nExecStartPre=/bin/sh -c "! grep -q darban-ovpn-event %s"\n' "$CONF" >"/etc/systemd/system/$UNIT.d/acceptance-events.conf"
+systemctl daemon-reload && systemctl restart "$UNIT"
+darban enable-events | tee "$LOG/events-rollback.log"
+grep 'Rolled back' "$LOG/events-rollback.log" >/dev/null
+if grep -q darban-ovpn-event "$CONF"; then echo 'FAIL: the lines stayed after a failed restart.'; exit 1; fi
+systemctl is-active --quiet "$UNIT"
+rm -rf "/etc/systemd/system/$UNIT.d"; systemctl daemon-reload
+darban enable-events | tee "$LOG/events-again.log"
+grep 'Connection events are on: a link now ends at the first connection' "$LOG/events-again.log" >/dev/null
+grep -qx "client-connect $EVENT_SCRIPT" "$CONF"
+connect "$PROFILE" "$LOG/events-back.log"; disconnect
+echo 'PASS: a small process limit, script-security 1 or a failed restart keep the lines out, and nothing else changes.'
 
 darban list --all
 
@@ -359,9 +511,10 @@ for attempt in $(seq 1 30); do
 done
 [[ $(curl -ks -o /dev/null -w '%{http_code}' "$url") == 410 ]]
 disconnect
-journalctl -u darban-links.service --no-pager | grep 'link ended: accept1 connected' >/dev/null
+# With connection events on, the event of that connection ended the link, not the link service.
+journalctl -t darban --no-pager | grep 'temporary link ended: accept1 connected' >/dev/null
 if journalctl -u darban-links.service --no-pager | grep '[0-9a-f]\{64\}' >/dev/null; then echo 'FAIL: a token reached the log.'; exit 1; fi
-echo 'PASS: the temporary link works until the first connection, and keeps tokens out of the log.'
+echo 'PASS: the temporary link works until the first connection, which its event ends, and keeps tokens out of the log.'
 
 # A broken server: diagnostics say so by exit status, and the tool can still be updated.
 mv /root/pki/ca.crt /root/pki/ca.crt.keep
@@ -495,10 +648,22 @@ echo 9.9.9 > "$next/VERSION"
 bash "$next/setup/install.sh"
 [[ $(darban version) == 9.9.9 ]]
 systemctl is-active --quiet "$UNIT"
-printf '9\n4\n2\n' | darban
+# T34 and C.12.12: the version restored here has no connection events, as rc.10: their units go first, and the
+# script and its lines stay, so every client still connects.
+newest=$(find /var/backups/darban -mindepth 1 -maxdepth 1 -type d | sort | tail -n 1)
+rm -f "$newest/units/"darban-events* "$newest/units/"darban-sweep* "$newest/units/"run-darban*
+printf '9\n4\n2\n' | darban | tee "$LOG/restore.log"
 [[ $(darban version) == "$current" ]]
+grep 'does not use connection events' "$LOG/restore.log" >/dev/null
+grep "These stay, so connections keep working: $EVENT_SCRIPT" "$LOG/restore.log" >/dev/null
+[[ ! -e /etc/systemd/system/darban-events.path && -z $(findmnt -n "$EVENTS") ]]
+[[ -x $EVENT_SCRIPT ]] && grep -qx "client-connect $EVENT_SCRIPT" "$CONF"
+connect "$PROFILE" "$LOG/restored.log"; disconnect
 darban status >/dev/null
-echo 'PASS: an update installs, and Restore previous version goes back.'
+bash setup/install.sh | tee "$LOG/events-reinstall.log"
+grep 'Connection events are on.$' "$LOG/events-reinstall.log" >/dev/null
+systemctl is-active --quiet darban-events.path
+echo 'PASS: an update installs, Restore previous version goes back, and an older version keeps every client connecting.'
 
 # Removing only the tool keeps the VPN running, and installing it again finds everything. The links' Let's Encrypt
 # certificate stays, and certbot renews it without this tool's hook; a new install gives the hook back.
@@ -509,6 +674,12 @@ if grep -q '^renew_hook' "$LE_CONF"; then echo "FAIL: this tool's hook stayed in
 cmp -s "$OTHER_CONF" "$LOG/other-site.before"
 grep 'certbot still renews it' "$LOG/uninstall.log" >/dev/null
 grep 'sudo certbot delete --cert-name darban-ovpn-links' "$LOG/uninstall.log" >/dev/null
+# Q2 and T20: the units and the queue of connection events go; the script and its lines stay, with no restart.
+[[ ! -e /etc/systemd/system/darban-events.path && ! -e /etc/systemd/system/darban-sweep.timer && -z $(findmnt -n "$EVENTS") ]]
+[[ -x $EVENT_SCRIPT ]] && grep -qx "client-connect $EVENT_SCRIPT" "$CONF"
+grep 'Kept, so connections go on without a restart' "$LOG/uninstall.log" >/dev/null
+connect "$PROFILE" "$LOG/uninstalled.log"; disconnect
+echo 'PASS: after an uninstall the event script stays, and every client still connects.'
 serial=$(openssl x509 -in "$LE_LIVE/cert.pem" -noout -serial)
 certbot renew --no-random-sleep-on-renew --force-renewal --cert-name darban-ovpn-links 2>&1 | tee "$LOG/le-renew-after.log"
 [[ $(openssl x509 -in "$LE_LIVE/cert.pem" -noout -serial) != "$serial" ]]
@@ -530,6 +701,7 @@ else
 fi
 bash setup/install.sh
 darban status >/dev/null
+systemctl is-active --quiet darban-events.path
 grep -qx 'renew_hook = /usr/local/sbin/darban reload-links' "$LE_CONF"
 cmp -s "$OTHER_CONF" "$LOG/other-site.before"
 echo 'PASS: the tool can be removed and installed again without touching the VPN, and gets its hook back.'
@@ -544,7 +716,8 @@ if grep -q '^renew_hook' "$LE_CONF"; then echo "FAIL: this tool's hook stayed af
 cmp -s "$OTHER_CONF" "$LOG/other-site.before"
 echo "PASS: Remove everything keeps the certificate when asked, without this tool's hook."
 if systemctl is-active --quiet "$UNIT"; then echo 'FAIL: OpenVPN still runs after removal.'; exit 1; fi
-for path in /root/pki /etc/openvpn/server /root/openvpn-clients /etc/darban /usr/local/sbin/darban /etc/apt/sources.list.d/openvpn-aptrepo.list /var/log/darban-setup.log; do
+for path in /root/pki /etc/openvpn/server /root/openvpn-clients /etc/darban /usr/local/sbin/darban /etc/apt/sources.list.d/openvpn-aptrepo.list /var/log/darban-setup.log \
+    "$EVENT_SCRIPT" "$LEDGER" /etc/systemd/system/darban-events.path /etc/systemd/system/darban-sweep.timer '/etc/systemd/system/run-darban\x2devents.mount'; do
     if [[ -e $path ]]; then echo "FAIL: still present after removal: $path"; exit 1; fi
 done
 if dpkg-query -W -f='${Status}' openvpn 2>/dev/null | grep 'install ok installed' >/dev/null; then echo 'FAIL: the openvpn package is still installed.'; exit 1; fi
