@@ -431,3 +431,65 @@ darban_snap_install_certbot() {
     if [[ -n $record && -e $record ]]; then printf 'snap certbot\n' >>"$record"; fi
     return 0
 }
+
+# ---------- this tool's deploy hook in certbot's renewal file ----------
+# The hook certbot runs after it renews the links' certificate. The old one, up to v1.0.0-rc.10, restarted the
+# link service and so ended a download in progress.
+DARBAN_RENEW_HOOK_OLD='systemctl try-restart darban-links.service'
+darban_renew_hook() {
+    # darban_renew_hook <present|absent> <renewal file> <hook> [older hook]...: certbot's renewal file names this
+    # tool's hook, or names none of this tool's. Only a "renew_hook" line whose value is exactly one of the hooks
+    # given is changed or removed, so a hook someone else set stays, and present then adds nothing. Other keys,
+    # comments and Windows line ends stay as they are. The change is written beside the file, checked there, and
+    # renamed over it, with the old file kept as <file>.darban-backup. Returns 1 when that fails, with the file as
+    # it was; 0 when the file is missing or already right.
+    local mode=$1 conf=$2 hook=$3 temp ours rc=0
+    shift 3
+    [[ -e $conf ]] || return 0
+    [[ -f $conf && ! -L $conf ]] || return 1
+    ours=$(printf '%s\n' "$hook" "$@")
+    temp=$(mktemp "$conf.XXXXXX") || return 1
+    DARBAN_OURS=$ours awk -v mode="$mode" -v hook="$hook" '
+        BEGIN { n = split(ENVIRON["DARBAN_OURS"], list, "\n"); for (i = 1; i <= n; i++) if (list[i] != "") mine[list[i]] = 1 }
+        {
+            cr = ""; line = $0
+            if (sub(/\r$/, "", line)) cr = "\r"
+            if (line ~ /^[ \t]*renew_hook[ \t]*=/) {
+                v = line; sub(/^[ \t]*renew_hook[ \t]*=[ \t]*/, "", v); sub(/[ \t]+$/, "", v)
+                if (v in mine) {
+                    if (mode == "present" && !done) { print "renew_hook = " hook cr; done = 1 }
+                    next
+                }
+                other = 1
+            }
+            print $0
+        }
+        END { if (mode == "present" && !done && !other) exit 3 }
+    ' "$conf" >"$temp" || rc=$?
+    if (( rc == 3 )); then
+        # present, and the file names no hook yet: it goes right under [renewalparams], or in a new one.
+        rc=0
+        awk -v hook="$hook" '
+            { line = $0; cr = ""; if (sub(/\r$/, "", line)) cr = "\r"; print $0
+              if (!added && line ~ /^[ \t]*\[renewalparams\][ \t]*$/) { print "renew_hook = " hook cr; added = 1 } }
+            END { if (!added) { print "[renewalparams]"; print "renew_hook = " hook } }
+        ' "$conf" >"$temp" || rc=$?
+    fi
+    if (( rc != 0 )); then rm -f -- "$temp"; return 1; fi
+    # Checked before it replaces anything.
+    if [[ $mode == present ]]; then
+        grep -Eq '^[[:space:]]*renew_hook[[:space:]]*=' "$temp" || { rm -f -- "$temp"; return 1; }
+    elif DARBAN_OURS=$ours awk '
+        BEGIN { n = split(ENVIRON["DARBAN_OURS"], list, "\n"); for (i = 1; i <= n; i++) if (list[i] != "") mine[list[i]] = 1 }
+        { line = $0; sub(/\r$/, "", line) }
+        line ~ /^[ \t]*renew_hook[ \t]*=/ { sub(/^[ \t]*renew_hook[ \t]*=[ \t]*/, "", line); sub(/[ \t]+$/, "", line); if (line in mine) found = 1 }
+        END { exit !found }' "$temp"; then
+        rm -f -- "$temp"
+        return 1
+    fi
+    if cmp -s -- "$temp" "$conf"; then rm -f -- "$temp"; return 0; fi
+    if ! cp -p -- "$conf" "$conf.darban-backup" || ! chmod --reference="$conf" -- "$temp" || ! mv -f -- "$temp" "$conf"; then
+        rm -f -- "$temp"
+        return 1
+    fi
+}

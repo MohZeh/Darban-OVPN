@@ -965,6 +965,7 @@ install_removal_scripts() {
         -e "s#^SETUP_LOG=.*#SETUP_LOG=$E/setup.log#" -e "s#^LOCK_FILE=.*#LOCK_FILE=$E/run/lock#" \
         -e "s#^CERT_LOG=.*#CERT_LOG=$E/varlib/link-certificates.log#" "$REPO/setup/remove-server.sh" > "$E/lib/remove-server.sh"
     sed -e "s#^LIB=.*#LIB=$E/fake-lib#" -e "s#^SBIN=.*#SBIN=$E/fake-sbin#" -e "s#^UNITS=.*#UNITS=$E/fake-units#" \
+        -e "s#^CONFIG_DIR=.*#CONFIG_DIR=$E/cfg#" -e "s#^LE_DIR=.*#LE_DIR=$E/le#" -e "s#^RENEW_HOOK=.*#RENEW_HOOK='$E/sbin/darban reload-links'#" \
         -e 's/^\[\[ \$EUID == 0 \]\] .*/:/' "$REPO/setup/uninstall.sh" > "$E/lib/uninstall.sh"
 }
 built_server() {
@@ -3692,6 +3693,103 @@ print(errors)
 PY
 )
     [[ $out == 0 ]]; rc_is 'every read gives a whole pair' 0 "$?"
+}
+
+# ---------- PR 3: this tool's hook in certbot's renewal file ----------
+renew_hook() {
+    # renew_hook <present|absent> <file> <hook> [older hook]...: the library's editor, run by itself.
+    bash -c 'set -uo pipefail; source "$E/lib/common.sh"; darban_renew_hook "$@"' _ "$@"
+}
+
+test_the_renewal_file_is_changed_line_by_line() {
+    # T11: only this tool's exact hook is added, moved or removed; everything else in the file stays as it was.
+    local f=$E/renewal.conf hook='/opt/dar.ban/sbin/darban reload-links' old='systemctl try-restart darban-links.service' rc
+    printf 'version = 2.9.0\r\ncert = /etc/letsencrypt/live/x/cert.pem\r\n\r\n[renewalparams]\r\nauthenticator = standalone\r\nrenew_hook = %s\r\npre_hook = %s\r\nrenew_hooks = %s\r\n' \
+        "$hook" "$hook" "$hook" > "$f"
+    renew_hook absent "$f" "$hook" "$old"; rc_is 'absent succeeds' 0 "$?"
+    if grep -q '^renew_hook' "$f"; then result 0 'this tool'"'"'s hook is removed'; else result 1 'this tool'"'"'s hook is removed'; fi
+    grep -q "^pre_hook = $hook"$'\r'"\$" "$f"; rc_is 'another key with the same value stays' 0 "$?"
+    grep -q "^renew_hooks = " "$f"; rc_is 'a key that only starts the same stays' 0 "$?"
+    [[ $(grep -c $'\r$' "$f") == 7 ]]; rc_is 'Windows line ends stay on every line' 0 "$?"
+    ok_if 'the file before is kept' test -s "$f.darban-backup"
+    grep -q '^renew_hook' "$f.darban-backup"; rc_is 'and still names the hook' 0 "$?"
+    cp "$f" "$E/after-absent"
+    renew_hook absent "$f" "$hook" "$old"; rc_is 'a second absent succeeds' 0 "$?"
+    cmp -s "$f" "$E/after-absent"; rc_is 'and changes nothing' 0 "$?"
+
+    renew_hook present "$f" "$hook" "$old"; rc_is 'present succeeds' 0 "$?"
+    [[ $(awk '/^\[renewalparams\]/ {getline; print; exit}' "$f") == "renew_hook = $hook"$'\r' ]]; rc_is 'it goes right under [renewalparams], with the same line end' 0 "$?"
+    cp "$f" "$E/after-present"
+    renew_hook present "$f" "$hook" "$old"; rc_is 'a second present succeeds' 0 "$?"
+    cmp -s "$f" "$E/after-present"; rc_is 'and adds nothing' 0 "$?"
+
+    # A dot in the path is not a pattern: a value that differs only there belongs to someone else.
+    printf '[renewalparams]\nrenew_hook = /opt/darXban/sbin/darban reload-links\n' > "$f"
+    renew_hook absent "$f" "$hook" "$old"
+    grep -qx 'renew_hook = /opt/darXban/sbin/darban reload-links' "$f"; rc_is 'a hook that only looks like it stays' 0 "$?"
+    renew_hook present "$f" "$hook" "$old"
+    [[ $(grep -c '^renew_hook' "$f") == 1 ]] && grep -qx 'renew_hook = /opt/darXban/sbin/darban reload-links' "$f"; rc_is 'and present adds none beside it' 0 "$?"
+
+    # The old hook that restarted the link service is moved to the reload.
+    printf '[renewalparams]\nrenew_hook = %s\n' "$old" > "$f"
+    renew_hook present "$f" "$hook" "$old"
+    grep -qx "renew_hook = $hook" "$f" && ! grep -q 'try-restart' "$f"; rc_is 'the old hook becomes the reload' 0 "$?"
+    printf 'version = 2.9.0\n' > "$f"
+    renew_hook present "$f" "$hook" "$old"
+    [[ $(tail -n 2 "$f") == "[renewalparams]"$'\n'"renew_hook = $hook" ]]; rc_is 'a file without the section gets one' 0 "$?"
+    renew_hook absent "$E/no-such.conf" "$hook" "$old"; rc_is 'a missing file is no failure' 0 "$?"
+
+    # A failed write is said, and leaves the file as it was.
+    printf '[renewalparams]\nrenew_hook = %s\n' "$hook" > "$f"
+    cp "$f" "$E/before-fail"
+    printf '#!/usr/bin/env bash\nexit 1\n' > "$E/bin/mv"; chmod +x "$E/bin/mv"
+    renew_hook absent "$f" "$hook" "$old"; rc=$?
+    rm -f "$E/bin/mv"
+    rc_not0 'a write that fails is a failure' "$rc"
+    cmp -s "$f" "$E/before-fail"; rc_is 'and the file is as it was' 0 "$?"
+    ok_if 'with nothing left beside it' test -z "$(find "$E" -maxdepth 1 -name 'renewal.conf.??????')"
+}
+
+test_uninstall_keeps_the_certificate_and_removes_only_this_hook() {
+    # T15 and Q1: the links' Let's Encrypt certificate stays and certbot keeps renewing it; only this tool's hook
+    # goes. A hook of another certificate stays. Using the certificate again puts the hook back.
+    local out conf=$E/le/renewal/darban-ovpn-links.conf other=$E/le/renewal/other-site.conf
+    built_server
+    start_links_stub
+    echo vpn.example.com > "$E/cfg/domain"
+    make_test_ca vpn.example.com "$E/le/live/darban-ovpn-links" fullchain.pem privkey.pem
+    mkdir -p "$E/le/renewal"
+    printf '[renewalparams]\nauthenticator = standalone\n' > "$conf"
+    printf '[renewalparams]\nauthenticator = standalone\nrenew_hook = /usr/local/bin/other-hook\n' > "$other"
+    out=$(menu '5\nfirst\n1\n1\n0\n')
+    has 'the kept certificate is used' "Links use the Let's Encrypt certificate this server got earlier" "$out"
+    grep -qx "renew_hook = $E/sbin/darban reload-links" "$conf"; rc_is 'using it puts this tool'"'"'s hook in its renewal file' 0 "$?"
+    menu '6\n1\n2\n0\n' >/dev/null
+    stop_links_stub
+    cp "$other" "$E/other.before"
+
+    out=$(bash "$E/lib/uninstall.sh" --yes 2>&1 </dev/null); rc_is 'uninstall succeeds' 0 "$?"
+    if grep -q '^renew_hook' "$conf"; then result 0 'the hook line is gone, not only the program'; else result 1 'the hook line is gone, not only the program'; fi
+    ok_if 'the certificate stays' test -s "$E/le/live/darban-ovpn-links/fullchain.pem"
+    cmp -s "$other" "$E/other.before"; rc_is 'the hook of another certificate stays' 0 "$?"
+    has 'the summary names the certificate' "$E/le/live/darban-ovpn-links" "$out"
+    has 'says certbot still renews it' 'certbot still renews it' "$out"
+    has 'and how to delete it' 'sudo certbot delete --cert-name darban-ovpn-links' "$out"
+    lacks 'no failure is reported' 'could not remove' "$out"
+
+    # Installed again: the next link that uses the certificate gives the hook back.
+    start_links_stub
+    menu '5\nfirst\n1\n1\n0\n' >/dev/null
+    grep -qx "renew_hook = $E/sbin/darban reload-links" "$conf"; rc_is 'the hook comes back' 0 "$?"
+    menu '6\n1\n2\n0\n' >/dev/null
+    stop_links_stub
+
+    # Remove everything, keeping the certificate: the same.
+    out=$(printf '2\n1\n1\nremove-everything\n' | bash "$E/manager.sh" remove-all 2>&1)
+    has 'the certificate is kept' "Kept the Let's Encrypt certificate darban-ovpn-links" "$out"
+    has 'and certbot still renews it' 'certbot still renews it' "$out"
+    if grep -q '^renew_hook' "$conf"; then result 0 'the hook line is gone after Remove everything'; else result 1 'the hook line is gone after Remove everything'; fi
+    cmp -s "$other" "$E/other.before"; rc_is 'and the other hook stays' 0 "$?"
 }
 
 mapfile -t TESTS < <(declare -F | awk '$3 ~ /^test_/ {print $3}' | sort)

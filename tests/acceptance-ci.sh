@@ -400,6 +400,64 @@ cp -a "$LOG/nat.kept" /etc/darban/nat.nft
 darban status >/dev/null
 echo 'PASS: a NAT file the installer cannot check is reported, not passed over.'
 
+# This tool's Let's Encrypt certificate from a real ACME server: Pebble, Let's Encrypt's test server, and certbot
+# from Ubuntu, which the tool installs itself. Issued with this tool's hook; a renewal by certbot reaches the open
+# link through that hook. Further down, an uninstall keeps the certificate without the hook.
+PEBBLE=v2.10.1
+pebble_dir=$LOG/pebble
+mkdir -p "$pebble_dir/bin"
+curl -fsSL --retry 2 -o "$pebble_dir/bin.tar.gz" "https://github.com/letsencrypt/pebble/releases/download/$PEBBLE/pebble-linux-$(dpkg --print-architecture).tar.gz"
+curl -fsSL --retry 2 -o "$pebble_dir/src.tar.gz" "https://github.com/letsencrypt/pebble/archive/refs/tags/$PEBBLE.tar.gz"
+tar -xzf "$pebble_dir/bin.tar.gz" -C "$pebble_dir/bin"
+tar -xzf "$pebble_dir/src.tar.gz" -C "$pebble_dir"
+pebble_bin=$(find "$pebble_dir/bin" -type f -name pebble | head -n 1)
+pebble_src=$(find "$pebble_dir" -maxdepth 1 -type d -name 'pebble-*' | head -n 1)
+chmod +x "$pebble_bin"
+(cd "$pebble_src" && PEBBLE_VA_ALWAYS_VALID=1 PEBBLE_VA_NOSLEEP=1 "$pebble_bin" -config test/config/pebble-config.json </dev/null >"$LOG/pebble.log" 2>&1 &)
+export REQUESTS_CA_BUNDLE=$pebble_src/test/certs/pebble.minica.pem
+for attempt in $(seq 1 20); do
+    if curl -fs --cacert "$REQUESTS_CA_BUNDLE" https://localhost:14000/dir >/dev/null; then break; fi
+    sleep 0.5
+done
+mkdir -p /etc/letsencrypt
+printf 'server = https://localhost:14000/dir\n' > /etc/letsencrypt/cli.ini
+cp /etc/darban/domain "$LOG/domain.before"
+echo links-test.localhost > /etc/darban/domain
+LE_CONF=/etc/letsencrypt/renewal/darban-ovpn-links.conf
+LE_LIVE=/etc/letsencrypt/live/darban-ovpn-links
+printf '7\n5\n2\n0\n0\n' | darban | tee "$LOG/le-issue.log"
+grep "New certificate from Let's Encrypt for links-test.localhost" "$LOG/le-issue.log" >/dev/null
+grep -qx 'renew_hook = /usr/local/sbin/darban reload-links' "$LE_CONF"
+cmp -s /etc/darban/link-cert.pem "$LE_LIVE/fullchain.pem"
+echo "PASS: Let's Encrypt (Pebble) issues the links' certificate, and certbot keeps this tool's hook."
+
+link_fp() { openssl x509 -in /etc/darban/link-cert.pem -noout -fingerprint -sha256 | sed 's/^.*=//'; }
+served_fp() {
+    local port
+    port=$(awk -F= '$1 == "LINK_PORT" {print $2; exit}' /etc/darban/links.env)
+    timeout 5 openssl s_client -connect "127.0.0.1:$port" -servername links-test.localhost </dev/null 2>/dev/null \
+        | openssl x509 -noout -fingerprint -sha256 2>/dev/null | sed 's/^.*=//'
+}
+printf '5\naccept2\n1\n1\n0\n' | darban | tee "$LOG/le-link.log"
+grep -oE 'https://[^ ]+/l/[0-9a-f]{64}' "$LOG/le-link.log" >/dev/null
+[[ $(served_fp) == "$(link_fp)" ]]
+before=$(link_fp)
+certbot renew --force-renewal --cert-name darban-ovpn-links 2>&1 | tee "$LOG/le-renew.log"
+cmp -s /etc/darban/link-cert.pem "$LE_LIVE/fullchain.pem"
+[[ $(link_fp) != "$before" ]]
+for attempt in $(seq 1 10); do
+    if [[ $(served_fp) == "$(link_fp)" ]]; then break; fi
+    sleep 0.5
+done
+[[ $(served_fp) == "$(link_fp)" ]]
+journalctl -u darban-links.service --no-pager | grep 'certificate reloaded' >/dev/null
+echo "PASS: certbot's renewal reaches the open link through this tool's hook, by a reload."
+cp "$LOG/domain.before" /etc/darban/domain
+# A hook of another certificate, which nothing of this tool may touch.
+OTHER_CONF=/etc/letsencrypt/renewal/other-site.conf
+printf '[renewalparams]\nauthenticator = standalone\nrenew_hook = /usr/local/bin/other-hook\n' > "$OTHER_CONF"
+cp "$OTHER_CONF" "$LOG/other-site.before"
+
 # A real update and the way back. The new version is this one under another number.
 current=$(darban version)
 next=$(mktemp -d)
@@ -414,18 +472,44 @@ printf '9\n4\n2\n' | darban
 darban status >/dev/null
 echo 'PASS: an update installs, and Restore previous version goes back.'
 
-# Removing only the tool keeps the VPN running, and installing it again finds everything.
-printf 'uninstall\n' | darban uninstall
+# Removing only the tool keeps the VPN running, and installing it again finds everything. The links' Let's Encrypt
+# certificate stays, and certbot renews it without this tool's hook; a new install gives the hook back.
+printf 'uninstall\n' | darban uninstall | tee "$LOG/uninstall.log"
 [[ ! -e /usr/local/sbin/darban ]]
 systemctl is-active --quiet "$UNIT"
+if grep -q '^renew_hook' "$LE_CONF"; then echo "FAIL: this tool's hook stayed in certbot's renewal file."; exit 1; fi
+cmp -s "$OTHER_CONF" "$LOG/other-site.before"
+grep 'certbot still renews it' "$LOG/uninstall.log" >/dev/null
+grep 'sudo certbot delete --cert-name darban-ovpn-links' "$LOG/uninstall.log" >/dev/null
+serial=$(openssl x509 -in "$LE_LIVE/cert.pem" -noout -serial)
+certbot renew --force-renewal --cert-name darban-ovpn-links 2>&1 | tee "$LOG/le-renew-after.log"
+[[ $(openssl x509 -in "$LE_LIVE/cert.pem" -noout -serial) != "$serial" ]]
+echo "PASS: after an uninstall, certbot from Ubuntu renews the kept certificate without this tool's hook."
+# certbot from the snap, which the tool uses for an IP address, when this runner can install it.
+if snap install --classic certbot >"$LOG/snap.log" 2>&1; then
+    serial=$(openssl x509 -in "$LE_LIVE/cert.pem" -noout -serial)
+    /snap/bin/certbot renew --force-renewal --cert-name darban-ovpn-links 2>&1 | tee "$LOG/le-renew-snap.log"
+    [[ $(openssl x509 -in "$LE_LIVE/cert.pem" -noout -serial) != "$serial" ]]
+    snap remove certbot >/dev/null 2>&1 || true
+    echo "PASS: certbot from the snap renews it too."
+else
+    echo "SKIPPED: certbot from the snap could not be installed on this runner: $(tail -n 1 "$LOG/snap.log")"
+fi
 bash setup/install.sh
 darban status >/dev/null
-echo 'PASS: the tool can be removed and installed again without touching the VPN.'
+grep -qx 'renew_hook = /usr/local/sbin/darban reload-links' "$LE_CONF"
+cmp -s "$OTHER_CONF" "$LOG/other-site.before"
+echo 'PASS: the tool can be removed and installed again without touching the VPN, and gets its hook back.'
 
-# Full removal: keep a backup, keep any kernel the setup added, then confirm.
+# Full removal: keep a backup, keep the links' Let's Encrypt certificate, keep any kernel the setup added, then confirm.
 kernel_answer=''
 if [[ $(bash /usr/local/lib/darban/remove-server.sh --kernel-status) == removable ]]; then kernel_answer='1\n'; fi
-printf "1\\n${kernel_answer}remove-everything\\n" | darban remove-all
+printf "1\\n1\\n${kernel_answer}remove-everything\\n" | darban remove-all | tee "$LOG/remove-all.log"
+grep "Kept the Let's Encrypt certificate darban-ovpn-links" "$LOG/remove-all.log" >/dev/null
+[[ -s $LE_LIVE/fullchain.pem ]]
+if grep -q '^renew_hook' "$LE_CONF"; then echo "FAIL: this tool's hook stayed after Remove everything."; exit 1; fi
+cmp -s "$OTHER_CONF" "$LOG/other-site.before"
+echo "PASS: Remove everything keeps the certificate when asked, without this tool's hook."
 if systemctl is-active --quiet "$UNIT"; then echo 'FAIL: OpenVPN still runs after removal.'; exit 1; fi
 for path in /root/pki /etc/openvpn/server /root/openvpn-clients /etc/darban /usr/local/sbin/darban /etc/apt/sources.list.d/openvpn-aptrepo.list /var/log/darban-setup.log; do
     if [[ -e $path ]]; then echo "FAIL: still present after removal: $path"; exit 1; fi
