@@ -1060,8 +1060,11 @@ link_cert_usable() {
 link_cert_source() {
     # Where the links' certificate came from: letsencrypt (this tool's), copied (from another tool or a file),
     # self-signed, or none.
-    if [[ ! -s $LINK_CERT ]]; then printf 'none\n'
-    elif [[ -s $LINK_CERT_SOURCE ]]; then printf 'copied\n'
+    local kind
+    if [[ ! -s $LINK_CERT ]]; then printf 'none\n'; return; fi
+    if kind=$(link_pair_kind); then printf '%s\n' "$kind"; return; fi
+    # A pair from before v1.0.0, until its first change.
+    if [[ -s $LINK_CERT_SOURCE ]]; then printf 'copied\n'
     elif [[ -L $LINK_CERT ]]; then printf 'letsencrypt\n'
     else printf 'self-signed\n'
     fi
@@ -1266,16 +1269,11 @@ explain_kept_cert() {
     fi
 }
 use_own_cert() {
-    # use_own_cert [message]: points the links at the certificate this tool got, and says so. The new links are
-    # made beside the current pair and then renamed over it, so a failure keeps the old one.
-    local new_cert=$CONFIG_DIR/.link-cert.new new_key=$CONFIG_DIR/.link-key.new
+    # use_own_cert [message]: the links take a copy of the certificate this tool got, and say so. The copy is a
+    # snapshot: a renewal by certbot reaches the links through its hook, darban reload-links.
     # Recorded only once it exists, so a removal never deletes a certificate this tool did not get.
     record_added "certbot_cert $CERT_NAME"
-    rm -f -- "$new_cert" "$new_key"
-    if ln -s "$LE_DIR/live/$CERT_NAME/fullchain.pem" "$new_cert" \
-        && ln -s "$LE_DIR/live/$CERT_NAME/privkey.pem" "$new_key" \
-        && mv -fT -- "$new_key" "$LINK_KEY" && mv -fT -- "$new_cert" "$LINK_CERT"; then
-        rm -f -- "$LINK_CERT_SOURCE"
+    if with_link_lock link_pair_install letsencrypt "$LE_DIR/live/$CERT_NAME/fullchain.pem" "$LE_DIR/live/$CERT_NAME/privkey.pem"; then
         if [[ -n ${1:-} ]]; then
             ok "$1"
         else
@@ -1283,24 +1281,163 @@ use_own_cert() {
         fi
         return 0
     fi
-    rm -f -- "$new_cert" "$new_key"
     warn 'The certificate could not be put in place; the current one stays.'
     return 1
 }
 make_self_signed_cert() {
-    # Made beside the current pair and then renamed over it, so a failure keeps the old one.
-    local host=$1 san new_cert=$CONFIG_DIR/.link-cert.new new_key=$CONFIG_DIR/.link-key.new
-    if host_is_ip "$host"; then san=IP:$host; else san=DNS:$host; fi
-    rm -f -- "$new_cert" "$new_key"
-    if openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes -keyout "$new_key" -out "$new_cert" -days 90 \
-        -subj "/CN=$host" -addext "subjectAltName=$san" >/dev/null 2>&1 \
-        && chmod 600 "$new_key" "$new_cert" \
-        && mv -fT -- "$new_key" "$LINK_KEY" && mv -fT -- "$new_cert" "$LINK_CERT"; then
-        rm -f -- "$LINK_CERT_SOURCE"
+    # Made in a folder of its own and then put in use, so a failure keeps the old pair.
+    with_link_lock link_pair_self_signed "$1" && return 0
+    fail 'Could not create a certificate for the link.'
+    return 1
+}
+
+# ---------- the certificate pair the links use ----------
+# Each certificate is kept with its key in a folder of its own, link-cert/pairs/<id>, with a file that says where it
+# came from. link-cert/current points at the pair in use and is changed by one rename, and link-cert.pem,
+# link-key.pem and link-cert.source point through it. So a reader never gets the certificate of one pair with the
+# key of another, and the pair used before a change is still whole and can be put back.
+# A change takes the CA lock. A session marks the pairs it still needs in hold.<pid>, so another session cleaning
+# up never deletes them.
+LINK_PAIRS=$CONFIG_DIR/link-cert
+link_pair_layout() {
+    [[ $(readlink "$LINK_CERT" 2>/dev/null) == link-cert/current/fullchain.pem \
+        && $(readlink "$LINK_KEY" 2>/dev/null) == link-cert/current/privkey.pem ]]
+}
+link_pair_current() {
+    local target
+    target=$(readlink "$LINK_PAIRS/current" 2>/dev/null) || return 1
+    target=${target##*/}
+    [[ -n $target && -d $LINK_PAIRS/pairs/$target ]] || return 1
+    printf '%s\n' "$target"
+}
+link_pair_kind() {
+    # letsencrypt, copied or self-signed: what the pair in use says of itself.
+    local id kind=''
+    link_pair_layout && id=$(link_pair_current) || return 1
+    [[ -r $LINK_PAIRS/pairs/$id/kind ]] && IFS= read -r kind <"$LINK_PAIRS/pairs/$id/kind"
+    [[ -n $kind ]] || return 1
+    printf '%s\n' "$kind"
+}
+with_link_lock() {
+    # with_link_lock <command>...: runs it holding the CA lock, which every change of the pair takes. A lock the
+    # caller already holds stays held.
+    local had=$CA_LOCKED rc=0
+    ca_lock || return 1
+    "$@" || rc=$?
+    (( had )) || ca_unlock
+    return "$rc"
+}
+link_pair_hold() {
+    # link_pair_hold <id>...: this session needs these pairs until link_pair_settle.
+    install -d -m 700 "$LINK_PAIRS" || return 1
+    printf '%s\n' "$@" >>"$LINK_PAIRS/hold.$$"
+}
+link_pair_settle() {
+    # The end of a change: this session needs no pair any more, and every pair nobody uses or holds goes.
+    local current file pid id dir
+    local -A keep=()
+    rm -f -- "$LINK_PAIRS/hold.$$"
+    [[ -d $LINK_PAIRS/pairs ]] || return 0
+    if current=$(link_pair_current); then keep[$current]=1; fi
+    for file in "$LINK_PAIRS"/hold.*; do
+        [[ -e $file ]] || continue
+        pid=${file##*.}
+        if [[ $pid =~ ^[0-9]+$ ]] && kill -0 "$pid" 2>/dev/null; then
+            while IFS= read -r id; do [[ -n $id ]] && keep[$id]=1; done <"$file"
+        else
+            rm -f -- "$file"
+        fi
+    done
+    for dir in "$LINK_PAIRS"/pairs/*; do
+        [[ -d $dir ]] || continue
+        id=${dir##*/}
+        [[ -v keep[$id] ]] || rm -rf -- "$dir"
+    done
+}
+link_pair_name() {
+    # link_pair_name <path> <target>: one rename makes path point at target, once.
+    [[ $(readlink "$1" 2>/dev/null) == "$2" ]] && return 0
+    rm -f -- "$1.new"
+    ln -s "$2" "$1.new" && mv -fT -- "$1.new" "$1" || { rm -f -- "$1.new"; return 1; }
+}
+link_pair_switch() {
+    # link_pair_switch <id>: one rename puts the pair in use. The names the link service opens point through it.
+    local temp=$LINK_PAIRS/.current.new
+    rm -f -- "$temp"
+    ln -s "pairs/$1" "$temp" && mv -fT -- "$temp" "$LINK_PAIRS/current" || { rm -f -- "$temp"; return 1; }
+    link_pair_name "$LINK_KEY" link-cert/current/privkey.pem \
+        && link_pair_name "$LINK_CERT" link-cert/current/fullchain.pem \
+        && link_pair_name "$LINK_CERT_SOURCE" link-cert/current/origin
+}
+link_pair_discard() {
+    # link_pair_discard <dir>: a pair that failed goes, unless it was already put in use.
+    [[ $(link_pair_current 2>/dev/null) == "${1##*/}" ]] || rm -rf -- "$1"
+}
+link_pair_new() {
+    # An empty folder for a pair, which nothing uses until link_pair_switch.
+    install -d -m 700 "$LINK_PAIRS" "$LINK_PAIRS/pairs" || return 1
+    mktemp -d "$LINK_PAIRS/pairs/XXXXXXXX"
+}
+link_pair_install() {
+    # link_pair_install <kind> <cert> <key> [host] [origin cert] [origin key]: a copy of the pair in a folder of its
+    # own, checked there as a pair, and for host when one is given, then put in use. A renewal elsewhere between the
+    # two copies gives a pair that does not match, which is refused. On failure the pair in use is unchanged.
+    local kind=$1 cert=$2 key=$3 host=${4:-} dir
+    link_pair_migrate
+    dir=$(link_pair_new) || return 1
+    if cp -L -- "$cert" "$dir/fullchain.pem" && cp -L -- "$key" "$dir/privkey.pem" \
+        && chmod 600 "$dir/fullchain.pem" "$dir/privkey.pem" \
+        && cert_key_matches "$dir/fullchain.pem" "$dir/privkey.pem" \
+        && { [[ -z $host ]] || [[ -z $(cert_problem "$dir/fullchain.pem" "$dir/privkey.pem" "$host") ]]; } \
+        && printf '%s\n' "$kind" >"$dir/kind" \
+        && { [[ -z ${5:-} ]] || printf '%s\n%s\n' "$5" "$6" >"$dir/origin"; } \
+        && link_pair_hold "${dir##*/}" && link_pair_switch "${dir##*/}"; then
         return 0
     fi
-    rm -f -- "$new_cert" "$new_key"
-    fail 'Could not create a certificate for the link.'
+    link_pair_discard "$dir"
+    return 1
+}
+link_pair_migrate() {
+    # A pair from before v1.0.0, two files or two links into /etc/letsencrypt, gets a folder of its own once. One
+    # that cannot be read as a pair is left for the next install to replace.
+    local kind origin_cert='' origin_key='' dir
+    rm -f -- "$CONFIG_DIR/.link-cert.prev" "$CONFIG_DIR/.link-key.prev" "$CONFIG_DIR/.link-cert.source.prev"
+    link_pair_layout && return 0
+    [[ -s $LINK_CERT && -s $LINK_KEY ]] || return 0
+    if [[ -s $LINK_CERT_SOURCE ]]; then
+        kind=copied
+        { IFS= read -r origin_cert; IFS= read -r origin_key; } <"$LINK_CERT_SOURCE" || true
+    elif [[ -L $LINK_CERT ]]; then
+        kind=letsencrypt
+    else
+        kind=self-signed
+    fi
+    dir=$(link_pair_new) || return 0
+    if cp -L -- "$LINK_CERT" "$dir/fullchain.pem" && cp -L -- "$LINK_KEY" "$dir/privkey.pem" \
+        && chmod 600 "$dir/fullchain.pem" "$dir/privkey.pem" \
+        && cert_key_matches "$dir/fullchain.pem" "$dir/privkey.pem" \
+        && printf '%s\n' "$kind" >"$dir/kind" \
+        && { [[ -z $origin_cert ]] || printf '%s\n%s\n' "$origin_cert" "$origin_key" >"$dir/origin"; } \
+        && link_pair_hold "${dir##*/}" && link_pair_switch "${dir##*/}"; then
+        return 0
+    fi
+    link_pair_discard "$dir"
+    return 0
+}
+link_pair_self_signed() {
+    # link_pair_self_signed <host>: made in a folder of its own and then put in use.
+    local host=$1 san dir
+    if host_is_ip "$host"; then san=IP:$host; else san=DNS:$host; fi
+    link_pair_migrate
+    dir=$(link_pair_new) || return 1
+    if openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes -keyout "$dir/privkey.pem" -out "$dir/fullchain.pem" \
+        -days 90 -subj "/CN=$host" -addext "subjectAltName=$san" >/dev/null 2>&1 \
+        && chmod 600 "$dir/privkey.pem" "$dir/fullchain.pem" \
+        && printf 'self-signed\n' >"$dir/kind" \
+        && link_pair_hold "${dir##*/}" && link_pair_switch "${dir##*/}"; then
+        return 0
+    fi
+    link_pair_discard "$dir"
     return 1
 }
 
@@ -1325,9 +1462,9 @@ cert_publicly_trusted() {
     awk -v d="$dir" '/-----BEGIN CERTIFICATE-----/ {n++} n {print > (d (n == 1 ? "/leaf.pem" : "/chain.pem"))}' "$1" 2>/dev/null || rc=1
     if (( rc == 0 )) && [[ -s $dir/leaf.pem ]]; then
         if [[ -s $dir/chain.pem ]]; then
-            openssl verify -CAfile "$SYSTEM_CA_FILE" -untrusted "$dir/chain.pem" "$dir/leaf.pem" >/dev/null 2>&1 || rc=1
+            openssl verify -purpose sslserver -CAfile "$SYSTEM_CA_FILE" -untrusted "$dir/chain.pem" "$dir/leaf.pem" >/dev/null 2>&1 || rc=1
         else
-            openssl verify -CAfile "$SYSTEM_CA_FILE" "$dir/leaf.pem" >/dev/null 2>&1 || rc=1
+            openssl verify -purpose sslserver -CAfile "$SYSTEM_CA_FILE" "$dir/leaf.pem" >/dev/null 2>&1 || rc=1
         fi
     else
         rc=1
@@ -1376,6 +1513,10 @@ cert_problem() {
         printf '%s\n' "The certificate in $1 is a Cloudflare Origin certificate. Browsers trust it only through Cloudflare's proxy, and the VPN address cannot go through that proxy, because OpenVPN uses UDP. The browser would still warn."
         return
     fi
+    if ! openssl x509 -in "$1" -noout -purpose 2>/dev/null | grep -x 'SSL server : Yes' >/dev/null; then
+        printf 'The certificate in %s is not made for a server, only to identify a client, so browsers would refuse it.\n' "$1"
+        return
+    fi
     if ! cert_publicly_trusted "$1"; then printf 'Browsers would not trust the certificate in %s: it is self-signed, or its file lacks the intermediate certificates.\n' "$1"; fi
 }
 find_existing_cert() {
@@ -1399,41 +1540,41 @@ explain_untrusted_certs() {
     done < <(existing_cert_pairs)
 }
 copy_cert_pair() {
-    # copy_cert_pair <cert> <key> <host>: both files are copied beside the current pair and checked there as a
-    # pair, then put in place. A failure before that leaves the current pair as it was. A renewal elsewhere
-    # between the two copies gives a pair that does not match, and is refused the same way. The two renames
-    # cannot be one step; if only the first is done, link_cert_usable sees the pair does not match.
-    local cert=$1 key=$2 host=$3 new_cert new_key
-    new_cert=$(mktemp "$CONFIG_DIR/.link-cert.XXXXXX") || return 1
-    new_key=$(mktemp "$CONFIG_DIR/.link-key.XXXXXX") || { rm -f -- "$new_cert"; return 1; }
-    if cp -- "$cert" "$new_cert" && cp -- "$key" "$new_key" && chmod 600 "$new_cert" "$new_key" \
-        && [[ -z $(cert_problem "$new_cert" "$new_key" "$host") ]] \
-        && mv -f -- "$new_key" "$LINK_KEY" && mv -f -- "$new_cert" "$LINK_CERT"; then
-        return 0
-    fi
-    rm -f -- "$new_cert" "$new_key"
-    return 1
+    # copy_cert_pair <cert> <key> <host>: both files are copied into a folder of their own and checked there as a
+    # pair, then put in use. A failure leaves the current pair as it was.
+    with_link_lock link_pair_install copied "$1" "$2" "$3" "$1" "$2"
 }
 use_existing_cert() {
     # A copy, not a link: the link service cannot read /root. Each new link copies it again after a renewal.
     local cert=$1 key=$2 host
     host=$(domain)
     copy_cert_pair "$cert" "$key" "$host" || { fail "Could not take the certificate from $(safe_text "$cert"); the current one stays."; return 1; }
-    printf '%s\n%s\n' "$cert" "$key" >"$LINK_CERT_SOURCE" || return 1
-    chmod 600 "$LINK_CERT_SOURCE"
     audit "link certificate taken from $cert"
     ok "Links use the trusted certificate from $(safe_text "$cert"). When it is renewed there, the next link takes the new one."
 }
-refresh_copied_cert() {
-    # A certificate taken from elsewhere is copied again once its owner has renewed it.
-    local host=$1 cert='' key=''
-    [[ -s $LINK_CERT_SOURCE ]] || return 0
-    { IFS= read -r cert; IFS= read -r key; } <"$LINK_CERT_SOURCE" || true
-    [[ -n $cert && -n $key ]] || return 0
+refresh_link_pair() {
+    # refresh_link_pair <host>: the links hold a copy, so a renewal where it came from is copied again: certbot's for
+    # this tool's own certificate, another tool's for one taken from it. Returns 1 when the renewed pair could not
+    # be taken, and the current one stays.
+    local host=$1 cert='' key='' label
+    case $(link_cert_source) in
+        letsencrypt)
+            # A link into /etc/letsencrypt from before v1.0.0 follows the renewal by itself, until its first change.
+            link_pair_layout || return 0
+            cert=$LE_DIR/live/$CERT_NAME/fullchain.pem key=$LE_DIR/live/$CERT_NAME/privkey.pem label="Let's Encrypt" ;;
+        copied)
+            [[ -r $LINK_CERT_SOURCE ]] && { IFS= read -r cert; IFS= read -r key; } <"$LINK_CERT_SOURCE"
+            label=$(safe_text "$cert") ;;
+        *) return 0 ;;
+    esac
+    [[ -n $cert && -n $key && -s $cert && -s $key ]] || return 0
     if cmp -s -- "$cert" "$LINK_CERT" && cmp -s -- "$key" "$LINK_KEY"; then return 0; fi
-    if [[ -z $(cert_problem "$cert" "$key" "$host") ]] && copy_cert_pair "$cert" "$key" "$host"; then
-        info "The link certificate was renewed in $(safe_text "$cert"); links use the new one."
+    if [[ $(link_cert_source) == letsencrypt ]]; then
+        with_link_lock link_pair_install letsencrypt "$cert" "$key" || return 1
+    else
+        [[ -z $(cert_problem "$cert" "$key" "$host") ]] && copy_cert_pair "$cert" "$key" "$host" || return 1
     fi
+    info "The link certificate was renewed in $label; links use the new one."
 }
 offer_trusted_cert() {
     # A trusted certificate already on this server comes first, then Let's Encrypt. Returns 1 when neither.
@@ -1469,16 +1610,37 @@ update_link_renew_hook() {
     sed -i "s#^renew_hook = $LINK_RENEW_HOOK_OLD\$#renew_hook = $SBIN_DIR/darban reload-links#" "$conf" 2>/dev/null || true
 }
 reload_links_now() {
-    # certbot's deploy hook: a renewed certificate reaches open links, and a download in progress finishes. A link
-    # service from before v1.0.0-rc.9 would end on a reload, so it is restarted instead.
-    systemctl is-active --quiet darban-links.service 2>/dev/null || return 0
-    if link_service_reloadable; then systemctl reload darban-links.service; else systemctl restart darban-links.service; fi
+    # certbot's deploy hook: the renewed certificate is copied for the links, and reaches open links without ending
+    # a download in progress. A link service from before v1.0.0-rc.9 would end on a reload, so it is restarted.
+    local before='' rc=0
+    with_link_lock link_pair_migrate || true
+    before=$(link_pair_current) || before=''
+    if [[ -n $before ]]; then link_pair_hold "$before" || true; fi
+    refresh_link_pair "$(domain)" || true
+    if systemctl is-active --quiet darban-links.service 2>/dev/null; then
+        if [[ $(link_pair_current 2>/dev/null) != "$before" ]]; then
+            put_link_cert_in_service "$before" || rc=1
+        elif link_service_reloadable; then
+            systemctl reload darban-links.service || rc=1
+        else
+            systemctl restart darban-links.service || rc=1
+        fi
+    fi
+    with_link_lock link_pair_settle || true
+    return "$rc"
 }
 ensure_link_cert() {
-    local host=$1
+    # A usable certificate for a new link. The pairs this replaced go once it is done.
+    local rc=0
     update_link_renew_hook
-    local ends
-    refresh_copied_cert "$host"
+    with_link_lock link_pair_migrate || true
+    choose_link_cert "$1" || rc=$?
+    with_link_lock link_pair_settle || true
+    return "$rc"
+}
+choose_link_cert() {
+    local host=$1 ends
+    refresh_link_pair "$host" || true
     if link_cert_usable "$host"; then
         # A self-signed certificate is no reason to stop offering a trusted one: the question returns with each
         # link, and No keeps the current certificate.
@@ -1589,13 +1751,16 @@ choose_another_cert() {
     esac
 }
 change_link_cert_to() {
-    # change_link_cert_to <host> <choice>: the change, then the running service takes it.
-    local host=$1 before
-    before=$(cert_fingerprint "$LINK_CERT")
-    save_link_cert_pair || { fail 'Could not keep a copy of the current certificate; nothing changed.'; return 1; }
-    change_link_cert_choice "$host" "$2" || true
-    if [[ $(cert_fingerprint "$LINK_CERT") != "$before" ]]; then put_link_cert_in_service || true; fi
-    drop_saved_link_cert_pair
+    # change_link_cert_to <host> <choice>: the change, then the running service takes it. 0: changed and served, or
+    # nothing changed; 1: the change failed, or the service did not take it and the previous pair was put back.
+    local host=$1 before='' rc=0
+    with_link_lock link_pair_migrate || true
+    before=$(link_pair_current) || before=''
+    if [[ -n $before ]]; then link_pair_hold "$before" || { fail 'Could not keep the current certificate; nothing changed.'; return 1; }; fi
+    change_link_cert_choice "$host" "$2" || rc=$?
+    if [[ $(link_pair_current 2>/dev/null) != "$before" ]]; then put_link_cert_in_service "$before" || rc=1; fi
+    with_link_lock link_pair_settle || true
+    return "$rc"
 }
 change_link_cert_choice() {
     local host=$1 cert key guess problem found end
@@ -1644,22 +1809,6 @@ change_link_cert_choice() {
 valid_abs_path() { [[ $1 == /* && $1 != *$'\n'* ]]; }
 
 # ---------- the running link service takes a changed certificate ----------
-LINK_CERT_PREV=$CONFIG_DIR/.link-cert.prev
-LINK_KEY_PREV=$CONFIG_DIR/.link-key.prev
-LINK_SOURCE_PREV=$CONFIG_DIR/.link-cert.source.prev
-save_link_cert_pair() {
-    # The pair in use before a change, links kept as links, so a change the service does not take is undone.
-    rm -f -- "$LINK_CERT_PREV" "$LINK_KEY_PREV" "$LINK_SOURCE_PREV"
-    [[ -e $LINK_CERT || -L $LINK_CERT ]] || return 0
-    cp -P -- "$LINK_CERT" "$LINK_CERT_PREV" && cp -P -- "$LINK_KEY" "$LINK_KEY_PREV" || return 1
-    if [[ -e $LINK_CERT_SOURCE ]]; then cp -- "$LINK_CERT_SOURCE" "$LINK_SOURCE_PREV" || return 1; fi
-}
-restore_link_cert_pair() {
-    [[ -e $LINK_CERT_PREV || -L $LINK_CERT_PREV ]] || return 1
-    mv -fT -- "$LINK_KEY_PREV" "$LINK_KEY" && mv -fT -- "$LINK_CERT_PREV" "$LINK_CERT" || return 1
-    if [[ -e $LINK_SOURCE_PREV ]]; then mv -f -- "$LINK_SOURCE_PREV" "$LINK_CERT_SOURCE"; else rm -f -- "$LINK_CERT_SOURCE"; fi
-}
-drop_saved_link_cert_pair() { rm -f -- "$LINK_CERT_PREV" "$LINK_KEY_PREV" "$LINK_SOURCE_PREV"; }
 served_link_cert_fingerprint() {
     # The certificate the link service answers with now, asked for the way a browser asks.
     local port
@@ -1684,9 +1833,10 @@ link_service_reloadable() {
     [[ -n $pid && $pid == "$(systemctl show -p MainPID --value darban-links.service 2>/dev/null)" ]]
 }
 put_link_cert_in_service() {
-    # After a change of the links' certificate: the running service takes it without stopping a download in
-    # progress, and it is called done only once the service answers with it. One it does not take is undone.
-    local want
+    # put_link_cert_in_service <pair before the change>: the running service takes the new pair without stopping a
+    # download in progress, and it is called done only once the service answers with it. One it does not take is
+    # undone: the pair from before is put back whole, and the service answers with it again.
+    local previous=${1:-} want
     if ! systemctl is-active --quiet darban-links.service 2>/dev/null; then
         info 'No link is open, so the link service is not running: the next link uses this certificate.'
         return 0
@@ -1705,7 +1855,7 @@ put_link_cert_in_service() {
         info 'The last link just ended, so the link service stopped: the next link uses this certificate.'
         return 0
     fi
-    if restore_link_cert_pair; then
+    if [[ -n $previous ]] && with_link_lock link_pair_switch "$previous"; then
         want=$(cert_fingerprint "$LINK_CERT")
         if systemctl is-active --quiet darban-links.service 2>/dev/null; then
             systemctl reload darban-links.service 2>/dev/null || true
@@ -1714,7 +1864,7 @@ put_link_cert_in_service() {
             start_link_service "$(domain)" >/dev/null 2>&1 || true
         fi
         if link_service_serves "$want"; then
-            fail "The link service did not take the new certificate, so the previous one was put back, and open links use it. Details: $(cmd journalctl -u darban-links.service -n 20 --no-pager)"
+            fail "The link service did not take the new certificate, so the previous one was put back, valid until $(cert_end_date "$LINK_CERT"), and open links use it. Details: $(cmd journalctl -u darban-links.service -n 20 --no-pager)"
             return 1
         fi
     fi
