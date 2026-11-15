@@ -217,19 +217,21 @@ wait_session_end() {
     done
     return 1
 }
+# A client killed with kill -9 leaves its in-kernel (DCO) interface behind, and the next client could not take it.
+kill_client() { kill -9 "$(cat "$PIDFILE")"; sleep 1; ip link del tun9 2>/dev/null || true; }
 connect "$PROFILE" "$LOG/t67-term.log"; before=$(session_end)
 kill -TERM "$(cat "$PIDFILE")"
 took=$(wait_session_end "$before" 150) || { echo 'FAIL: the end of a session after SIGTERM was not recorded in 150 seconds.'; exit 1; }
 echo "T67: client stopped by SIGTERM: the end recorded after ${took} s"
 sleep 1
 connect "$PROFILE" "$LOG/t67-kill.log"; before=$(session_end)
-kill -9 "$(cat "$PIDFILE")"
+kill_client
 took=$(wait_session_end "$before" 150) || { echo 'FAIL: the end of a session after kill -9 was not recorded in 150 seconds.'; exit 1; }
 echo "T67: client killed with kill -9: the end recorded after ${took} s"
 if (( took >= 130 )); then echo 'FAIL: the end of a killed session took 130 seconds or more.'; exit 1; fi
 sleep 1
 connect "$PROFILE" "$LOG/t67-again.log"; before=$(session_end)
-kill -9 "$(cat "$PIDFILE")"; sleep 1
+kill_client
 connect "$PROFILE" "$LOG/t67-again2.log"
 took=$(wait_session_end "$before" 150) || { echo 'FAIL: a new session of the same name did not end the old one in 150 seconds.'; exit 1; }
 echo "T67: the same name connecting again: the old session's end recorded after ${took} s"
