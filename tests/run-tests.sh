@@ -2787,6 +2787,7 @@ test_a_certificate_change_reaches_open_links() {
     make_test_ca vpn.example.com "$E/panel-cert/vpn.example.com" fullchain.pem privkey.pem
     out=$(menu '7\n5\n3\n1\n0\n0\n')
     has 'the change reaches the open link' 'Open links use it now; no download was interrupted.' "$out"
+    printf '%s\n' "$out" | grep -vE '^ +[0-9]+  |────|^ +[A-Z ]+$|^ +(Server|Clients) ' | head -60 | sed 's/^/DBG1 /'; tail -n 20 "$E/links.log" | sed 's/^/DBG3 /'
     [[ $(served_fp) == "$(file_fp)" ]]; rc_is 'the port answers with the new certificate' 0 "$?"
     [[ $(cat "$LINKS_PIDFILE") == "$pid" ]] && kill -0 "$pid"; rc_is 'by a reload, not a restart' 0 "$?"
     grep -q 'certificate reloaded' "$E/links.log"; rc_is 'the service logs the reload' 0 "$?"
@@ -3643,6 +3644,7 @@ test_a_renewal_the_link_service_does_not_take_is_named() {
     [[ $(served_fp) == "$old" ]]; rc_is 'the open link serves the Let'"'"'s Encrypt copy' 0 "$?"
     make_test_ca vpn.example.com "$E/le/live/darban-ovpn-links" fullchain.pem privkey.pem 40
     out=$(FAKE_RELOAD_FAIL=1 bash "$E/manager.sh" reload-links </dev/null 2>&1); rc_not0 'a renewal the service did not take is a failure' "$?"
+    printf '%s\n' "$out" | head -40 | sed 's/^/DBG2 /'
     has 'it is copied for the links' "renewed in Let's Encrypt" "$out"
     has 'the one put back is named, with its end' "so the previous one was put back, valid until $(cert_end_date_of "$E/cfg/link-cert.pem")" "$out"
     [[ $(file_fp) == "$old" && $(served_fp) == "$old" ]]; rc_is 'the file and the port agree on the previous one' 0 "$?"
