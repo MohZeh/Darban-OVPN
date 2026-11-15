@@ -3707,7 +3707,7 @@ test_the_renewal_file_is_changed_line_by_line() {
     printf 'version = 2.9.0\r\ncert = /etc/letsencrypt/live/x/cert.pem\r\n\r\n[renewalparams]\r\nauthenticator = standalone\r\nrenew_hook = %s\r\npre_hook = %s\r\nrenew_hooks = %s\r\n' \
         "$hook" "$hook" "$hook" > "$f"
     renew_hook absent "$f" "$hook" "$old"; rc_is 'absent succeeds' 0 "$?"
-    if grep -q '^renew_hook' "$f"; then result 0 'this tool'"'"'s hook is removed'; else result 1 'this tool'"'"'s hook is removed'; fi
+    if grep -q '^renew_hook =' "$f"; then result 0 'this tool'"'"'s hook is removed'; else result 1 'this tool'"'"'s hook is removed'; fi
     grep -q "^pre_hook = $hook"$'\r'"\$" "$f"; rc_is 'another key with the same value stays' 0 "$?"
     grep -q "^renew_hooks = " "$f"; rc_is 'a key that only starts the same stays' 0 "$?"
     [[ $(grep -c $'\r$' "$f") == 7 ]]; rc_is 'Windows line ends stay on every line' 0 "$?"
@@ -3783,10 +3783,17 @@ test_uninstall_keeps_the_certificate_and_removes_only_this_hook() {
     menu '6\n1\n2\n0\n' >/dev/null
     stop_links_stub
 
-    # Remove everything, keeping the certificate: the same.
+    # Remove everything, keeping the certificate: the same. What it says of the renewal depends on whether the setup
+    # installed certbot, which Remove everything then takes away.
+    local setup_certbot=0
+    if grep -Eqx '(package|snap) certbot' "$E/cfg/.server-setup-started"; then setup_certbot=1; fi
     out=$(printf '2\n1\n1\nremove-everything\n' | bash "$E/manager.sh" remove-all 2>&1)
     has 'the certificate is kept' "Kept the Let's Encrypt certificate darban-ovpn-links" "$out"
-    has 'and certbot still renews it' 'certbot still renews it' "$out"
+    if (( setup_certbot )); then
+        has 'and says nothing renews it once its certbot is gone' 'The certbot this setup installed is removed, so nothing renews it' "$out"
+    else
+        has 'and certbot still renews it' 'certbot still renews it' "$out"
+    fi
     if grep -q '^renew_hook' "$conf"; then result 0 'the hook line is gone after Remove everything'; else result 1 'the hook line is gone after Remove everything'; fi
     cmp -s "$other" "$E/other.before"; rc_is 'and the other hook stays' 0 "$?"
 }
