@@ -135,5 +135,11 @@ if [[ -f $NAT_FILE ]]; then
         echo "NOTE: the NAT rules were not checked, because server.conf has no single /24 VPN network or $NAT_FILE names no outgoing interface. See: sudo darban status" >&2
     fi
 fi
+# The links' Let's Encrypt certificate, kept through an uninstall, gets this tool's hook back, so a renewal by
+# certbot reaches the links again. A hook someone else set there stays.
+LE_RENEWAL=/etc/letsencrypt/renewal/darban-ovpn-links.conf
+if [[ -e $LE_RENEWAL ]] && ! darban_renew_hook present "$LE_RENEWAL" '/usr/local/sbin/darban reload-links' "$DARBAN_RENEW_HOOK_OLD"; then
+    echo "NOTE: could not add this tool's hook to $LE_RENEWAL. certbot still renews the links' certificate; links take a renewal with the next link." >&2
+fi
 printf '%s\n' "$VERSION" > "$LIB/.installed"
 printf 'Darban OVPN v%s is installed. To open it: sudo darban\n' "$VERSION"

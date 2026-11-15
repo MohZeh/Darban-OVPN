@@ -151,6 +151,11 @@ if (( KEEP_CERT )); then
         until=$(openssl x509 -in "/etc/letsencrypt/live/$name/cert.pem" -noout -enddate 2>/dev/null | cut -d= -f2)
         until=$(date -u -d "$until" +%Y-%m-%d 2>/dev/null || true)
         printf 'Kept the Let'"'"'s Encrypt certificate %s in /etc/letsencrypt%s; a new install here uses it again.\n' "$name" "${until:+, valid until $until}"
+        if grep -Eqx '(package|snap) certbot' "$MARKER"; then
+            printf 'The certbot this setup installed is removed, so nothing renews it; a new install renews it when a link needs it.\n'
+        else
+            printf 'certbot still renews it. Its hook to this tool goes with the tool, and a new install adds it back.\n'
+        fi
         printf 'To delete it: sudo rm -rf /etc/letsencrypt/live/%s /etc/letsencrypt/archive/%s /etc/letsencrypt/renewal/%s.conf %s\n' \
             "$name" "$name" "$name" "$CERT_LOG"
     done

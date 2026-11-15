@@ -1157,11 +1157,11 @@ get_trusted_cert() {
     before=$(cert_fingerprint "$live")
     out=$(mktemp) || return 1
     if (( renewing )); then
-        update_link_renew_hook
+        set_link_renew_hook present || true
         # Nothing is done when it is not due yet.
         kind=renew
         info "Renewing the certificate for $host${S_ELL}"
-        "$certbot" renew --non-interactive --cert-name "$CERT_NAME" >"$out" 2>&1 || rc=$?
+        "$certbot" renew --non-interactive --cert-name "$CERT_NAME" --no-random-sleep-on-renew >"$out" 2>&1 || rc=$?
     else
         # This server's record is only an estimate: Let's Encrypt keeps the count, and refuses with its own time
         # when the week is used up. A refused request changes nothing here, so it is asked anyway.
@@ -1273,6 +1273,8 @@ use_own_cert() {
     # snapshot: a renewal by certbot reaches the links through its hook, darban reload-links.
     # Recorded only once it exists, so a removal never deletes a certificate this tool did not get.
     record_added "certbot_cert $CERT_NAME"
+    # A certificate kept through an uninstall has no hook of this tool any more: it gets it back here.
+    set_link_renew_hook present || true
     if with_link_lock link_pair_install letsencrypt "$LE_DIR/live/$CERT_NAME/fullchain.pem" "$LE_DIR/live/$CERT_NAME/privkey.pem"; then
         if [[ -n ${1:-} ]]; then
             ok "$1"
@@ -1601,13 +1603,15 @@ offer_trusted_cert() {
     explain_untrusted_certs "$host"
     get_trusted_cert "$host"
 }
-LINK_RENEW_HOOK_OLD='systemctl try-restart darban-links.service'
-update_link_renew_hook() {
-    # Up to v1.0.0-rc.10, certbot's hook restarted the link service after a renewal, which ended a download in
-    # progress. The hook kept in certbot's renewal file is moved to the reload.
+set_link_renew_hook() {
+    # set_link_renew_hook <present|absent>: certbot's renewal file of this tool's own certificate names this tool's
+    # deploy hook, or does not. A hook someone else set there stays. An older hook, the one that restarted the link
+    # service and so ended a download in progress, is moved to the reload.
     local conf=$LE_DIR/renewal/$CERT_NAME.conf
-    [[ -s $conf ]] && grep -qxF "renew_hook = $LINK_RENEW_HOOK_OLD" "$conf" || return 0
-    sed -i "s#^renew_hook = $LINK_RENEW_HOOK_OLD\$#renew_hook = $SBIN_DIR/darban reload-links#" "$conf" 2>/dev/null || true
+    [[ -e $conf ]] || return 0
+    darban_renew_hook "$1" "$conf" "$SBIN_DIR/darban reload-links" "$DARBAN_RENEW_HOOK_OLD" && return 0
+    warn "Could not change certbot's renewal file $conf, so it stays as it was. It should say: renew_hook = $SBIN_DIR/darban reload-links"
+    return 1
 }
 reload_links_now() {
     # certbot's deploy hook: the renewed certificate is copied for the links, and reaches open links without ending
@@ -1632,7 +1636,7 @@ reload_links_now() {
 ensure_link_cert() {
     # A usable certificate for a new link. The pairs this replaced go once it is done.
     local rc=0
-    update_link_renew_hook
+    set_link_renew_hook present || true
     with_link_lock link_pair_migrate || true
     choose_link_cert "$1" || rc=$?
     with_link_lock link_pair_settle || true
