@@ -442,7 +442,7 @@ printf '5\naccept2\n1\n1\n0\n' | darban | tee "$LOG/le-link.log"
 grep -oE 'https://[^ ]+/l/[0-9a-f]{64}' "$LOG/le-link.log" >/dev/null
 [[ $(served_fp) == "$(link_fp)" ]]
 before=$(link_fp)
-certbot renew --force-renewal --cert-name darban-ovpn-links 2>&1 | tee "$LOG/le-renew.log"
+certbot renew --no-random-sleep-on-renew --force-renewal --cert-name darban-ovpn-links 2>&1 | tee "$LOG/le-renew.log"
 cmp -s /etc/darban/link-cert.pem "$LE_LIVE/fullchain.pem"
 [[ $(link_fp) != "$before" ]]
 for attempt in $(seq 1 10); do
@@ -482,7 +482,7 @@ cmp -s "$OTHER_CONF" "$LOG/other-site.before"
 grep 'certbot still renews it' "$LOG/uninstall.log" >/dev/null
 grep 'sudo certbot delete --cert-name darban-ovpn-links' "$LOG/uninstall.log" >/dev/null
 serial=$(openssl x509 -in "$LE_LIVE/cert.pem" -noout -serial)
-certbot renew --force-renewal --cert-name darban-ovpn-links 2>&1 | tee "$LOG/le-renew-after.log"
+certbot renew --no-random-sleep-on-renew --force-renewal --cert-name darban-ovpn-links 2>&1 | tee "$LOG/le-renew-after.log"
 [[ $(openssl x509 -in "$LE_LIVE/cert.pem" -noout -serial) != "$serial" ]]
 echo "PASS: after an uninstall, certbot from Ubuntu renews the kept certificate without this tool's hook."
 # certbot from the snap, which the tool uses for an IP address, when this runner can install it.
@@ -490,7 +490,7 @@ if timeout 300 snap install --classic certbot >"$LOG/snap.log" 2>&1; then
     serial=$(openssl x509 -in "$LE_LIVE/cert.pem" -noout -serial)
     # The snap's certbot against the test ACME server is this runner's question, not the tool's: a limit, and a
     # failure is named instead of failing the run. The renewal by Ubuntu's certbot above is the check.
-    if timeout 120 /snap/bin/certbot renew --non-interactive --force-renewal --cert-name darban-ovpn-links </dev/null >"$LOG/le-renew-snap.log" 2>&1 \
+    if timeout 120 /snap/bin/certbot renew --non-interactive --no-random-sleep-on-renew --force-renewal --cert-name darban-ovpn-links </dev/null >"$LOG/le-renew-snap.log" 2>&1 \
         && [[ $(openssl x509 -in "$LE_LIVE/cert.pem" -noout -serial) != "$serial" ]]; then
         echo "PASS: certbot from the snap renews it too."
     else

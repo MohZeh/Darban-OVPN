@@ -1161,7 +1161,7 @@ get_trusted_cert() {
         # Nothing is done when it is not due yet.
         kind=renew
         info "Renewing the certificate for $host${S_ELL}"
-        "$certbot" renew --non-interactive --cert-name "$CERT_NAME" >"$out" 2>&1 || rc=$?
+        "$certbot" renew --non-interactive --cert-name "$CERT_NAME" --no-random-sleep-on-renew >"$out" 2>&1 || rc=$?
     else
         # This server's record is only an estimate: Let's Encrypt keeps the count, and refuses with its own time
         # when the week is used up. A refused request changes nothing here, so it is asked anyway.
