@@ -208,7 +208,9 @@ echo 'PASS: a CRL OpenVPN cannot read is named, refuses every client, and works 
 
 # T67 and C.15.1: when the server records the end of a session. It runs client-disconnect when it closes the
 # session, which may be well after the device went away; a kill -9 must still be recorded within 130 seconds.
-PROFILE=/root/openvpn-clients/accept1.ovpn
+# A copy: sharing it by a link later takes the file off the server.
+cp /root/openvpn-clients/accept1.ovpn "$LOG/accept1.ovpn"
+PROFILE=$LOG/accept1.ovpn
 session_end() { awk -F= '$1=="session_end" {print $2}' "$LEDGER/accept1" 2>/dev/null || true; }
 wait_session_end() {
     # wait_session_end <value before> <seconds>: prints how long the record took, or fails.
