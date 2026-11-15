@@ -110,6 +110,11 @@ in_vm 'sudo darban status' | tee "$WORK/status.log"
 grep -q 'DCO kernel module: ovpn' "$WORK/status.log"
 in_vm 'ip -d link show tun0' | grep -w ovpn >/dev/null
 echo 'PASS: after the reboot the service, NAT, timer and forwarding are back, and the server uses DCO.'
+# T27 and T59: the queue of connection events is a tmpfs again, made ready at boot, and its jobs run.
+in_vm 'test "$(findmnt -n -o FSTYPE /run/darban-events)" = tmpfs && test -e /run/darban-events/.mounted'
+in_vm 'systemctl is-active --quiet darban-events.path && systemctl is-active --quiet darban-sweep.timer'
+grep -q 'Connection events are seen' "$WORK/status.log"
+echo 'PASS: after the reboot the queue of connection events is mounted again, and its jobs run.'
 
 openvpn --config "$WORK/client.ovpn" --route-nopull --dev tun9 --daemon --writepid "$CLIENT_PID" --log "$WORK/client.log" --verb 3
 for attempt in $(seq 1 30); do
@@ -118,6 +123,11 @@ for attempt in $(seq 1 30); do
 done
 grep -q 'Initialization Sequence Completed' "$WORK/client.log"
 in_vm 'sudo darban connected' | grep vmclient >/dev/null
+for attempt in $(seq 1 10); do
+    if in_vm 'sudo grep -q ^last_connect= /var/lib/darban/clients/vmclient'; then break; fi
+    sleep 1
+done
+in_vm 'sudo grep -q ^last_connect= /var/lib/darban/clients/vmclient'
 ping -c 3 -W 5 -I tun9 10.8.0.1 >/dev/null
 echo 'PASS: a profile made before the reboot connects from outside, and data flows through the tunnel.'
 echo 'All reboot checks passed.'

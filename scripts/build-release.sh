@@ -10,8 +10,8 @@ grep -qx "DARBAN_VERSION=$version" bin/darban || { echo 'VERSION and DARBAN_VERS
 mkdir -p "$out"
 tarfile=$(mktemp -d)/release.tar
 common=(--force-local --format=gnu --owner=0 --group=0 --numeric-owner)
-tar "${common[@]}" --mode=700 -cf "$tarfile" setup/install.sh setup/server-setup.sh setup/get.sh setup/uninstall.sh setup/remove-server.sh bin/darban bin/darban-crl-maintain
-tar "${common[@]}" --mode=644 -rf "$tarfile" lib/common.sh lib/ui.sh lib/linkd.py systemd/darban-crl.service systemd/darban-crl.timer systemd/darban-links.service README.md README.fa.md CHANGELOG.md LICENSE VERSION
+tar "${common[@]}" --mode=700 -cf "$tarfile" setup/install.sh setup/server-setup.sh setup/get.sh setup/uninstall.sh setup/remove-server.sh bin/darban bin/darban-crl-maintain bin/darban-ovpn-event
+tar "${common[@]}" --mode=644 -rf "$tarfile" lib/common.sh lib/ui.sh lib/linkd.py systemd/darban-crl.service systemd/darban-crl.timer systemd/darban-links.service systemd/darban-events.mount systemd/darban-events-setup.service systemd/darban-events.path systemd/darban-events.service systemd/darban-sweep.timer systemd/darban-sweep.service README.md README.fa.md CHANGELOG.md LICENSE VERSION
 gzip -9n -c "$tarfile" > "$out/darban-ovpn.tar.gz"
 rm -rf -- "$(dirname -- "$tarfile")"
 # The published script installs its own release, so a link to any version does what it says.

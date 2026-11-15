@@ -65,6 +65,7 @@ sudo bash -c 'set -o pipefail; curl -fsSL https://github.com/MohZeh/Darban-OVPN/
 - Keeps clients apart: they cannot reach each other, or the cloud provider's metadata service at `169.254.169.254`, through the server. They can still reach other private networks the server reaches.
 - Limits TCP MSS for VPN traffic to 1280 in both directions, only for connections that announce a larger one: traffic through the server, and connections to the server itself, such as a temporary link opened on a device that is already connected.
 - Starts OpenVPN, and writes details to `/var/log/darban-setup.log`.
+- Turns on [connection events](#connection-events), with one more restart of OpenVPN, before any client exists.
 
 If a kernel is added, the current one stays as a fallback and nothing reboots automatically. The VPN works at once without [DCO](glossary.md#dco).
 
@@ -87,13 +88,32 @@ If `/etc/openvpn/server/server.conf` exists, the server setup is skipped, and th
 - `crl-verify /etc/openvpn/server/crl.pem` with a valid CRL
 - The unit `openvpn-server@server.service`, running
 
-If a check fails, the installer stops before installing anything and says why. On such a server **Remove everything** is refused, and changing the VPN network is refused because this tool does not manage its NAT.
+If a check fails, the installer stops before installing anything and says why. On such a server **Remove everything** is refused, and changing the VPN network is refused because this tool does not manage its NAT. [Connection events](#connection-events) stay off, because they need lines in your `server.conf`.
 
 For single-client disconnect, add a local management socket and install `socat`. The same socket lets a temporary link end when a connection is seen; without it, links end only when their time is up:
 
 ```text
 management /run/openvpn-server/darban.sock unix
 ```
+
+## Connection events
+
+With connection events, OpenVPN tells this tool when a client connects and when a session ends. A temporary link then ends within seconds of the first connection, and **List clients** shows when each client was last seen.
+
+- **The script.** OpenVPN runs `/usr/local/libexec/darban-ovpn-event` as `nobody` at each connection and at the end of each session. It writes one line into a queue and always exits with 0: it never refuses or holds up a connection, even when the queue is missing or full.
+- **The lines.** The install adds three lines to `server.conf`: `script-security 2`, and `client-connect` and `client-disconnect` with that script. Adding them restarts OpenVPN once, and if OpenVPN does not come back, the previous file is restored.
+- **The queue.** `/run/darban-events` is a tmpfs of its own, of 2 MB, so a full queue never fills `/run`. Its path unit starts `darban events` as root, which checks each line and applies it. A malformed line is set aside in `bad/`, with its reason; one that cannot be applied now waits and is tried again.
+- **The five-minute check.** `darban-sweep.timer` runs `darban sweep` a minute after boot and every five minutes: it applies what is left, ends expired links, and ends the link of a client that is connected although no event said so.
+
+The lines are written only into a `server.conf` this tool's setup made, and only when each check passes: no other `client-connect` or `client-disconnect` script, `script-security` not set to 0 or 1, the script runs as `nobody`, OpenVPN's unit does not limit `LimitNPROC` to 64 or less, and the queue is mounted. Otherwise the install says why, nothing changes, and links end as before: when their time is up, or when the link service sees the connection. After fixing the cause, turn them on with:
+
+```bash
+sudo darban enable-events
+```
+
+**Diagnostics** show the group **Connection events**: the queue, its path unit and the five-minute check, events waiting more than 10 minutes, lines set aside, and the process limits of OpenVPN. Darban shows the faults it can see. If one connection's event is lost silently, that link stays open until it expires.
+
+**Uninstall this tool only** removes the units and the queue, and keeps the script and its lines, so OpenVPN needs no restart and every client still connects; the script then records nothing. The summary shows the command that removes them, in this order: the lines, a restart of OpenVPN, then the script. **Remove everything** removes all of it.
 
 ## Advanced settings
 
@@ -183,8 +203,8 @@ The backup that **Remove everything** offers is a `.tar.gz` file in `/root`, rea
 
 | Option | Removes | Keeps |
 |---|---|---|
-| **Setup › Uninstall this tool only** | The tool, its timer, open links, and this tool's hook in certbot's renewal file | OpenVPN, PKI, CRL, `server.conf`, profiles, settings, and the link certificate from Let's Encrypt, which certbot goes on renewing |
-| **Setup › Remove everything** | The tool, OpenVPN, CA, profiles, NAT, the repository, the packages and the certbot the setup added | The link certificate it got from Let's Encrypt, unless you choose to delete it, so a new install here uses it without a new request; the Virtual HWE kernel unless you choose otherwise, the optional backup, and what was there before: other files in the profile folder, `ufw` rules, and repository files, which are put back |
+| **Setup › Uninstall this tool only** | The tool, its timers, open links, the units and queue of connection events, and this tool's hook in certbot's renewal file | OpenVPN, PKI, CRL, `server.conf`, profiles, settings, the link certificate from Let's Encrypt, which certbot goes on renewing, and the event script with its lines in `server.conf`, so OpenVPN needs no restart |
+| **Setup › Remove everything** | The tool, OpenVPN, CA, profiles, NAT, connection events and the record of when clients were seen, the repository, the packages and the certbot the setup added | The link certificate it got from Let's Encrypt, unless you choose to delete it, so a new install here uses it without a new request; the Virtual HWE kernel unless you choose otherwise, the optional backup, and what was there before: other files in the profile folder, `ufw` rules, and repository files, which are put back |
 
 **After Uninstall, nothing renews the CRL.** Renew it yourself before it expires, or OpenVPN may refuse clients.
 

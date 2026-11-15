@@ -1,0 +1,49 @@
+#!/bin/bash
+# Darban OVPN connection events. OpenVPN runs this as the user server.conf names, nobody, when a client connects
+# (client-connect) and when the server ends a session (client-disconnect). It writes one line into a queue in a
+# tmpfs of its own, and a root job, "darban events", reads it there.
+#
+# It always exits 0, so it never refuses or holds up a connection: no lock, no network, no waiting, and one
+# program besides bash, the mv. Whatever it cannot check or write is dropped: the queue missing or not mounted,
+# full, read-only, or a value from OpenVPN that does not look right. Installed as /usr/local/libexec/darban-ovpn-event,
+# outside the tool's own folder, so removing the tool never leaves server.conf naming a script that is gone.
+queue=/run/darban-events
+# Written last by the job that makes the folders inside the tmpfs: without it, nothing lands on /run itself.
+[[ -e $queue/.mounted ]] || exit 0
+case ${script_type-} in
+    client-connect) kind=connect ;;
+    client-disconnect) kind=disconnect ;;
+    *) exit 0 ;;
+esac
+cn=${common_name-}
+[[ $cn =~ ^[A-Za-z0-9][A-Za-z0-9._@+-]{0,127}$ ]] || exit 0
+ip=${trusted_ip-}
+[[ $ip =~ ^[0-9A-Fa-f.:]{2,45}$ ]] || ip=-
+# A clock NTP cannot move: the boot and the hundredths of a second since it.
+{ read -r boot </proc/sys/kernel/random/boot_id && read -r up _ </proc/uptime; } 2>/dev/null || exit 0
+[[ $boot =~ ^[0-9a-f-]{36}$ && $up =~ ^[0-9]{1,10}\.[0-9]{2}$ ]] || exit 0
+cs=${up/./}
+cs=${cs#"${cs%%[!0]*}"}
+cs=${cs:-0}
+# The wall clock in microseconds, whatever the decimal sign of the locale, for what the menu shows.
+us=${EPOCHREALTIME//[!0-9]/}
+[[ $us =~ ^[0-9]{16}$ ]] || exit 0
+serial=${tls_serial_hex_0-}
+[[ $serial =~ ^[0-9A-Fa-f:]{1,64}$ ]] || serial=-
+rx=- tx=- duration=- start=-
+if [[ $kind == disconnect ]]; then
+    [[ ${bytes_received-} =~ ^[0-9]{1,20}$ ]] && rx=$bytes_received
+    [[ ${bytes_sent-} =~ ^[0-9]{1,20}$ ]] && tx=$bytes_sent
+    [[ ${time_duration-} =~ ^[0-9]{1,10}$ ]] && duration=$time_duration
+    # time_unix in a disconnect is when the session began.
+    [[ ${time_unix-} =~ ^[0-9]{1,12}$ ]] && start=$time_unix
+fi
+# A queue nobody reads stops growing here; the count needs no program.
+pending=("$queue"/new/*)
+(( ${#pending[@]} < 1000 )) || exit 0
+id=$boot-$cs-$$-$RANDOM
+set -C
+printf 'darban-event 1 %s %s %s %s %s %s %s %s %s %s %s\n' "$kind" "$cn" "$boot" "$cs" "$us" "$ip" "$serial" "$rx" "$tx" "$duration" "$start" \
+    2>/dev/null >"$queue/tmp/$id" || exit 0
+mv -n -- "$queue/tmp/$id" "$queue/new/$id" 2>/dev/null
+exit 0

@@ -6,7 +6,7 @@ umask 077
 cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.."
 VERSION=$(cat VERSION)
 
-for file in setup/install.sh setup/server-setup.sh setup/get.sh setup/uninstall.sh setup/remove-server.sh bin/darban bin/darban-crl-maintain lib/common.sh lib/ui.sh; do
+for file in setup/install.sh setup/server-setup.sh setup/get.sh setup/uninstall.sh setup/remove-server.sh bin/darban bin/darban-crl-maintain bin/darban-ovpn-event lib/common.sh lib/ui.sh; do
     bash -n "$file" || exit 1
 done
 for cmd in bash openssl awk grep date mktemp flock install mv systemctl ss sort timeout; do
@@ -56,6 +56,10 @@ if [[ -e /usr/local/sbin/darban && -e $LIB/common.sh ]]; then
     for file in /etc/systemd/system/darban-crl.service /etc/systemd/system/darban-crl.timer /etc/systemd/system/darban-links.service; do
         if [[ -e $file ]]; then cp -a -- "$file" "$backup_dir/units/"; fi
     done
+    # The units of connection events, when the version replaced had them: going back to it keeps them.
+    for unit in $DARBAN_EVENT_UNITS; do
+        if [[ -e /etc/systemd/system/$unit ]]; then cp -a -- "/etc/systemd/system/$unit" "$backup_dir/units/"; fi
+    done
     # The newest three are enough.
     find /var/backups/darban -mindepth 1 -maxdepth 1 -type d -print | sort | head -n -3 | xargs -r rm -rf --
 fi
@@ -71,8 +75,20 @@ install -o root -g root -m 700 bin/darban /usr/local/sbin/darban
 install -o root -g root -m 644 systemd/darban-crl.service /etc/systemd/system/darban-crl.service
 install -o root -g root -m 644 systemd/darban-crl.timer /etc/systemd/system/darban-crl.timer
 install -o root -g root -m 644 systemd/darban-links.service /etc/systemd/system/darban-links.service
+# Connection events. The script OpenVPN runs lives outside $LIB, where OpenVPN's user can run it, so no uninstall
+# or restore of any version leaves server.conf naming a script that is gone.
+install -d -o root -g root -m 755 /usr/local/libexec
+install -o root -g root -m 755 bin/darban-ovpn-event /usr/local/libexec/darban-ovpn-event
+for unit in darban-events-setup.service darban-events.path darban-events.service darban-sweep.timer darban-sweep.service; do
+    install -o root -g root -m 644 "systemd/$unit" "/etc/systemd/system/$unit"
+done
+# systemd names the unit of a mount after its path.
+install -o root -g root -m 644 systemd/darban-events.mount '/etc/systemd/system/run-darban\x2devents.mount'
 systemctl daemon-reload
 
+# What the install writes in /etc/darban and the NAT file, it writes under the lock every writer of the server's
+# configuration takes, so a CRL renewal or a change in the menu never meets half of it.
+darban_lock 60 || { echo 'INSTALL INCOMPLETE: another Darban operation holds the lock. Run the same command again.' >&2; exit 1; }
 # Download hints live in a config file instead of the script; an existing file is kept as is.
 CONFIG_DIR=/etc/darban
 install -d -o root -g root -m 700 "$CONFIG_DIR"
@@ -84,6 +100,8 @@ if [[ ! -e $CONFIG_DIR/config ]]; then
     printf 'DOWNLOAD_SSH_HOST=%s\nDOWNLOAD_SSH_PORT=%s\nDOWNLOAD_SSH_USER=%s\n' "$ssh_host" "${ssh_port:-22}" "$ssh_user" >"$CONFIG_DIR/config"
     chmod 600 "$CONFIG_DIR/config"
 fi
+# The CRL check below takes the same lock itself.
+flock -u 9; exec 9>&-
 
 systemctl enable --now darban-crl.timer >/dev/null 2>&1 || true
 if ! systemctl is-active --quiet darban-crl.timer; then
@@ -102,6 +120,7 @@ fi
 # The NAT file is written again from server.conf, so an install from before clients were kept apart gets
 # that rule, and a network change that stopped half way is put right. Without success the install is not
 # marked complete, so running the same command again tries once more.
+darban_lock 60 || { echo 'INSTALL INCOMPLETE: another Darban operation holds the lock. Run the same command again.' >&2; exit 1; }
 NAT_FILE=/etc/darban/nat.nft
 NAT_UNIT=/etc/systemd/system/darban-nat.service
 # A file that is gone, while the unit that loads it at boot is still there, is written again: the rules run now,
@@ -145,11 +164,20 @@ if [[ -f $NAT_FILE || -e $NAT_UNIT ]]; then
         echo "NOTE: the NAT rules were not checked, because server.conf has no single /24 VPN network or $NAT_FILE names no outgoing interface. See: sudo darban status" >&2
     fi
 fi
+flock -u 9; exec 9>&-
 # The links' Let's Encrypt certificate, kept through an uninstall, gets this tool's hook back, so a renewal by
 # certbot reaches the links again. A hook someone else set there stays.
 LE_RENEWAL=/etc/letsencrypt/renewal/darban-ovpn-links.conf
 if [[ -e $LE_RENEWAL ]] && ! darban_renew_hook present "$LE_RENEWAL" '/usr/local/sbin/darban reload-links' "$DARBAN_RENEW_HOOK_OLD"; then
     echo "NOTE: could not add this tool's hook to $LE_RENEWAL. certbot still renews the links' certificate; links take a renewal with the next link." >&2
+fi
+# Connection events: the queue and its jobs first, then the lines in server.conf, which the tool writes only when
+# every check passes, with one restart and the way back. Without them, links end as before: when they expire, or
+# when the link service sees the connection.
+if systemctl enable --now 'run-darban\x2devents.mount' darban-events-setup.service darban-events.path darban-sweep.timer >/dev/null 2>&1; then
+    /usr/local/sbin/darban enable-events </dev/null || echo 'NOTE: connection events were not turned on. Running the same command again tries once more; see: sudo darban status' >&2
+else
+    echo 'NOTE: the queue of connection events did not start, so they stay off. See: systemctl status darban-events-setup.service' >&2
 fi
 printf '%s\n' "$VERSION" > "$LIB/.installed"
 printf 'Darban OVPN v%s is installed. To open it: sudo darban\n' "$VERSION"

@@ -23,6 +23,9 @@ LOCK_FILE=/run/darban.lock
 UNIT=openvpn-server@server.service
 MARKER=$CONFIG_DIR/.server-setup-started
 CERT_LOG=/var/lib/darban/link-certificates.log
+# Connection events: the script OpenVPN ran, and when each client was last seen.
+EVENT_SCRIPT=/usr/local/libexec/darban-ovpn-event
+LEDGER_DIR=/var/lib/darban/clients
 export DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=l
 
 FAILED=()
@@ -209,6 +212,10 @@ if [[ -d $OUT_DIR ]] && ! rmdir -- "$OUT_DIR" 2>/dev/null; then
     KEPT_FILES+="${KEPT_FILES:+ and in }$OUT_DIR"
 fi
 try rm -rf -- "$PKI"
+# server.conf, which named it, is gone, and OpenVPN with it.
+try rm -f -- "$EVENT_SCRIPT"
+try rm -rf -- "$LEDGER_DIR"
+rmdir -- "${LEDGER_DIR%/*}" 2>/dev/null || true
 
 if (( ${#FAILED[@]} > 0 )); then
     echo 'Some steps failed; the tool and its record were kept so this can be run again:' >&2

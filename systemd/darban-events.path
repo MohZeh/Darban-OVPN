@@ -1,0 +1,11 @@
+[Unit]
+Description=Darban OVPN connection events: watch the queue
+After=darban-events-setup.service
+Wants=darban-events-setup.service
+
+[Path]
+DirectoryNotEmpty=/run/darban-events/new
+Unit=darban-events.service
+
+[Install]
+WantedBy=multi-user.target

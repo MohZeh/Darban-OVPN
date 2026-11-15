@@ -37,7 +37,7 @@ sudo darban
 
 ## دیدن همهٔ کلاینت‌ها
 
-`2` یعنی **List clients** را بزنید. این فهرست کلاینت‌های معتبر و تاریخ انقضای گواهی هر کدام را نشان می‌دهد. کلاینت‌های باطل‌شده پنهان‌اند و ابزار راه نمایش آن‌ها را می‌گوید.
+`2` یعنی **List clients** را بزنید. این فهرست کلاینت‌های معتبر، تاریخ انقضای گواهی هر کدام، و آخرین باری را که هر کلاینت دیده شده است نشان می‌دهد: `now`، `12 min ago`، یا `never` که یعنی از وقتی [رویدادهای اتصال](advanced.md#connection-events) روشن شده، دیده نشده است. پایان یک نشست وقتی ثبت می‌شود که سرور آن را ببندد، که ممکن است تا حدود دو دقیقه پس از قطع دستگاه باشد. کلاینت‌های باطل‌شده پنهان‌اند و ابزار راه نمایش آن‌ها را می‌گوید.
 
 ## فرستادن دوبارهٔ پروفایل
 
@@ -87,7 +87,7 @@ sudo darban update
 
 <div dir="rtl">
 
-فقط خود ابزار تغییر می‌کند. OpenVPN ری‌استارت نمی‌شود و کلاینت‌ها تغییری نمی‌کنند. اگر نصب قبلی قانونی را که نسخهٔ جدید لازم دارد، مثلاً محدودسازی TCP MSS، نداشته باشد، به‌روزرسانی آن را هم اضافه می‌کند. برای برگشت به نسخهٔ قبل، در **9 Setup** گزینهٔ `4` یعنی **Restore previous version** را بزنید.
+فقط خود ابزار تغییر می‌کند و کلاینت‌ها تغییری نمی‌کنند. OpenVPN ری‌استارت نمی‌شود، مگر یک بار، وقتی به‌روزرسانی [رویدادهای اتصال](advanced.md#connection-events) را روشن کند: آن موقع کاربران متصل چند ثانیه قطع می‌شوند و خودشان دوباره وصل می‌شوند، و به‌روزرسانی پیش از آن این را می‌گوید. اگر نصب قبلی قانونی را که نسخهٔ جدید لازم دارد، مثلاً محدودسازی TCP MSS، نداشته باشد، به‌روزرسانی آن را هم اضافه می‌کند. برای برگشت به نسخهٔ قبل، در **9 Setup** گزینهٔ `4` یعنی **Restore previous version** را بزنید. برگشت به نسخه‌ای که رویدادهای اتصال ندارد، اول unitهای آن را برمی‌دارد؛ اسکریپت رویداد و خطوطش در `server.conf` می‌مانند تا همهٔ کلاینت‌ها همچنان وصل شوند، و ابزار دستور برداشتن آن‌ها را نشان می‌دهد.
 
 ## بررسی وضعیت سرور
 
@@ -125,6 +125,7 @@ sudo darban connected      # clients connected right now
 sudo darban status         # diagnostics checklist
 sudo darban repair-crl     # publish a fresh blocklist and finish a revocation
 sudo darban update         # check for a release and install it
+sudo darban enable-events  # turn on connection events (one OpenVPN restart)
 sudo darban about          # version, project address and contact
 sudo darban uninstall      # remove only this tool
 sudo darban remove-all     # remove this tool, OpenVPN, the CA and profiles
