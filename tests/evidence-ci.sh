@@ -19,6 +19,13 @@ ENVDIR=/run/darban-evidence-env
 PIDFILE=$LOG/client.pid
 . /etc/os-release
 ARCH=$(dpkg --print-architecture)
+# Nothing started here may outlive the script: the runner waits for every process that holds its output.
+cleanup() {
+    if [[ -s $PIDFILE ]]; then kill "$(cat "$PIDFILE")" 2>/dev/null || true; fi
+    pkill -u nobody -x sleep 2>/dev/null || true
+    pkill -x pebble 2>/dev/null || true
+}
+trap cleanup EXIT
 
 # ---------- recording ----------
 section() { printf '\n### %s\n\n| Check | Result |\n|---|---|\n' "$1" >>"$OUT"; echo "== $1"; }
@@ -39,7 +46,7 @@ connect() {
     local attempt
     disconnect
     rm -f "$PIDFILE" "$2"
-    openvpn --config "$1" --route-nopull --dev tun9 --daemon --writepid "$PIDFILE" --log "$2" --verb 3
+    openvpn --config "$1" --route-nopull --dev tun9 --daemon --writepid "$PIDFILE" --log "$2" --verb 3 </dev/null >/dev/null 2>&1
     for attempt in $(seq 1 15); do
         if grep -q 'Initialization Sequence Completed' "$2" 2>/dev/null; then echo connected; return 0; fi
         if grep -q 'AUTH_FAILED\|TLS Error\|VERIFY ERROR' "$2" 2>/dev/null; then break; fi
@@ -208,14 +215,24 @@ section 'Process limit for nobody (the fork that runs the hook)'
 set_hook "$HOOK"
 restart_server
 sleepers=()
-spawn_nobody() { local i; for (( i = 0; i < $1; i++ )); do runuser -u nobody -- sleep 900 & sleepers+=("$!"); done; sleep 1; }
+spawn_nobody() {
+    # spawn_nobody <count>: idle processes owned by nobody, never more than 64, cut off from this script's output.
+    local i n=$1
+    (( n > 64 )) && n=64
+    for (( i = 0; i < n; i++ )); do runuser -u nobody -- sleep 900 </dev/null >/dev/null 2>&1 & sleepers+=("$!"); done
+    sleep 1
+}
 kill_nobody() { kill "${sleepers[@]}" 2>/dev/null || true; pkill -u nobody -x sleep 2>/dev/null || true; sleepers=(); sleep 1; }
 nobody_count() { ps -u nobody -o pid= | wc -l; }
 pid=$(systemctl show -p MainPID --value "$UNIT")
 limit=$(awk '/Max processes/ {print $3}' "/proc/$pid/limits")
 record 'Max processes of the running OpenVPN' "$limit"
 record 'Processes of nobody now' "$(nobody_count)"
-if [[ $limit =~ ^[0-9]+$ ]]; then
+# Only a small limit, such as LimitNPROC=10, can be reached on purpose; a system default of thousands is
+# recorded, not tested, so the machine is never flooded with processes.
+small_limit=0
+if [[ $limit =~ ^[0-9]+$ ]] && (( limit <= 64 )); then small_limit=1; fi
+if (( small_limit )); then
     spawn_nobody $(( limit - $(nobody_count) ))
     record "With $(nobody_count) nobody processes (at the limit)" "$(connect "$LOG/alice.ovpn" "$LOG/c7.log") / server: $(server_says 20 'client-connect|fork|Resource')"
     disconnect
@@ -225,7 +242,7 @@ if [[ $limit =~ ^[0-9]+$ ]]; then
     disconnect
     kill_nobody
 else
-    record 'Limit test' 'skipped: no numeric limit'
+    record 'Limit test' "not run: the limit ($limit) is not a small per-service cap"
 fi
 install -d /etc/systemd/system/$UNIT.d
 printf '[Service]\nLimitNPROC=infinity\nTasksMax=20\n' >"/etc/systemd/system/$UNIT.d/90-darban-evidence.conf"
@@ -233,7 +250,7 @@ systemctl daemon-reload
 restart_server
 pid=$(systemctl show -p MainPID --value "$UNIT")
 record 'With the drop-in: max processes, TasksMax' "$(awk '/Max processes/ {print $3}' "/proc/$pid/limits"), $(systemctl show -p TasksMax --value "$UNIT")"
-if [[ $limit =~ ^[0-9]+$ ]]; then
+if (( small_limit )); then
     spawn_nobody $(( limit + 2 - $(nobody_count) ))
     record "With the drop-in and $(nobody_count) nobody processes" "$(connect "$LOG/alice.ovpn" "$LOG/c9.log")"
     disconnect
@@ -409,7 +426,7 @@ else
         chmod +x "$binary"
         src=$(find "$work" -maxdepth 1 -type d -name 'pebble-*' | head -n 1)
         record 'Pebble, certbot' "$PEBBLE (sha256 $(sha256sum "$binary" | cut -c1-16)…), $(certbot --version 2>&1)"
-        (cd "$src" && PEBBLE_VA_ALWAYS_VALID=1 PEBBLE_VA_NOSLEEP=1 "$binary" -config test/config/pebble-config.json >"$work/pebble.log" 2>&1 &)
+        (cd "$src" && PEBBLE_VA_ALWAYS_VALID=1 PEBBLE_VA_NOSLEEP=1 "$binary" -config test/config/pebble-config.json </dev/null >"$work/pebble.log" 2>&1 &)
         sleep 3
         export REQUESTS_CA_BUNDLE=$src/test/certs/pebble.minica.pem
         ACME=https://localhost:14000/dir
