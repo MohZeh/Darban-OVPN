@@ -1496,6 +1496,7 @@ test_link_certificate_heals_and_survives_failures() {
     has 'a failed new certificate says so' 'Could not create a certificate for the link.' "$(menu '5\nalice\n1\n1\n0\n')"
     [[ $(cat "$E/cfg/link-cert.pem" "$E/cfg/link-key.pem" | sha256sum) == "$before" ]]; rc_is 'and leaves the files as they were' 0 "$?"
     ok_if 'with nothing left over' test -z "$(find "$E/cfg" -name '.link-*.new')"
+    [[ $(find "$E/cfg/link-cert/pairs" -mindepth 1 -maxdepth 1 | wc -l) == 1 ]]; rc_is 'and no half-made pair' 0 "$?"
     rm -f "$E/bin/openssl"
     stop_links_stub
 }
@@ -2798,6 +2799,7 @@ test_a_certificate_change_reaches_open_links() {
     lacks 'and not called done' 'Open links use it now' "$out"
     [[ $(file_fp) == "$old" && $(served_fp) == "$old" ]]; rc_is 'the file and the port agree on the previous one' 0 "$?"
     ok_if 'no copy is left behind' test ! -e "$E/cfg/.link-cert.prev"
+    [[ $(find "$E/cfg/link-cert/pairs" -mindepth 1 -maxdepth 1 | wc -l) == 1 ]]; rc_is 'and only the pair in use is kept' 0 "$?"
 
     # A service from before this version would end on SIGHUP: it is not sent one.
     rm -f "$E/links/.reloadable"
@@ -2902,7 +2904,8 @@ test_a_kept_link_certificate_is_used_again() {
     has 'the kept certificate is used' "Links use the Let's Encrypt certificate this server got earlier" "$out"
     lacks 'without the question' "Get a free Let's Encrypt certificate?" "$out"
     if grep -q '^certbot' "$STUB_LOG" 2>/dev/null; then result 0 'and without asking Let'"'"'s Encrypt'; else result 1 'and without asking Let'"'"'s Encrypt'; fi
-    [[ $(readlink "$E/cfg/link-cert.pem") == "$E/le/live/darban-ovpn-links/fullchain.pem" ]]; rc_is 'the links point at it' 0 "$?"
+    cmp -s "$E/cfg/link-cert.pem" "$E/le/live/darban-ovpn-links/fullchain.pem"; rc_is 'the links use a copy of it' 0 "$?"
+    [[ $(cat "$E/cfg/link-cert/current/kind") == letsencrypt ]]; rc_is 'which says where it came from' 0 "$?"
     grep -qx 'certbot_cert darban-ovpn-links' "$E/cfg/.server-setup-started"; rc_is 'it is recorded again, for a later removal' 0 "$?"
     has 'the link is made' "https://vpn.example.com:$LINK_TEST_PORT/l/" "$out"
     menu '6\n1\n2\n0\n' >/dev/null
@@ -3529,6 +3532,166 @@ test_remove_everything_reports_a_failed_certbot_removal() {
     rc_is 'a package kept for another program is no failure' 0 "$rc"
     has 'it says what was kept' 'Kept because other software depends on them' "$out"
     has 'and why' 'certbot (removing them would also remove: some-other-tool)' "$out"
+}
+
+# ---------- PR 2: the link certificate and its key change as one pair ----------
+pair_count() { find "$E/cfg/link-cert/pairs" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | wc -l; }
+pair_matches() { [[ $(openssl x509 -in "$E/cfg/link-cert.pem" -noout -pubkey) == "$(openssl pkey -in "$E/cfg/link-key.pem" -pubout)" ]]; }
+pair_layout() { [[ $(readlink "$E/cfg/link-cert.pem") == link-cert/current/fullchain.pem && $(readlink "$E/cfg/link-key.pem") == link-cert/current/privkey.pem ]]; }
+
+test_a_failed_switch_keeps_the_pair_in_use() {
+    # T3: the change fails at the one rename that would put the new pair in use.
+    local out before
+    echo vpn.example.com > "$E/cfg/domain"
+    out=$(menu '7\n5\n3\n3\n2\n0\n0\n')
+    has 'a first self-signed pair is made' 'Links use a self-signed certificate for vpn.example.com' "$out"
+    pair_layout; rc_is 'the names point through the pair in use' 0 "$?"
+    before=$(file_fp)
+    printf '#!/usr/bin/env bash\nif [[ " $* " == *".current.new "* ]]; then exit 1; fi\nexec /usr/bin/mv "$@"\n' > "$E/bin/mv"; chmod +x "$E/bin/mv"
+    out=$(menu '7\n5\n3\n3\n2\n0\n0\n')
+    rm -f "$E/bin/mv"
+    has 'the failure is said' 'Could not create a certificate for the link.' "$out"
+    lacks 'and not called done' 'Links use a self-signed certificate' "$out"
+    [[ $(file_fp) == "$before" ]]; rc_is 'the pair in use stays' 0 "$?"
+    pair_matches; rc_is 'its certificate and key still belong together' 0 "$?"
+    [[ $(pair_count) == 1 ]]; rc_is 'and the new pair is not left behind' 0 "$?"
+    ok_if 'nor the link it was renamed from' test ! -e "$E/cfg/link-cert/.current.new"
+}
+
+test_a_pair_from_an_earlier_version_is_kept_whole() {
+    # T4: the files of v1.0.0-rc.10 get a folder of their own once, and what an interrupted change left is cleaned.
+    local before origin gone
+    echo vpn.example.com > "$E/cfg/domain"
+    make_test_ca vpn.example.com "$E/panel-cert/vpn.example.com" fullchain.pem privkey.pem
+    cp "$E/panel-cert/vpn.example.com/fullchain.pem" "$E/cfg/link-cert.pem"; cp "$E/panel-cert/vpn.example.com/privkey.pem" "$E/cfg/link-key.pem"
+    printf '%s\n%s\n' "$E/panel-cert/vpn.example.com/fullchain.pem" "$E/panel-cert/vpn.example.com/privkey.pem" > "$E/cfg/link-cert.source"
+    echo old > "$E/cfg/.link-cert.prev"
+    before=$(file_fp)
+    bash "$E/manager.sh" reload-links </dev/null >/dev/null 2>&1; rc_is 'reload-links succeeds' 0 "$?"
+    pair_layout; rc_is 'the old files get a folder of their own' 0 "$?"
+    [[ $(file_fp) == "$before" ]]; rc_is 'with the same certificate' 0 "$?"
+    pair_matches; rc_is 'and its key' 0 "$?"
+    [[ $(cat "$E/cfg/link-cert/current/kind") == copied ]]; rc_is 'still known as taken from elsewhere' 0 "$?"
+    origin=$(head -n 1 "$E/cfg/link-cert.source")
+    [[ $origin == "$E/panel-cert/vpn.example.com/fullchain.pem" ]]; rc_is 'with where it came from' 0 "$?"
+    ok_if 'the copy of the old way is gone' test ! -e "$E/cfg/.link-cert.prev"
+
+    # Interrupted: a half-made pair and the mark of a session that is gone; then a rename that was not finished.
+    mkdir -p "$E/cfg/link-cert/pairs/HALFMADE"; echo x > "$E/cfg/link-cert/pairs/HALFMADE/fullchain.pem"
+    ( exit 0 ) & gone=$!; wait "$gone"
+    echo HALFMADE > "$E/cfg/link-cert/hold.$gone"
+    cp --remove-destination "$(readlink -f "$E/cfg/link-cert.pem")" "$E/cfg/link-cert.pem"
+    bash "$E/manager.sh" reload-links </dev/null >/dev/null 2>&1; rc_is 'the next run succeeds' 0 "$?"
+    ok_if 'the half-made pair is gone' test ! -e "$E/cfg/link-cert/pairs/HALFMADE"
+    ok_if 'with the mark of the session that is gone' test ! -e "$E/cfg/link-cert/hold.$gone"
+    pair_layout; rc_is 'the unfinished rename is finished' 0 "$?"
+    [[ $(file_fp) == "$before" ]] && pair_matches; rc_is 'and the pair is the same, whole' 0 "$?"
+    [[ $(cat "$E/cfg/link-cert/current/kind") == copied ]]; rc_is 'still taken from elsewhere' 0 "$?"
+    [[ $(pair_count) == 1 ]]; rc_is 'one pair is left' 0 "$?"
+}
+
+test_two_sessions_change_the_link_certificate_at_once() {
+    # T5: with the real lock, each change finishes, and the pair in use is always whole.
+    local round a b
+    echo vpn.example.com > "$E/cfg/domain"
+    rm -f "$E/bin/flock"
+    menu '7\n5\n3\n3\n2\n0\n0\n' >/dev/null
+    for round in 1 2 3; do
+        printf '7\n5\n3\n3\n2\n0\n0\n' | bash "$E/manager.sh" > "$E/session-a.out" 2>&1 &
+        a=$!
+        printf '7\n5\n3\n3\n2\n0\n0\n' | bash "$E/manager.sh" > "$E/session-b.out" 2>&1 &
+        b=$!
+        wait "$a" "$b"
+        grep -q 'Links use a self-signed certificate' "$E/session-a.out"; rc_is "round $round: the first session finishes its change" 0 "$?"
+        grep -q 'Links use a self-signed certificate' "$E/session-b.out"; rc_is "round $round: and so does the second" 0 "$?"
+        pair_layout && pair_matches; rc_is "round $round: the pair in use is whole" 0 "$?"
+        [[ $(pair_count) == 1 ]]; rc_is "round $round: only it is left" 0 "$?"
+        ok_if "round $round: no session mark is left" test -z "$(find "$E/cfg/link-cert" -maxdepth 1 -name 'hold.*')"
+    done
+}
+
+test_a_certificate_only_for_clients_is_refused() {
+    # T8: a trusted CA, but the certificate may only identify a client.
+    local out before
+    echo vpn.example.com > "$E/cfg/domain"
+    make_test_ca vpn.example.com "$E/good" fullchain.pem privkey.pem
+    menu '7\n5\n3\n3\n2\n0\n0\n' >/dev/null
+    before=$(file_fp)
+    mkdir -p "$E/client-only"
+    openssl req -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes -keyout "$E/client-only/cert.key" -out "$E/client-only/cert.csr" -subj /CN=vpn.example.com >/dev/null 2>&1
+    printf 'subjectAltName=DNS:vpn.example.com\nextendedKeyUsage=clientAuth\n' > "$E/client-only/ext"
+    openssl x509 -req -in "$E/client-only/cert.csr" -CA "$E/test-ca.pem" -CAkey "$E/test-ca.key" -CAcreateserial -days 30 \
+        -extfile "$E/client-only/ext" -out "$E/client-only/cert.pem" >/dev/null 2>&1
+    out=$(menu "7\n5\n3\n2\n$E/client-only/cert.pem\n\n0\n0\n")
+    has 'it is refused with the reason' 'is not made for a server' "$out"
+    has 'and nothing changes' 'Nothing changed' "$out"
+    [[ $(file_fp) == "$before" ]]; rc_is 'the pair in use stays' 0 "$?"
+    out=$(menu "7\n5\n3\n2\n$E/good/fullchain.pem\n\n0\n0\n")
+    has 'a certificate for a server from the same CA is taken' 'Links use the trusted certificate from' "$out"
+}
+
+test_a_renewal_the_link_service_does_not_take_is_named() {
+    # T17: this tool's Let's Encrypt pair is renewed; the service does not take it, so the one it serves is named.
+    local out old new
+    start_links_stub
+    echo vpn.example.com > "$E/cfg/domain"
+    : > "$E/cfg/.server-setup-started"
+    make_test_ca vpn.example.com "$E/le/live/darban-ovpn-links" fullchain.pem privkey.pem
+    menu '5\nalice\n1\n1\n0\n' >/dev/null
+    sleep 0.5
+    old=$(file_fp)
+    [[ $(served_fp) == "$old" ]]; rc_is 'the open link serves the Let'"'"'s Encrypt copy' 0 "$?"
+    make_test_ca vpn.example.com "$E/le/live/darban-ovpn-links" fullchain.pem privkey.pem 40
+    out=$(FAKE_RELOAD_FAIL=1 bash "$E/manager.sh" reload-links </dev/null 2>&1); rc_not0 'a renewal the service did not take is a failure' "$?"
+    has 'it is copied for the links' "renewed in Let's Encrypt" "$out"
+    has 'the one put back is named, with its end' "so the previous one was put back, valid until $(cert_end_date_of "$E/cfg/link-cert.pem")" "$out"
+    [[ $(file_fp) == "$old" && $(served_fp) == "$old" ]]; rc_is 'the file and the port agree on the previous one' 0 "$?"
+    out=$(bash "$E/manager.sh" reload-links </dev/null 2>&1); rc_is 'the next run succeeds' 0 "$?"
+    has 'and the open link takes the renewed one' 'Open links use it now' "$out"
+    new=$(file_fp)
+    [[ $new != "$old" && $(served_fp) == "$new" ]]; rc_is 'the port answers with the renewed one' 0 "$?"
+    cmp -s "$E/cfg/link-cert.pem" "$E/le/live/darban-ovpn-links/fullchain.pem"; rc_is 'which is the one certbot renewed' 0 "$?"
+    [[ $(pair_count) == 1 ]]; rc_is 'only the pair in use is kept' 0 "$?"
+    stop_links_stub
+}
+cert_end_date_of() { date -u -d "$(openssl x509 -in "$1" -noout -enddate | cut -d= -f2)" +%Y-%m-%d; }
+
+test_the_link_service_never_reads_two_pairs() {
+    # X04 and T21: a pair changed while the service reads it gives one whole pair or the other, never a mix.
+    local dir=$E/flip side out
+    mkdir -p "$dir/pairs/a" "$dir/pairs/b"
+    for side in a b; do
+        openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes -keyout "$dir/pairs/$side/privkey.pem" \
+            -out "$dir/pairs/$side/fullchain.pem" -days 30 -subj /CN=127.0.0.1 >/dev/null 2>&1
+    done
+    ln -s pairs/a "$dir/current"
+    ln -s current/fullchain.pem "$dir/cert.pem"; ln -s current/privkey.pem "$dir/key.pem"
+    out=$(python3 -I - "$REPO/lib" "$dir" <<'PY'
+import os, sys, threading
+sys.path.insert(0, sys.argv[1])
+import linkd
+d = sys.argv[2]
+stop = False
+def flip():
+    side = 'b'
+    while not stop:
+        os.symlink('pairs/' + side, d + '/current.new')
+        os.replace(d + '/current.new', d + '/current')
+        side = 'a' if side == 'b' else 'b'
+thread = threading.Thread(target=flip)
+thread.start()
+errors = 0
+for _ in range(400):
+    try:
+        linkd.tls_context(d + '/cert.pem', d + '/key.pem')
+    except Exception:
+        errors += 1
+stop = True
+thread.join()
+print(errors)
+PY
+)
+    [[ $out == 0 ]]; rc_is 'every read gives a whole pair' 0 "$?"
 }
 
 mapfile -t TESTS < <(declare -F | awk '$3 ~ /^test_/ {print $3}' | sort)

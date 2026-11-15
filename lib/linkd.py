@@ -377,7 +377,20 @@ def watch(server, store, idle_exit, interval, management):
             return
 
 
+def pair_paths(cert, key):
+    """The certificate and key of one pair. darban keeps each pair in a folder of its own and points the names
+    through a link it changes in one rename, so the folder is found once and both files are read from it: a change
+    between the two reads cannot give the certificate of one pair with the key of another. Other files are read as
+    they are named."""
+    real = os.path.realpath(cert)
+    folder = os.path.dirname(real)
+    if os.path.basename(real) == 'fullchain.pem' and os.path.isfile(os.path.join(folder, 'privkey.pem')):
+        return real, os.path.join(folder, 'privkey.pem')
+    return cert, key
+
+
 def tls_context(cert, key):
+    cert, key = pair_paths(cert, key)
     context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
     context.minimum_version = ssl.TLSVersion.TLSv1_2
     context.load_cert_chain(cert, key)
