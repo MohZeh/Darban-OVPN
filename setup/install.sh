@@ -103,9 +103,19 @@ fi
 # that rule, and a network change that stopped half way is put right. Without success the install is not
 # marked complete, so running the same command again tries once more.
 NAT_FILE=/etc/darban/nat.nft
-if [[ -f $NAT_FILE ]]; then
+NAT_UNIT=/etc/systemd/system/darban-nat.service
+# A file that is gone, while the unit that loads it at boot is still there, is written again: the rules run now,
+# but after a reboot clients would have no internet. Its interface comes from the rules that run, else from the
+# default route.
+if [[ -f $NAT_FILE || -e $NAT_UNIT ]]; then
     vpn_net=$(darban_conf_net)
-    nat_iface=$(darban_nat_iface "$NAT_FILE")
+    if [[ -f $NAT_FILE ]]; then
+        nat_iface=$(darban_nat_iface "$NAT_FILE")
+    else
+        echo "$NAT_FILE was missing; it is written again from server.conf."
+        nat_iface=$(nft list chain ip darban postrouting 2>/dev/null | darban_nat_iface || true)
+        [[ -n $nat_iface ]] || nat_iface=$(darban_default_iface)
+    fi
     # An interface that is gone, for example renamed by a new image, leaves clients without internet: NAT then
     # follows the default route. One that still exists is kept, because it may be chosen on purpose.
     if [[ -n $nat_iface ]] && ! ip link show dev "$nat_iface" >/dev/null 2>&1; then
@@ -120,7 +130,7 @@ if [[ -f $NAT_FILE ]]; then
         chmod 600 "$NAT_FILE.new"
         if cmp -s -- "$NAT_FILE.new" "$NAT_FILE" && darban_live_nat_ok "$vpn_net" && darban_live_isolation_ok "$vpn_net" && darban_live_mss_ok "$vpn_net"; then
             rm -f -- "$NAT_FILE.new"
-        elif nft -c -f "$NAT_FILE.new" && cp -a -- "$NAT_FILE" "$NAT_FILE.before" && mv -f -- "$NAT_FILE.new" "$NAT_FILE" \
+        elif nft -c -f "$NAT_FILE.new" && { [[ ! -f $NAT_FILE ]] || cp -a -- "$NAT_FILE" "$NAT_FILE.before"; } && mv -f -- "$NAT_FILE.new" "$NAT_FILE" \
             && nft -f "$NAT_FILE" && darban_live_nat_ok "$vpn_net" && darban_live_isolation_ok "$vpn_net" && darban_live_mss_ok "$vpn_net"; then
             rm -f -- "$NAT_FILE.before"
             echo "The NAT rules are up to date: VPN clients are kept apart from each other, and TCP MSS for VPN traffic is limited to $DARBAN_MSS."

@@ -97,6 +97,15 @@ if [[ -n ${FLOCK_HOOK:-} && $1 != -u ]]; then bash -c "$FLOCK_HOOK" >/dev/null 2
 exit 0
 STUB
 printf '#!/usr/bin/env bash\nexit 0\n' > "$E/bin/chown"
+# runuser runs the command as the user running the tests; FAKE_RUNUSER_DENY: that user is refused, as nobody is
+# by a file only root can read.
+cat > "$E/bin/runuser" <<'STUB'
+#!/usr/bin/env bash
+if [[ -n ${FAKE_RUNUSER_DENY:-} ]]; then exit 1; fi
+while (( $# )) && [[ $1 != -- ]]; do shift; done
+shift
+exec "$@"
+STUB
 printf '#!/usr/bin/env bash\nif [[ ${1:-} == -n ]]; then echo 1; fi\n' > "$E/bin/sysctl"
 printf '#!/usr/bin/env bash\necho "logger $*" >> "$STUB_LOG"\n' > "$E/bin/logger"
 printf '#!/usr/bin/env bash\nargs=(); while (($#)); do case $1 in -o|-g|-m) shift 2;; *) args+=("$1"); shift;; esac; done; exec /usr/bin/install "${args[@]}"\n' > "$E/bin/install"

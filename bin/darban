@@ -138,6 +138,9 @@ run_action() {
     case $rc in
         0|1|"$RC_NO_PAUSE") ;;
         130) say; info 'Cancelled.' ;;
+        # The reader went away, as "darban status | head" does: the output stops there, like any command's, and
+        # the status says so (141, SIGPIPE) instead of a pass or a fail it could not finish.
+        141) ;;
         "$RC_IDLE"|"$RC_QUIT") exit 0 ;;
         *) warn "Operation aborted unexpectedly (status $rc); see messages above." ;;
     esac
@@ -999,7 +1002,7 @@ tcp_port_taken() {
     listeners=$(ss -H -ltnp "sport = :$1" 2>/dev/null) || listeners=''
     if [[ -z $listeners ]]; then tcp_port_open "$1"; return; fi
     for pid in $(grep -o 'pid=[0-9]*' <<<"$listeners" | cut -d= -f2 | sort -u); do
-        tr '\0' ' ' <"/proc/$pid/cmdline" 2>/dev/null | grep -q '/linkd\.py ' || return 0
+        tr '\0' ' ' <"/proc/$pid/cmdline" 2>/dev/null | grep '/linkd\.py ' >/dev/null || return 0
     done
     # Held, but by no process this tool can see.
     grep -q 'pid=' <<<"$listeners" || return 0
@@ -1055,7 +1058,7 @@ link_cert_usable() {
     # unusable pair, instead of stopping every link until the certificate is changed by hand.
     cert_key_matches "$LINK_CERT" "$LINK_KEY" || return 1
     if host_is_ip "$host"; then check=-checkip; else check=-checkhost; fi
-    openssl x509 -in "$LINK_CERT" -noout "$check" "$host" 2>/dev/null | grep -q 'does match'
+    openssl x509 -in "$LINK_CERT" -noout "$check" "$host" 2>/dev/null | grep 'does match' >/dev/null
 }
 link_cert_source() {
     # Where the links' certificate came from: letsencrypt (this tool's), copied (from another tool or a file),
@@ -1448,7 +1451,7 @@ cert_covers() {
     # cert_covers <cert> <host>: the certificate names this hostname or IP address.
     local check
     if host_is_ip "$2"; then check=-checkip; else check=-checkhost; fi
-    openssl x509 -in "$1" -noout "$check" "$2" 2>/dev/null | grep -q 'does match'
+    openssl x509 -in "$1" -noout "$check" "$2" 2>/dev/null | grep 'does match' >/dev/null
 }
 cert_key_matches() {
     local cert_pub key_pub
@@ -1474,7 +1477,7 @@ cert_publicly_trusted() {
     rm -rf -- "$dir"
     return "$rc"
 }
-cert_is_cloudflare_origin() { openssl x509 -in "$1" -noout -issuer 2>/dev/null | grep -qi 'cloudflare origin'; }
+cert_is_cloudflare_origin() { openssl x509 -in "$1" -noout -issuer 2>/dev/null | grep -i 'cloudflare origin' >/dev/null; }
 cert_end_date() { date -u -d "$(openssl x509 -in "$1" -noout -enddate 2>/dev/null | cut -d= -f2)" +%Y-%m-%d 2>/dev/null; }
 cert_start_date() { date -u -d "$(openssl x509 -in "$1" -noout -startdate 2>/dev/null | cut -d= -f2)" +%Y-%m-%d 2>/dev/null; }
 existing_cert_pairs() {
@@ -3385,6 +3388,33 @@ check() {
     printf '  %s%s%s %s\n' "$color" "$symbol" "$C_RESET" "$(with_action "$2")" || true
 }
 group() { printf '\n %s%s%s\n' "$C_GROUP" "$1" "$C_RESET" || true; }
+crl_readable_by_openvpn() {
+    # OpenVPN reads the CRL at start as root, and again, after a change, as the user server.conf names. Without
+    # a user it stays root, which reads anything.
+    local user
+    user=$(darban_conf_single user 2>/dev/null) || return 0
+    [[ $user != root ]] || return 0
+    runuser -u "$user" -- test -r "$DARBAN_CRL" 2>/dev/null
+}
+link_service_health() {
+    # Only while a link is open does the service run; then its HTTPS answer is checked, not only its files.
+    local port want
+    if ! systemctl is-active --quiet darban-links.service 2>/dev/null; then
+        check info 'No link is open, so the link service is not running'
+        return 0
+    fi
+    port=$(awk -F= '$1 == "LINK_PORT" {print $2; exit}' "$LINK_ENV" 2>/dev/null)
+    if ! cert_key_matches "$LINK_CERT" "$LINK_KEY"; then
+        check bad "The link certificate and its key do not belong together, so a link may not open $S_ARROW Settings $S_CRUMB 5"
+        return 0
+    fi
+    want=$(cert_fingerprint "$LINK_CERT")
+    if [[ -n $want && $(served_link_cert_fingerprint) == "$want" ]]; then
+        check ok "The link service answers over HTTPS${port:+ on TCP $port} with the link certificate"
+    else
+        check bad "The link service does not answer over HTTPS with the link certificate, so open links may not open $S_ARROW sudo systemctl restart darban-links.service"
+    fi
+}
 check_expiry() {
     # check_expiry <label> <epoch>
     if (( $2 <= $(date -u +%s) )); then check bad "$1 EXPIRED on $(date -u -d "@$2" +%Y-%m-%d)"
@@ -3401,6 +3431,10 @@ network_rules_health() {
             check info 'NAT table of this tool not found; NAT may be managed elsewhere'
         fi
         return 0
+    fi
+    # The rules run now, but the file that loads them at boot is gone.
+    if [[ ! -f $nat ]] && [[ -e /etc/systemd/system/darban-nat.service ]]; then
+        check warn "The NAT rules run now, but $nat is gone, so after a reboot clients have no internet through the VPN $S_ARROW sudo bash -c 'curl -fsSL https://github.com/$DARBAN_REPO/releases/download/v$DARBAN_VERSION/get.sh | bash -s -- --version v$DARBAN_VERSION'"
     fi
     net=$(darban_conf_net)
     if ! valid_ipv4 "${net:-}"; then
@@ -3473,12 +3507,24 @@ health() {
     fi
 
     group 'Revocation (CRL)'
+    # What OpenVPN does with a broken CRL depends on when it breaks: gone at start, OpenVPN does not start; gone
+    # while it runs, it keeps the last list it read; expired, or unreadable once it changed, every connection is
+    # refused. So each of these is red, and none is called harmless.
     if ! darban_crl_configured; then
         check bad "server.conf has no single 'crl-verify $DARBAN_CRL'"
+    elif [[ ! -e $DARBAN_CRL ]]; then
+        check bad "The CRL file $DARBAN_CRL is missing. OpenVPN does not start without it, and a running one keeps the last list it read $S_ARROW Maintenance $S_CRUMB 2"
     elif crl_err=$(C_RED='' C_RESET='' darban_verify_crl "$DARBAN_CRL" 2>&1) && e=$(darban_crl_expiry_epoch "$DARBAN_CRL"); then
-        check ok "Published CRL valid and complete; next update $(describe_expiry "$e")"
+        if (( e - $(date -u +%s) < 7 * 86400 )); then
+            check warn "Published CRL valid and complete, but its next update is due $(describe_expiry "$e"). Once it passes, every connection is refused $S_ARROW Maintenance $S_CRUMB 2"
+        else
+            check ok "Published CRL valid and complete; next update $(describe_expiry "$e")"
+        fi
     else
         check bad "Published CRL problem: ${crl_err##*ERROR: } $S_ARROW Maintenance $S_CRUMB 2"
+    fi
+    if [[ -e $DARBAN_CRL ]] && ! crl_readable_by_openvpn; then
+        check bad "OpenVPN runs as $(darban_conf_single user 2>/dev/null) and cannot read the CRL. When the file changes, every connection may be refused, or the last list it read stays in use $S_ARROW sudo chmod 644 $DARBAN_CRL"
     fi
     pending=$(revocation_pending_names 2>/dev/null | join_lines) || pending=''
     if [[ -n $pending ]]; then check bad "Revoked but NOT blocked yet: $(safe_text "$pending") $S_ARROW Maintenance $S_CRUMB 2"; fi
@@ -3519,6 +3565,9 @@ health() {
         fi
     fi
     network_rules_health
+
+    group 'Temporary links'
+    link_service_health
 
     group 'Profiles & downloads'
     host=$(domain)
@@ -3845,7 +3894,7 @@ next_steps() {
         printf '%sLater:%s\n' "$C_BOLD" "$C_RESET" || true
         bullet "Reboot once when convenient, for a faster VPN: $(cmd sudo reboot)"
     fi
-    if iptables -S FORWARD 2>/dev/null | grep -q '^-P FORWARD DROP' && ! command -v ufw >/dev/null; then
+    if iptables -S FORWARD 2>/dev/null | grep '^-P FORWARD DROP' >/dev/null && ! command -v ufw >/dev/null; then
         say
         warn 'The iptables FORWARD policy is DROP, for example because of Docker. Clients may connect but have no internet until it allows tun0.'
     fi

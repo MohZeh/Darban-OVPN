@@ -20,6 +20,8 @@ The one-line command runs `curl` inside `sudo` on purpose. In the form `curl ...
 
 `get.sh` downloads the release and checks it against `SHA256SUMS`. If they do not match, it runs nothing. The checksum comes from the same release, so it catches a damaged download, not a compromised account.
 
+If you doubt a release, GitHub can check it with its own attestation: `gh release verify v1.0.0-rc.10 --repo MohZeh/Darban-OVPN`, and for a file you downloaded, `gh release verify-asset v1.0.0-rc.10 get.sh --repo MohZeh/Darban-OVPN`. The installer does not run these checks.
+
 ## Install a specific version
 
 Use the address of that release. It installs its own version:
@@ -99,7 +101,7 @@ Open **Settings › Advanced**. Items marked `*` (1 to 6, and the OpenVPN port i
 
 | # | Setting | Notes |
 |---|---|---|
-| 1 | Traffic routing | **Full tunnel** sends all client IPv4 traffic through the server; **split tunnel** only the VPN network. Switching to full adds default DNS if none is set. The server needs NAT for the full tunnel |
+| 1 | Traffic routing | **Full tunnel** sends all client IPv4 traffic through the server, and IPv6 goes directly, outside the VPN; **split tunnel** only the VPN network. Switching to full adds default DNS if none is set. The server needs NAT for the full tunnel |
 | 2 | DNS for clients | One or two IPv4 addresses, or one from the list: Cloudflare, Google, Quad9 (blocks known malicious sites), AdGuard (blocks ads and trackers). Not used in a split tunnel, where clients keep their own |
 | 3 | VPN network | A private `/24` ending in `.0`, not overlapping an existing route; the tool suggests a free one. NAT follows the change. Refused if this tool did not create the NAT. Fixed addresses from `client-config-dir` or `ifconfig-pool-persist` are not updated |
 | 4 | Data ciphers | `AES-256-GCM`, `AES-128-GCM`, `CHACHA20-POLY1305`, separated by colons, or one of three ready lists. Others would turn DCO off. Clients with no cipher in common must get a new profile |
@@ -123,7 +125,7 @@ LINK_PORT=9347
 UPDATE_CHECK=no
 ```
 
-The menu looks for a new release when it starts, at most once an hour, and waits up to two seconds for the answer, so a new version shows on the first screen. After a failed check it tries again ten minutes later, or when GitHub says its limit allows. That limit counts every program on the server's address, the VPN clients' traffic included. **Setup** shows the state beside **Check for updates**: a new version, up to date with the time of the check, or why it is not known. `UPDATE_CHECK=no` turns the notice off, as does **Setup › Update notice**. The tool never installs an update by itself.
+The menu looks for a new release when it starts, at most once an hour, by asking GitHub's API, which then sees this server's address, and waits up to two seconds for the answer, so a new version shows on the first screen. After a failed check it tries again ten minutes later, or when GitHub says its limit allows. That limit counts every program on the server's address, the VPN clients' traffic included. **Setup** shows the state beside **Check for updates**: a new version, up to date with the time of the check, or why it is not known. `UPDATE_CHECK=no` turns the notice off, as does **Setup › Update notice**. The tool never installs an update by itself.
 
 ## Firewall ports
 

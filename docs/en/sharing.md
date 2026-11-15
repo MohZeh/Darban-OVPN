@@ -90,7 +90,13 @@ A **Cloudflare Origin certificate** is not used, and the tool says so. Browsers 
 - **Domain name:** the certificate comes from Ubuntu's `certbot` package, and certbot renews it by itself. If a renewal fails, for example because port 80 is closed, the tool asks again when a link needs a new one.
 - **IP address:** Let's Encrypt gives a six-day certificate, and a new one is requested when a link needs it. This needs `certbot` 5.3 or newer, which Ubuntu does not have yet, so the tool uses a certbot that is new enough, or installs it from the Certbot project as a snap. A server with neither is not offered one.
 
-**Let's Encrypt gives at most 5 new certificates a week for the same address**, one more every 34 hours, and deleting one does not give it back. So the tool renews the certificate it got instead of asking for a new one, keeps it when you remove everything, and uses it again after a new install on the same server. When it is kept, Ubuntu's `certbot` package is removed, not purged: a purge would delete `/etc/letsencrypt`, and the certificate with it. The removal says until when the kept certificate is valid. After a new install, a kept certificate that ends sooner than a link may last is renewed without a question. When certbot renews the certificate, by its timer or for a link, the tool's hook in certbot's renewal file copies it for the links, and the link service reloads it: open links get it at once, and a download in progress finishes. **Uninstall this tool only** keeps the certificate, and certbot goes on renewing it; only this tool's hook is taken out of the renewal file, since the program it runs is removed. The removal names the certificate and the command that deletes it. A new install puts the hook back. A hook someone else set in that file stays. It records each certificate it asked for, as new or renewed. **Settings › Link certificate** shows:
+**Let's Encrypt gives at most 5 new certificates a week for the same address**, one more every 34 hours, and deleting one does not give it back. So the tool renews the certificate it got instead of asking for a new one, keeps it when you remove everything, and uses it again after a new install on the same server. When it is kept, Ubuntu's `certbot` package is removed, not purged: a purge would delete `/etc/letsencrypt`, and the certificate with it. The removal says until when the kept certificate is valid.
+
+After a new install, a kept certificate that ends sooner than a link may last is renewed without a question. When certbot renews the certificate, by its timer or for a link, the tool's hook in certbot's renewal file copies it for the links, and the link service reloads it: open links get it at once, and a download in progress finishes.
+
+**Uninstall this tool only** keeps the certificate, and certbot goes on renewing it; only this tool's hook is taken out of the renewal file, since the program it runs is removed. The removal names the certificate and the command that deletes it. A new install puts the hook back. A hook someone else set in that file stays.
+
+The tool records each certificate it asked for, as new or renewed. **Settings › Link certificate** shows:
 
 - whether browsers trust the certificate now, checked from the certificate itself: its dates, its address, its key and who issued it;
 - where it came from, and its dates (`Valid from … until …`);
@@ -120,7 +126,7 @@ If you send the password separately, add:
 - Opening a link or downloading the file does not use it up, so a messenger's preview or a mistake costs nothing.
 - The link ends when a connection with the profile is seen after the link was made. The link service asks OpenVPN's management interface about this every 10 seconds, so a connection shorter than that can be missed. A server without a local management interface, such as one this tool did not set up, cannot see connections: its links work until their time is up, and the tool says so when it makes one. Menu `6` shows whether the file was downloaded.
 - The page is in Persian when the device's language is Persian, and in English otherwise.
-- Only a hash of the link's token stays on the server, so a lost link cannot be shown again.
+- The link service keeps only a hash of the link's token. The tool keeps the whole address, readable by root only, so menu 6 can show it again; a link made before `v1.0.0-rc.8` cannot be shown again.
 - The copy of the profile is kept in `/run/darban-links`, which a reboot clears.
 - Revoking a client deletes its open links.
 - A copy left behind by a crash is removed after a minute.
