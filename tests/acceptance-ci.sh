@@ -106,6 +106,8 @@ CONF=/etc/openvpn/server/server.conf
 EVENT_SCRIPT=/usr/local/libexec/darban-ovpn-event
 EVENTS=/run/darban-events
 LEDGER=/var/lib/darban/clients
+# The tmpfs of the queue can stay a moment after its unit stopped.
+unmounted() { local i; for i in $(seq 1 10); do mountpoint -q "$EVENTS" || return 0; sleep 1; done; return 1; }
 grep -qx 'script-security 2' "$CONF"
 grep -qx "client-connect $EVENT_SCRIPT" "$CONF"
 grep -qx "client-disconnect $EVENT_SCRIPT" "$CONF"
@@ -668,8 +670,10 @@ printf '9\n4\n2\n' | darban | tee "$LOG/restore.log"
 [[ $(darban version) == "$current" ]]
 grep 'does not use connection events' "$LOG/restore.log" >/dev/null
 grep "These stay, so connections keep working: $EVENT_SCRIPT" "$LOG/restore.log" >/dev/null
-[[ ! -e /etc/systemd/system/darban-events.path && -z $(findmnt -n "$EVENTS") ]]
-[[ -x $EVENT_SCRIPT ]] && grep -qx "client-connect $EVENT_SCRIPT" "$CONF"
+[[ ! -e /etc/systemd/system/darban-events.path ]]
+unmounted
+[[ -x $EVENT_SCRIPT ]]
+grep -qx "client-connect $EVENT_SCRIPT" "$CONF"
 connect "$PROFILE" "$LOG/restored.log"; disconnect
 darban status >/dev/null
 bash setup/install.sh | tee "$LOG/events-reinstall.log"
@@ -687,8 +691,10 @@ cmp -s "$OTHER_CONF" "$LOG/other-site.before"
 grep 'certbot still renews it' "$LOG/uninstall.log" >/dev/null
 grep 'sudo certbot delete --cert-name darban-ovpn-links' "$LOG/uninstall.log" >/dev/null
 # Q2 and T20: the units and the queue of connection events go; the script and its lines stay, with no restart.
-[[ ! -e /etc/systemd/system/darban-events.path && ! -e /etc/systemd/system/darban-sweep.timer && -z $(findmnt -n "$EVENTS") ]]
-[[ -x $EVENT_SCRIPT ]] && grep -qx "client-connect $EVENT_SCRIPT" "$CONF"
+[[ ! -e /etc/systemd/system/darban-events.path && ! -e /etc/systemd/system/darban-sweep.timer ]]
+unmounted
+[[ -x $EVENT_SCRIPT ]]
+grep -qx "client-connect $EVENT_SCRIPT" "$CONF"
 grep 'Kept, so connections go on without a restart' "$LOG/uninstall.log" >/dev/null
 connect "$PROFILE" "$LOG/uninstalled.log"; disconnect
 echo 'PASS: after an uninstall the event script stays, and every client still connects.'

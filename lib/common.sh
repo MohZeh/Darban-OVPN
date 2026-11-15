@@ -26,6 +26,11 @@ darban_events_units_remove() {
     for unit in $DARBAN_EVENT_UNITS; do systemctl disable --now "$unit" >/dev/null 2>&1 || true; done
     for unit in $DARBAN_EVENT_UNITS; do rm -f -- "$1/$unit"; done
     systemctl daemon-reload >/dev/null 2>&1 || true
+    # The tmpfs can stay a moment after its unit stopped; until it is gone, the script would still write there.
+    for unit in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
+        mountpoint -q /run/darban-events 2>/dev/null || return 0
+        sleep 0.5
+    done
 }
 darban_require_root() { (( EUID == 0 )) || { darban_error 'Run with sudo/root.'; return 1; }; }
 darban_lock() {
