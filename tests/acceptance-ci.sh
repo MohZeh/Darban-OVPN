@@ -89,8 +89,8 @@ grep -qx setup_complete /etc/darban/.server-setup-started
 if grep -q 'Unpacking\|Setting up' "$LOG/setup.log"; then echo 'FAIL: apt output reached the install screen.'; exit 1; fi
 echo 'PASS: a real install in a real terminal, on a quiet screen.'
 if (( USE_UFW )); then
-    ufw status | grep -q '^1194/udp'
-    ufw status | grep -q 'tun0'
+    ufw status | grep '^1194/udp' >/dev/null
+    ufw status | grep 'tun0' >/dev/null
     echo 'PASS: Enter added the two ufw rules.'
 fi
 
@@ -120,10 +120,10 @@ echo 'PASS: the first client was created from the end of the install.'
 connect "$LOG/old.ovpn" "$LOG/a.log"
 echo 'PASS: a real client connected.'
 for attempt in $(seq 1 10); do
-    if darban connected | grep -q accept1; then break; fi
+    if darban connected | grep accept1 >/dev/null; then break; fi
     sleep 1
 done
-darban connected | grep -q accept1
+darban connected | grep accept1 >/dev/null
 echo 'PASS: the connected client is listed.'
 
 # The tool waits for the connection after sharing, and another SSH user gets a copy it can read.
@@ -184,7 +184,7 @@ echo 'PASS: a change that stops the service is rolled back.'
 printf '7\n6\n3\n10.99.0.0\n2\n0\n0\n0\n' | darban
 grep -q '^server 10.99.0.0 255.255.255.0' /etc/openvpn/server/server.conf
 grep -q '10.99.0.0/24' /etc/darban/nat.nft
-nft list table ip darban | grep -q '10.99.0.0/24'
+nft list table ip darban | grep '10.99.0.0/24' >/dev/null
 connect /root/openvpn-clients/accept1.ovpn "$LOG/e.log"
 echo 'PASS: a client connects after the VPN network changed.'
 disconnect
@@ -213,7 +213,7 @@ for attempt in $(seq 1 20); do
     sleep 1
 done
 grep -q 'Initialization Sequence Completed' "$LOG/f.log"
-ip netns exec "$NS" ip route get 1.1.1.1 | grep -q 'dev tun'
+ip netns exec "$NS" ip route get 1.1.1.1 | grep 'dev tun' >/dev/null
 grep -q 'dhcp-option DNS 9.9.9.9' "$LOG/f.log"
 through_vpn=$(ip netns exec "$NS" curl -4 -fsS --max-time 30 https://api.ipify.org)
 from_server=$(curl -4 -fsS --max-time 30 https://api.ipify.org)
@@ -221,7 +221,7 @@ echo "Address seen through the VPN: $through_vpn; address of the server: $from_s
 [[ -n $through_vpn && $through_vpn == "$from_server" ]]
 echo 'PASS: real traffic and DNS go through the tunnel and the NAT.'
 if modinfo -k "$(uname -r)" ovpn >/dev/null 2>&1; then
-    ip -d link show tun0 | grep -qw ovpn
+    ip -d link show tun0 | grep -w ovpn >/dev/null
     echo 'PASS: the server uses the in-kernel ovpn module (DCO).'
 fi
 # A path with a smaller MTU that drops IP fragments, as many mobile and home networks do: without the TCP
@@ -330,8 +330,8 @@ fi
 # A real temporary link: it can be opened again until the client connects, and then it ends. The link
 # service asks the real management interface, from inside its sandbox.
 url=$(printf '5\naccept1\n1\n1\n0\n' | darban | grep -oE 'https://[^ ]+/l/[0-9a-f]{64}')
-curl -ksf "$url" | grep -q 'Download profile'
-curl -ksf -H 'Accept-Language: fa-IR,fa;q=0.9' "$url" | grep -q 'dir="rtl"'
+curl -ksf "$url" | grep 'Download profile' >/dev/null
+curl -ksf -H 'Accept-Language: fa-IR,fa;q=0.9' "$url" | grep 'dir="rtl"' >/dev/null
 curl -ksf "$url/file" -o "$LOG/link.ovpn"
 grep -q '<key>' "$LOG/link.ovpn"
 grep -qx 'setenv FRIENDLY_NAME "accept1"' "$LOG/link.ovpn"
@@ -343,8 +343,8 @@ for attempt in $(seq 1 30); do
 done
 [[ $(curl -ks -o /dev/null -w '%{http_code}' "$url") == 410 ]]
 disconnect
-journalctl -u darban-links.service --no-pager | grep -q 'link ended: accept1 connected'
-if journalctl -u darban-links.service --no-pager | grep -q '[0-9a-f]\{64\}'; then echo 'FAIL: a token reached the log.'; exit 1; fi
+journalctl -u darban-links.service --no-pager | grep 'link ended: accept1 connected' >/dev/null
+if journalctl -u darban-links.service --no-pager | grep '[0-9a-f]\{64\}' >/dev/null; then echo 'FAIL: a token reached the log.'; exit 1; fi
 echo 'PASS: the temporary link works until the first connection, and keeps tokens out of the log.'
 
 # A broken server: diagnostics say so by exit status, and the tool can still be updated.
@@ -430,9 +430,9 @@ if systemctl is-active --quiet "$UNIT"; then echo 'FAIL: OpenVPN still runs afte
 for path in /root/pki /etc/openvpn/server /root/openvpn-clients /etc/darban /usr/local/sbin/darban /etc/apt/sources.list.d/openvpn-aptrepo.list /var/log/darban-setup.log; do
     if [[ -e $path ]]; then echo "FAIL: still present after removal: $path"; exit 1; fi
 done
-if dpkg-query -W -f='${Status}' openvpn 2>/dev/null | grep -q 'install ok installed'; then echo 'FAIL: the openvpn package is still installed.'; exit 1; fi
+if dpkg-query -W -f='${Status}' openvpn 2>/dev/null | grep 'install ok installed' >/dev/null; then echo 'FAIL: the openvpn package is still installed.'; exit 1; fi
 if nft list table ip darban >/dev/null 2>&1; then echo 'FAIL: the NAT table is still loaded.'; exit 1; fi
-if (( USE_UFW )) && ufw status | grep -q '1194\|tun0'; then echo 'FAIL: the ufw rules are still there.'; exit 1; fi
+if (( USE_UFW )) && ufw status | grep '1194\|tun0' >/dev/null; then echo 'FAIL: the ufw rules are still there.'; exit 1; fi
 ls /root/darban-backup-*.tar.gz
 echo 'PASS: full removal left nothing behind except the backup and the kernel.'
 echo 'All acceptance checks passed.'
