@@ -2179,7 +2179,7 @@ test_status_exit_code_follows_the_checklist() {
     rm "$CRL"
     out=$(mgr status); rc=$?
     rc_is 'a problem means 1' 1 "$rc"
-    has 'and the checklist shows it' 'Published CRL problem' "$out"
+    has 'and the checklist shows it' "The CRL file $CRL is missing" "$out"
 }
 
 test_management_is_only_reported_when_it_works() {
@@ -3840,7 +3840,8 @@ test_diagnostics_check_the_crl_as_openvpn_reads_it() {
 test_status_cut_short_stops_quietly() {
     # N4, E7 and T10: a reader that goes away ends the output, with SIGPIPE's status, and no word of an abort.
     local rc
-    { sleep 0.5; bash "$E/manager.sh" status </dev/null; } 2>"$E/status.err" | true
+    # With SIGPIPE as a person's shell has it: a runner may start the tests with it ignored, which no shell can undo.
+    { sleep 0.5; env --default-signal=PIPE bash "$E/manager.sh" status </dev/null; } 2>"$E/status.err" | true
     rc=${PIPESTATUS[0]}
     rc_is 'the status is SIGPIPE, neither a pass nor a fail' 141 "$rc"
     lacks 'nothing is called an abort' 'aborted unexpectedly' "$(cat "$E/status.err")"

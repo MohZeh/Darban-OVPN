@@ -20,7 +20,7 @@ The goal for Darban was a tool that one person can use safely on a small VPS, wi
 **The design.** A `GET` only ever returns a page. Using the link takes a deliberate `POST` from a button, which preview bots do not send. That creates a second, short-lived address with a small download allowance, because the first attempt to open an app may fail.
 
 **The supporting choices.**
-- Only a hash of the token is on disk, and tokens are kept out of logs.
+- The link service finds a link by a hash of its token and never keeps the token. The tool keeps the whole address, readable by root only, so it can show it again. Tokens are kept out of logs.
 - The profile copy lives in `/run`, so it disappears on reboot.
 - A used, expired and unknown link all return the same answer.
 - The service runs only while a link exists.

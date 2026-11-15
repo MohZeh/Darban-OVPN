@@ -126,7 +126,7 @@ If you send the password separately, add:
 - Opening a link or downloading the file does not use it up, so a messenger's preview or a mistake costs nothing.
 - The link ends when a connection with the profile is seen after the link was made. The link service asks OpenVPN's management interface about this every 10 seconds, so a connection shorter than that can be missed. A server without a local management interface, such as one this tool did not set up, cannot see connections: its links work until their time is up, and the tool says so when it makes one. Menu `6` shows whether the file was downloaded.
 - The page is in Persian when the device's language is Persian, and in English otherwise.
-- The link service keeps only a hash of the link's token. The tool keeps the whole address, readable by root only, so menu 6 can show it again; a link made before `v1.0.0-rc.8` cannot be shown again.
+- The link service finds a link by a hash of its token and never keeps the token. The tool keeps the whole address, readable by root only, so menu 6 can show it again; a link made before `v1.0.0-rc.8` cannot be shown again.
 - The copy of the profile is kept in `/run/darban-links`, which a reboot clears.
 - Revoking a client deletes its open links.
 - A copy left behind by a crash is removed after a minute.
