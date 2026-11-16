@@ -4472,7 +4472,8 @@ test_a_kept_file_has_a_record_and_a_time() {
     local out now expires
     expire_unit
     out=$(menu '1\nbob\n0\n')
-    has 'keeping it says when it goes' 'It is deleted in 24 h, or when bob connects.' "$out"
+    # The line wraps at the width of the screen, so it is read as one.
+    has 'keeping it says when it goes' 'It is deleted in 24 h, or when bob connects.' "$(tr '\n' ' ' <<<"$out" | tr -s ' ')"
     ok_if 'the file has a record beside it' test -s "$E/clients/bob.share"
     now=$(date -u +%s); expires=$(record_of bob expires)
     (( expires > now + 86400 - 120 && expires <= now + 86400 )); rc_is 'which expires after the hours of Settings' 0 "$?"
