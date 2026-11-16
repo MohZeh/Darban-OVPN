@@ -5142,6 +5142,10 @@ restore_from() {
             crl_state=${crl_state:-'The CRL in the backup does not list every revocation of its index; a new one is made.'}; RESTORE_NEW_CRL=1
         fi
     fi
+    # The archive as a whole first: a server.conf with a line this tool does not restore refuses it.
+    if ! python3 -I "$BACKUP_PY" conf --conf "$files/server/server.conf" --server-dir "$DARBAN_SERVER_DIR" >"$stage/server.conf" 2>"$stage/conf.notes"; then
+        restore_refuse "$(sed -n 's/^REFUSED: //p' "$stage/conf.notes")"; return 1
+    fi
     # I13: a client this server revoked must not come back. A CRL of the same CA shows those revocations; without
     # one, they cannot be known, and the restore says so.
     if [[ -s $DARBAN_CRL ]] && openssl crl -in "$DARBAN_CRL" -verify -CAfile "$files/pki/ca.crt" -noout >/dev/null 2>&1; then
@@ -5162,9 +5166,6 @@ restore_from() {
         fi
     else
         unverified=yes
-    fi
-    if ! python3 -I "$BACKUP_PY" conf --conf "$files/server/server.conf" --server-dir "$DARBAN_SERVER_DIR" >"$stage/server.conf" 2>"$stage/conf.notes"; then
-        restore_refuse "$(sed -n 's/^REFUSED: //p' "$stage/conf.notes")"; return 1
     fi
     # What would happen, before anything does.
     say
