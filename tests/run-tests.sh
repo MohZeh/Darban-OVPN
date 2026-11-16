@@ -164,6 +164,18 @@ test_expired_revoked_entry_may_leave_the_crl() {
     rc_is 'expired entry left the CRL' 0 "$(crl_count "$CRL")"
 }
 
+test_crl_bad_signature_is_rejected() {
+    # OpenSSL 3.0 may print "verify failure" and exit 0: neither Diagnostics nor the maintainer may accept it.
+    local out
+    openssl crl -in "$CRL" -badsig -out "$E/bad-signature.pem"
+    cp "$E/bad-signature.pem" "$CRL"
+    out=$(lib_verify); rc_is 'a parseable CRL with a bad signature is rejected' 1 "$?"
+    has 'the signature failure is named' 'CRL signature verification failed' "$out"
+    out=$(maintain --check); rc_is 'the maintainer refuses it too' 1 "$?"
+    out=$(mgr status); rc_is 'Diagnostics refuse it too' 1 "$?"
+    has 'Diagnostics name the signature failure' 'CRL signature verification failed' "$out"
+}
+
 test_garbage_published_crl_never_blocks_repair() {
     local out rc
     echo garbage > "$CRL"
@@ -4664,6 +4676,338 @@ test_a_thousand_kept_files() {
     printf '    a thousand files due at once: %s s\n' "$took"
     [[ $(find "$E/clients" -name 'k*' | wc -l) == 0 ]]; rc_is 'a thousand files due at once all go' 0 "$?"
     (( took < 120 )); rc_is 'within two minutes' 0 "$?"
+}
+
+# ---------- backup and restore of the CA ----------
+AGE_KEY=age1$(printf 'q%.0s' $(seq 1 58))
+template_server() {
+    # The server folder as this tool's setup writes it, so a backup holds what a real one holds.
+    cp "$PKI/ca.crt" "$E/server/ca.crt"
+    cp "$PKI/private/server_abc123.key" "$E/server/server.key"
+    cat > "$SERVER_CONF" <<CONF
+# Created by Darban OVPN server-setup.
+port 1194
+proto udp4
+dev tun
+topology subnet
+server 10.8.0.0 255.255.255.0
+ca ca.crt
+cert server.crt
+key server.key
+tls-crypt tls-crypt.key
+crl-verify $E/server/crl.pem
+dh none
+tls-version-min 1.2
+data-ciphers AES-256-GCM:AES-128-GCM:CHACHA20-POLY1305
+keepalive 10 60
+explicit-exit-notify 1
+persist-key
+persist-tun
+user nobody
+group nogroup
+management /run/openvpn-server/darban.sock unix
+verb 3
+push "redirect-gateway def1 bypass-dhcp"
+push "dhcp-option DNS 1.1.1.1"
+CONF
+}
+backup_key_set() { printf 'BACKUP_RECIPIENT=%s\n' "$AGE_KEY" > "$E/cfg/backup.conf"; }
+backups() { find "$E/pki-backups" -maxdepth 1 -name 'darban-pki-*.tar.age' 2>/dev/null | wc -l; }
+manifest_value() { python3 -c 'import json,sys; v=json.load(open(sys.argv[1]))[sys.argv[2]]; print(v if not isinstance(v, (list, dict)) else json.dumps(v))' "$E/pki-backups/latest.manifest.json" "$1"; }
+ca_fp() { openssl x509 -in "$PKI/ca.crt" -noout -fingerprint -sha256 | sed 's/^[^=]*=//'; }
+opened_backup() {
+    # opened_backup <out.tar>: the newest backup, opened as the owner would, with the stand-in of age.
+    age -d -i key.txt -o "$1" "$E/pki-backups/latest.tar.age"
+}
+restore_run() { bash "$E/manager.sh" restore "$@" 2>&1; }
+craft() {
+    # craft <good tar> <out tar> <case> [file]: a changed copy of an archive. With "keep-manifest" the checksums
+    # stay as they were; otherwise manifest.json follows the change.
+    python3 - "$@" <<'PY'
+import hashlib, io, json, sys, tarfile
+good, out, case = sys.argv[1:4]
+extra = sys.argv[4] if len(sys.argv) > 4 else ''
+src = tarfile.open(good)
+members = [(m, src.extractfile(m).read() if m.isreg() else b'') for m in src.getmembers()]
+manifest = json.loads(dict((m.name, d) for m, d in members)['manifest.json'])
+def regular(name, data, mode=0o600):
+    info = tarfile.TarInfo(name); info.size = len(data); info.mode = mode
+    return info, data
+result = [(m, d) for m, d in members if m.name != 'manifest.json']
+keep = False
+if case == 'extra':
+    result.append(regular('pki/evil.sh', b'#!/bin/sh\n'))
+elif case == 'symlink':
+    info = tarfile.TarInfo('clients/link'); info.type = tarfile.SYMTYPE; info.linkname = '/etc/shadow'; result.append((info, b''))
+elif case == 'hardlink':
+    info = tarfile.TarInfo('clients/hard'); info.type = tarfile.LNKTYPE; info.linkname = 'pki/ca.crt'; result.append((info, b''))
+elif case == 'duplicate':
+    result.append(regular('darban/domain', b'evil.example.com\n'))
+elif case == 'big':
+    result.append(regular('clients/big', b'x' * (1024 * 1024 + 1)))
+elif case == 'absolute':
+    result.append(regular('/etc/cron.d/evil', b'* * * * * root sh\n'))
+elif case == 'dotdot':
+    result.append(regular('clients/../../evil', b'x\n'))
+elif case == 'up':
+    result = [(m, d + b'up /bin/sh\n') if m.name == 'server/server.conf' else (m, d) for m, d in result]
+elif case == 'tamper':
+    result = [(m, d + b'\n') if m.name == 'pki/serial' else (m, d) for m, d in result]
+    keep = True
+elif case == 'nocrl':
+    result = [(m, d) for m, d in result if m.name != 'pki/crl.pem']
+elif case == 'badcrl':
+    result = [(m, b'not a crl\n') if m.name == 'pki/crl.pem' else (m, d) for m, d in result]
+elif case == 'crl':
+    data = open(extra, 'rb').read()
+    result = [(m, data) if m.name == 'pki/crl.pem' else (m, d) for m, d in result]
+if not keep:
+    manifest['members'] = {m.name: {'sha256': hashlib.sha256(d).hexdigest(), 'size': len(d)} for m, d in result if m.isreg()}
+with tarfile.open(out, 'w', format=tarfile.PAX_FORMAT) as tar:
+    data = json.dumps(manifest).encode()
+    info = tarfile.TarInfo('manifest.json'); info.size = len(data); tar.addfile(info, io.BytesIO(data))
+    for m, d in result:
+        if m.isreg():
+            m.size = len(d); tar.addfile(m, io.BytesIO(d))
+        else:
+            tar.addfile(m)
+PY
+}
+backed_up_server() {
+    # A server of this tool's template with a key, two clients and one backup, opened in $E/backup.tar.
+    template_server
+    backup_key_set
+    menu '1\nbob\n0\n' >/dev/null
+    menu '1\ncarol\n0\n' >/dev/null
+    (cd "$E" && opened_backup "$E/backup.tar")
+}
+
+test_backup_now_makes_an_encrypted_archive_and_its_manifest() {
+    # D5, C.8 and C.12.11: Backup now asks for the owner's public key once, then makes one archive of the closed
+    # list, encrypted for that key, with a manifest beside it; it says where it is and that it is on this server.
+    local out dir list
+    template_server
+    out=$(menu "8\n4\n$AGE_KEY\n0\n0\n")
+    has 'it says what it holds' 'encrypted with age' "$out"
+    has 'it says how to make a key' 'age-keygen -o darban-backup.key' "$out"
+    has 'it makes one' 'Backup made:' "$out"
+    has 'it shows the CA fingerprint' "$(ca_fp)" "$out"
+    has 'and says the copy is on this server' 'This copy is on this server. To recover from a lost server you need a copy elsewhere and your private key.' "$out"
+    has 'with how to restore it' 'sudo darban restore darban-pki.tar --ca-fingerprint' "$out"
+    grep -q "^BACKUP_RECIPIENT=$AGE_KEY$" "$E/cfg/backup.conf"; rc_is 'the public key is kept' 0 "$?"
+    grep -q -- "age -r $AGE_KEY -o " "$STUB_LOG"; rc_is 'the archive is encrypted for that key' 0 "$?"
+    [[ $(backups) == 1 ]]; rc_is 'one backup is there' 0 "$?"
+    dir=$E/pki-backups
+    has 'the folder is readable by root only' 'folder 700' "folder $(stat -c %a "$dir")"
+    has 'and so is the archive' 'archive 600' "archive $(stat -c %a "$(readlink -f "$dir/latest.tar.age")")"
+    [[ $(manifest_value schema) == 1 && $(manifest_value encryption) == recipient ]]; rc_is 'the manifest has its schema and how it is locked' 0 "$?"
+    [[ $(manifest_value ca_fingerprint) == "$(ca_fp | tr -d : | tr 'A-F' 'a-f')" ]]; rc_is 'and the CA fingerprint' 0 "$?"
+    [[ $(manifest_value archive_sha256) == "$(sha256sum "$(readlink -f "$dir/latest.tar.age")" | cut -d' ' -f1)" ]]; rc_is 'and the checksum of the archive' 0 "$?"
+    list=$(manifest_value paths)
+    for path in pki/private/ca.key pki/index.txt pki/issued/alice.crt server/server.conf server/tls-crypt.key darban/config darban/domain; do
+        has "it holds $path" "\"$path\"" "$list"
+    done
+    lacks 'never the NAT file' 'nat.nft' "$list"
+    lacks 'nor the backup settings' 'backup.conf' "$list"
+    (cd "$E" && opened_backup "$E/opened.tar")
+    has 'the opened archive holds its manifest too' 'manifest.json' "$(tar -tf "$E/opened.tar")"
+    has 'Diagnostics name the newest backup' 'Newest backup of the CA' "$(mgr status)"
+}
+
+test_backups_follow_changes_of_the_ca() {
+    # D5: with a key set, a backup after each change to the CA and daily, never a copy of one that did not change,
+    # the newest 14 kept. A failure never fails the change, and Diagnostics name it. Hooks get the two paths.
+    local i out
+    template_server
+    menu '1\nbob\n0\n' >/dev/null
+    [[ $(backups) == 0 ]]; rc_is 'without a key, nothing is made by itself' 0 "$?"
+    has 'and Diagnostics say how to set one' 'No backup key is set' "$(mgr status)"
+    backup_key_set
+    menu '1\ncarol\n0\n' >/dev/null
+    [[ $(backups) == 1 ]]; rc_is 'a new client makes a backup' 0 "$?"
+    mgr backup-auto daily >/dev/null
+    [[ $(backups) == 1 ]]; rc_is 'the daily one makes none when nothing changed' 0 "$?"
+    revoke_menu carol >/dev/null
+    [[ $(backups) == 2 ]]; rc_is 'a revocation makes one' 0 "$?"
+    mkdir -p "$E/varlib/clients"
+    for i in $(seq 1 15); do printf 'first_seen=%s\n' "$i" > "$E/varlib/clients/zz$i"; mgr backup-auto daily >/dev/null; done
+    has 'the newest 14 are kept' 'kept 14' "kept $(backups): $(ls "$E/pki-backups")"
+    ok_if 'and the latest is one of them' test -e "$(readlink -f "$E/pki-backups/latest.tar.age")"
+    out=$(FAIL_AGE=1 menu '1\ndave\n0\n')
+    has 'a failed backup is said' 'The automatic backup of the CA failed' "$out"
+    ok_if 'and the client is still made' test -s "$E/clients/dave.ovpn"
+    has 'Diagnostics then warn' 'The last automatic backup failed' "$(mgr status)"
+    mkdir -m 700 "$E/cfg/backup-hooks"
+    printf '#!/bin/sh\necho "$1 $2" > %s\n' "$E/hook-ran" > "$E/cfg/backup-hooks/deliver"; chmod 700 "$E/cfg/backup-hooks/deliver"
+    printf '#!/bin/sh\ntouch %s\n' "$E/loose-ran" > "$E/cfg/backup-hooks/loose"; chmod 755 "$E/cfg/backup-hooks/loose"
+    printf '#!/bin/sh\nexit 3\n' > "$E/cfg/backup-hooks/broken"; chmod 700 "$E/cfg/backup-hooks/broken"
+    menu '1\nerin\n0\n' >/dev/null
+    for i in $(seq 1 20); do [[ -s $E/hook-ran ]] && break; sleep 0.25; done
+    has 'a hook gets the archive and its manifest' "$(readlink -f "$E/pki-backups/latest.tar.age") $(readlink -f "$E/pki-backups/latest.manifest.json")" "$(cat "$E/hook-ran" 2>/dev/null)"
+    ok_if 'a hook others could change does not run' test ! -e "$E/loose-ran"
+    for i in $(seq 1 20); do [[ -s $E/pki-backups/.hooks-failed ]] && break; sleep 0.25; done
+    has 'a hook that fails is named in Diagnostics' 'A backup hook failed: broken' "$(mgr status)"
+}
+
+test_restore_puts_the_ca_back() {
+    # D5, C.8, C.12.10 and C.13.6: a restore puts the CA, the clients and the server files of the backup back, with
+    # server.conf written again from the template. OpenVPN is off from the first rename to the end. What it replaced is
+    # kept, and the restored CA issues clients again.
+    local out fp before
+    backed_up_server
+    fp=$(ca_fp)
+    before=$(cat "$PKI/index.txt")
+    menu '1\ndave\n0\n' >/dev/null
+    echo 'custom 1' >> "$SERVER_CONF"
+    : > "$STUB_LOG"
+    out=$(printf '2\n' | bash "$E/manager.sh" restore "$E/backup.tar" --ca-fingerprint "$fp" 2>&1); rc_is 'the restore succeeds' 0 "$?"
+    has 'it says what it restores' 'Clients' "$out"
+    has 'and that OpenVPN stays off' 'OpenVPN stays off from the first change until the end' "$out"
+    has 'it is done' 'Restored the backup of' "$out"
+    [[ $(cat "$PKI/index.txt") == "$before" ]]; rc_is 'the CA index is the one of the backup' 0 "$?"
+    lacks 'server.conf comes from the template' 'custom 1' "$(cat "$SERVER_CONF")"
+    has 'with the routing of the backup' 'push "redirect-gateway def1 bypass-dhcp"' "$(cat "$SERVER_CONF")"
+    ok_if 'no journal is left' test ! -e "$E/varlib/restore.journal"
+    ok_if 'what it replaced is kept' test -n "$(find "$E/pki-backups" -maxdepth 2 -path '*pre-restore-*/pki' -type d)"
+    [[ $(grep -n 'systemctl disable --now openvpn-server@server.service' "$STUB_LOG" | cut -d: -f1 | head -n1) -lt $(grep -n 'systemctl enable --now openvpn-server@server.service' "$STUB_LOG" | cut -d: -f1 | tail -n1) ]]
+    rc_is 'OpenVPN is turned off first and on at the end' 0 "$?"
+    menu '1\nfrank\n0\n' >/dev/null
+    ok_if 'the restored CA issues a client' test -s "$E/clients/frank.ovpn"
+    maintain --check >/dev/null; rc_is 'and its CRL passes its checks' 0 "$?"
+    out=$(bash "$E/manager.sh" restore "$E/backup.tar" 2>&1 </dev/null); rc_is 'without an anchor it refuses' 2 "$?"
+    has 'and says what to give' '--ca-fingerprint' "$out"
+    out=$(printf '2\n' | bash "$E/manager.sh" restore "$E/backup.tar" --ca-from "$E/clients/frank.ovpn" 2>&1); rc_is 'a profile from a device is an anchor too' 0 "$?"
+}
+
+test_a_restore_refuses_before_changing_anything() {
+    # T51, T64, C.13.6, C.14.5, C.15.9 and C.15.10: an archive with any member outside the closed list, a link, a
+    # member twice, one too large, a path out of place, a server.conf with another directive, a member that does not
+    # match its checksum, or another CA, is refused before anything changes.
+    local fp kind out snapshot
+    backed_up_server
+    fp=$(ca_fp)
+    snapshot=$(cat "$PKI/index.txt" "$SERVER_CONF")
+    for kind in extra:'not one a backup holds' symlink:'not a regular file' hardlink:'not a regular file' duplicate:'appears twice' \
+        big:'larger than' absolute:'not allowed' dotdot:'not allowed' up:'line 25, up' tamper:'does not match its checksum'; do
+        craft "$E/backup.tar" "$E/bad.tar" "${kind%%:*}"
+        : > "$STUB_LOG"
+        out=$(printf '2\n' | bash "$E/manager.sh" restore "$E/bad.tar" --ca-fingerprint "$fp" 2>&1); rc_is "${kind%%:*}: refused" 1 "$?"
+        has "${kind%%:*}: with why" "${kind#*:}" "$out"
+        has "${kind%%:*}: and that nothing changed" 'Nothing on this server was changed.' "$out"
+        [[ $(cat "$PKI/index.txt" "$SERVER_CONF") == "$snapshot" && ! -e $E/varlib/restore.journal ]]; rc_is "${kind%%:*}: nothing changed" 0 "$?"
+        lacks "${kind%%:*}: OpenVPN was not touched" 'systemctl disable' "$(cat "$STUB_LOG")"
+        ok_if "${kind%%:*}: nothing reached /etc" test ! -e /etc/cron.d/evil
+    done
+    out=$(printf '2\n' | bash "$E/manager.sh" restore "$E/backup.tar" --ca-fingerprint "$(printf '%064d' 0)" 2>&1); rc_is 'another CA: refused' 1 "$?"
+    has 'it says so' 'not the CA you named' "$out"
+}
+
+test_a_restore_never_brings_back_a_revoked_client() {
+    # I13, T22, T33 and C.8: a client this server revoked after the backup is never valid again: the restore is
+    # refused and names it. Without a CRL of the same CA, the restore says the revocations cannot be known, asks
+    # for the server name, and Diagnostics warn until the owner acknowledges it.
+    local fp out host
+    backed_up_server
+    fp=$(ca_fp)
+    revoke_menu bob >/dev/null
+    out=$(printf '2\n' | bash "$E/manager.sh" restore "$E/backup.tar" --ca-fingerprint "$fp" 2>&1); rc_is 'refused' 1 "$?"
+    has 'it names the client revoked since' 'this server revoked bob after the backup was made' "$out"
+    host=$(hostname -s | tr -cd 'A-Za-z0-9.-'); host=${host:-server}
+    rm -f "$CRL"
+    out=$(printf 'wrong\n' | bash "$E/manager.sh" restore "$E/backup.tar" --ca-fingerprint "$fp" 2>&1)
+    has 'without a CRL it cannot know' 'Revocations made after' "$out"
+    ok_if 'a wrong name restores nothing' test ! -e "$E/varlib/restore-unverified"
+    out=$(printf '%s\n' "$host" | bash "$E/manager.sh" restore "$E/backup.tar" --ca-fingerprint "$fp" 2>&1); rc_is 'the server name restores it' 0 "$?"
+    ok_if 'and leaves the warning' test -s "$E/varlib/restore-unverified"
+    has 'Diagnostics warn' 'revocations made after it cannot be known' "$(mgr status)"
+    has 'until it is acknowledged' 'Acknowledged.' "$(restore_run --acknowledge)"
+    lacks 'then they do not' 'revocations made after it cannot be known' "$(mgr status)"
+}
+
+test_a_restore_rejects_bad_crl_signatures() {
+    # A parseable but unsigned CRL must neither be repaired silently inside the archive, nor count as evidence
+    # of this server's revocations. Exercise both paths on OpenSSL 3.0 as well as newer versions in CI.
+    local fp out before host
+    backed_up_server
+    fp=$(ca_fp)
+    before=$(sha256sum "$CRL" "$PKI/index.txt" "$SERVER_CONF")
+    openssl crl -in "$CRL" -badsig -out "$E/bad-signature.pem"
+    craft "$E/backup.tar" "$E/bad-crl.tar" crl "$E/bad-signature.pem"
+    : > "$STUB_LOG"
+    out=$(printf '2\n' | bash "$E/manager.sh" restore "$E/bad-crl.tar" --ca-fingerprint "$fp" 2>&1)
+    rc_is 'an archive with a bad CRL signature is refused' 1 "$?"
+    has 'the archive signature failure is named' 'the CRL in the backup is not signed by its CA' "$out"
+    [[ $(sha256sum "$CRL" "$PKI/index.txt" "$SERVER_CONF") == "$before" ]]; rc_is 'the live files stay unchanged' 0 "$?"
+    ok_if 'no restore journal is created' test ! -e "$E/varlib/restore.journal"
+    lacks 'OpenVPN is not touched' 'systemctl disable' "$(cat "$STUB_LOG")"
+    cp "$E/bad-signature.pem" "$CRL"
+    out=$(printf '2\n' | bash "$E/manager.sh" restore "$E/backup.tar" --ca-fingerprint "$fp" 2>&1)
+    has 'a live CRL with a bad signature cannot establish revocations' 'Revocations made after' "$out"
+    ok_if 'a menu choice cannot confirm the unknowable path' test ! -e "$E/varlib/restore-unverified"
+    host=$(hostname -s | tr -cd 'A-Za-z0-9.-'); host=${host:-server}
+    out=$(printf '%s\n' "$host" | bash "$E/manager.sh" restore "$E/backup.tar" --ca-fingerprint "$fp" 2>&1)
+    rc_is 'the server name confirms the unknowable path' 0 "$?"
+    has 'the restore finishes' 'Restored the backup of' "$out"
+    ok_if 'the revocation warning is kept' test -s "$E/varlib/restore-unverified"
+}
+
+test_a_restore_that_stops_finishes_or_goes_back() {
+    # T65, C.12.10, C.13.7 and C.15.8: a restore stopped after any rename leaves OpenVPN off; Diagnostics say so, the
+    # CRL timer leaves the CRL alone, and the next run of this tool finishes it. --rollback puts back what was there.
+    # A state no step explains stops the resume, with OpenVPN still off.
+    local fp step before after out id
+    backed_up_server
+    fp=$(ca_fp)
+    before=$(cat "$PKI/index.txt")
+    menu '1\ndave\n0\n' >/dev/null
+    after=$(cat "$PKI/index.txt")
+    for step in 1 2 3 4; do
+        : > "$STUB_LOG"
+        printf '2\n' | DARBAN_TEST_RESTORE_STOP=$step bash "$E/manager.sh" restore "$E/backup.tar" --ca-fingerprint "$fp" >/dev/null 2>&1; rc_is "stopped after rename $step" 99 "$?"
+        ok_if "after rename $step a journal is left" test -s "$E/varlib/restore.journal"
+        lacks "after rename $step OpenVPN is not started" 'systemctl enable' "$(cat "$STUB_LOG")"
+        has "after rename $step Diagnostics say so" 'A restore is unfinished' "$(mgr status)"
+        out=$(maintain --check 2>&1); rc_is "after rename $step the CRL timer leaves it alone" 1 "$?"
+        mgr list >/dev/null
+        ok_if "after rename $step the next run finishes it" test ! -e "$E/varlib/restore.journal"
+        [[ $(cat "$PKI/index.txt") == "$before" ]]; rc_is "after rename $step the backup is in place" 0 "$?"
+        grep -q 'systemctl enable --now openvpn-server@server.service' "$STUB_LOG"; rc_is "after rename $step OpenVPN is on again" 0 "$?"
+    done
+    menu '1\nerin\n0\n' >/dev/null
+    after=$(cat "$PKI/index.txt")
+    printf '2\n' | DARBAN_TEST_RESTORE_STOP=3 bash "$E/manager.sh" restore "$E/backup.tar" --ca-fingerprint "$fp" >/dev/null 2>&1
+    has 'a stopped restore can be undone' 'The restore was undone' "$(restore_run --rollback)"
+    [[ $(cat "$PKI/index.txt") == "$after" && ! -e $E/varlib/restore.journal ]]; rc_is 'and the CA is as it was' 0 "$?"
+    printf '2\n' | DARBAN_TEST_RESTORE_STOP=1 bash "$E/manager.sh" restore "$E/backup.tar" --ca-fingerprint "$fp" >/dev/null 2>&1
+    id=$(sed -n 's/^id=//p' "$E/varlib/restore.journal")
+    rm -rf "$PKI.restore-$id"
+    : > "$STUB_LOG"
+    out=$(restore_run --resume); rc_is 'a state no step explains stops' 1 "$?"
+    has 'and says what to look at' 'cannot go on' "$out"
+    lacks 'with OpenVPN still off' 'systemctl enable' "$(cat "$STUB_LOG")"
+    has 'it can still be undone' 'The restore was undone' "$(restore_run --rollback)"
+    [[ $(cat "$PKI/index.txt") == "$after" ]]; rc_is 'back to what was there' 0 "$?"
+}
+
+test_a_restore_with_a_crl_missing_unreadable_or_expired() {
+    # T14, C.8 bullet 5, C.14.4 and C.15.2: each is said apart, and a new CRL of the restored CA is in place before
+    # OpenVPN starts.
+    local fp kind out
+    backed_up_server
+    fp=$(ca_fp)
+    # A CRL of this CA that has just expired, from a config of its own: the real Easy-RSA keeps no openssl.cnf.
+    printf '[ca]\ndefault_ca = d\n[d]\ndatabase = %s/index.txt\ncertificate = %s/ca.crt\nprivate_key = %s/private/ca.key\ndefault_md = sha256\n' \
+        "$PKI" "$PKI" "$PKI" > "$E/short-crl.cnf"
+    openssl ca -batch -config "$E/short-crl.cnf" -gencrl -crlsec 1 -out "$E/short-crl.pem" 2>/dev/null
+    ok_if 'an expired CRL of this CA is made for the test' test -s "$E/short-crl.pem"
+    sleep 2
+    for kind in nocrl:'The backup has no CRL' badcrl:'cannot be read' crl:'has expired'; do
+        craft "$E/backup.tar" "$E/crl.tar" "${kind%%:*}" "$E/short-crl.pem"
+        out=$(printf '2\n' | bash "$E/manager.sh" restore "$E/crl.tar" --ca-fingerprint "$fp" 2>&1); rc_is "${kind%%:*}: restored" 0 "$?"
+        has "${kind%%:*}: said apart" "${kind#*:}" "$out"
+        maintain --check >/dev/null; rc_is "${kind%%:*}: a new CRL is in place" 0 "$?"
+        [[ $(stat -c %a "$CRL") == 644 ]]; rc_is "${kind%%:*}: readable by OpenVPN" 0 "$?"
+    done
 }
 
 mapfile -t TESTS < <(declare -F | awk '$3 ~ /^test_/ {print $3}' | sort)

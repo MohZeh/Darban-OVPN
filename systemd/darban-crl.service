@@ -1,6 +1,8 @@
 [Unit]
 Description=Darban OVPN automatic CRL renewal
 # No ConditionPathExists: a missing server.conf must fail loudly, not be skipped silently.
+# Then the daily backup of the CA, which is made only when a backup key is set and something changed.
+OnSuccess=darban-backup.service
 
 [Service]
 Type=oneshot

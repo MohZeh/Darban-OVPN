@@ -14,13 +14,14 @@ cat > openssl.cnf <<CNF
 [ca]
 default_ca = CA_default
 [CA_default]
-dir = $P
-database = $P/index.txt
-new_certs_dir = $P/issued
-certificate = $P/ca.crt
-private_key = $P/private/ca.key
-serial = $P/serial
-crlnumber = $P/crlnumber
+# Relative, so the same file serves a copy of this CA, such as one a restore stages.
+dir = .
+database = ./index.txt
+new_certs_dir = ./issued
+certificate = ./ca.crt
+private_key = ./private/ca.key
+serial = ./serial
+crlnumber = ./crlnumber
 default_md = sha256
 default_crl_days = 180
 policy = pol
@@ -41,12 +42,15 @@ distinguished_name = dn
 [dn]
 CNF
 openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes -keyout private/ca.key -out ca.crt -subj /CN=TestCA -days 3650 2>/dev/null
+cp openssl.cnf "$E/openssl.cnf"
 
 # Fake Easy-RSA backed by real "openssl ca". FAIL_GENCRL=1 simulates a CRL generation failure.
 cat > "$E/bin/easyrsa" <<'STUB'
 #!/usr/bin/env bash
 set -e
 cd "$EASYRSA_PKI"
+# A copy of the CA has no openssl.cnf of its own; the stand-in's is relative.
+if [[ ! -f openssl.cnf ]]; then cp "$(dirname "$0")/../openssl.cnf" openssl.cnf; [[ -s crlnumber ]] || echo 1000 > crlnumber; fi
 issue() { # name extensions subject
     openssl req -new -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes -keyout "private/$1.key" -out "$1.csr" -subj "$3" 2>/dev/null
     openssl ca -batch -config openssl.cnf -extensions "$2" -in "$1.csr" -out "issued/$1.crt.tmp" -notext -days "${EASYRSA_CERT_EXPIRE:-825}" 2>/dev/null
@@ -125,6 +129,17 @@ STUB
 printf '#!/usr/bin/env bash\nif [[ ${1:-} == -n ]]; then echo 1; fi\n' > "$E/bin/sysctl"
 printf '#!/usr/bin/env bash\necho "logger $*" >> "$STUB_LOG"\n' > "$E/bin/logger"
 printf '#!/usr/bin/env bash\nargs=(); while (($#)); do case $1 in -o|-g|-m) shift 2;; *) args+=("$1"); shift;; esac; done; exec /usr/bin/install "${args[@]}"\n' > "$E/bin/install"
+# age: a stand-in that only wraps the file, so a test opens it again with "age -d". FAIL_AGE: it fails.
+cat > "$E/bin/age" <<'STUB'
+#!/usr/bin/env bash
+echo "age $*" >> "${STUB_LOG:-/dev/null}"
+[[ -z ${FAIL_AGE:-} ]] || exit 1
+out='' decrypt=0 input=''
+while (( $# )); do
+    case $1 in -o) out=$2; shift 2 ;; -r|-i) shift 2 ;; -d) decrypt=1; shift ;; -p) shift ;; *) input=$1; shift ;; esac
+done
+if (( decrypt )); then tail -n +2 "$input" > "$out"; else { echo 'age-stand-in'; cat "$input"; } > "$out"; fi
+STUB
 chmod +x "$E/bin/"*
 
 export EASYRSA_PKI=$P EASYRSA_BATCH=1
@@ -162,14 +177,17 @@ printf 'DOWNLOAD_SSH_HOST=203.0.113.7\nDOWNLOAD_SSH_PORT=2222\nDOWNLOAD_SSH_USER
 
 sed -e "s#^DARBAN_LIB=.*#DARBAN_LIB=$E/lib#" -e "s#^DARBAN_PKI=.*#DARBAN_PKI=$P#" -e "s#^DARBAN_EASYRSA=.*#DARBAN_EASYRSA=$E/bin/easyrsa#" \
     -e "s#^DARBAN_SERVER_DIR=.*#DARBAN_SERVER_DIR=$E/server#" -e "s#^DARBAN_LOCK=.*#DARBAN_LOCK=$E/run/lock#" \
+    -e "s#^DARBAN_RESTORE_JOURNAL=.*#DARBAN_RESTORE_JOURNAL=$E/varlib/restore.journal#" \
     "$SRC/lib/common.sh" > "$E/lib/common.sh"
 echo 'darban_require_root() { :; }' >> "$E/lib/common.sh"
 cp "$SRC/lib/ui.sh" "$E/lib/ui.sh"
+cp "$SRC/lib/backup.py" "$E/lib/backup.py"
 sed -e "s#^source /usr/local/lib/darban/#source $E/lib/#" -e "s#^OUT_DIR=.*#OUT_DIR=$E/clients#" -e "s#^LINK_DIR=.*#LINK_DIR=$E/links#" -e "s#^BACKUP_ROOT=.*#BACKUP_ROOT=$E/backups-tool#" -e "s#^SBIN_DIR=.*#SBIN_DIR=$E/sbin#" -e "s#^UNIT_DIR=.*#UNIT_DIR=$E/units#" -e "s#^CONFIG_DIR=.*#CONFIG_DIR=$E/cfg#" \
     -e "s#^SYSTEM_CA_FILE=.*#SYSTEM_CA_FILE=$E/system-ca.pem#" -e "s#^CERT_SEARCH_DIRS=.*#CERT_SEARCH_DIRS='$E/le-live $E/panel-cert $E/acme'#" \
     -e "s#^LE_DIR=.*#LE_DIR=$E/le#" -e "s#^LINK_CERT_LOG=.*#LINK_CERT_LOG=$E/varlib/link-certificates.log#" \
     -e "s#^EVENT_SCRIPT=.*#EVENT_SCRIPT=$E/libexec/darban-ovpn-event#" -e "s#^EVENT_DIR=.*#EVENT_DIR=$E/events#" \
     -e "s#^LEDGER_DIR=.*#LEDGER_DIR=$E/varlib/clients#" \
+    -e "s#^PKI_BACKUP_DIR=.*#PKI_BACKUP_DIR=$E/pki-backups#" -e "s#^RESTORE_WARN=.*#RESTORE_WARN=$E/varlib/restore-unverified#" \
     -e 's#^EVENT_MAX=.*#EVENT_MAX=${TEST_EVENT_MAX:-500}#' \
     -e 's#^event_run_id() {.*#event_run_id() { printf "%s\\n" "${TEST_EVENT_RUN:-$$-0}"; }#' \
     "$SRC/bin/darban" > "$E/manager.sh"

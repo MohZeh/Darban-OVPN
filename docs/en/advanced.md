@@ -193,15 +193,63 @@ Only the CRL renews automatically. The menu warns 30 days before the CA or serve
 
 ## Backup
 
-Keep an **encrypted** copy of these paths away from the server. They hold the CA private key. Never share them or put them in a repository.
+**Maintenance › Back up the CA now** makes an encrypted backup of the CA. With it, a lost server comes back with its CA, every client and its blocklist, and the profiles already on devices keep working.
 
-The backup that **Remove everything** offers is a `.tar.gz` file in `/root`, readable only by root. It holds the CA private key and is **not encrypted**. Move it off the server, and keep it encrypted.
+**What it holds:** the CA and its private key, the index of the CA, every client certificate and key, the CRL, the server certificate, key and `tls-crypt.key`, `server.conf`, the settings of this tool and when each client was last seen. It never holds profiles, the NAT file, the backup settings or any program.
 
-```text
-/root/pki
-/etc/openvpn/server
-/etc/darban
+**Encrypted for a key only you have.** The backup is encrypted with [age](https://age-encryption.org). On your own computer, make a key once:
+
+```bash
+age-keygen -o darban-backup.key
 ```
+
+It prints a public key that starts with `age1`. Give the tool only that public key; keep the file on your computer. The server can then make backups at any time, and can never open one. With a key set, a backup is also made after each change to the CA, such as a new client or a revocation, and once a day when something changed. Without a key, **Back up the CA now** can use a passphrase instead, for that one backup.
+
+The tool offers to install the small `age` package the first time.
+
+**Where it is:** `/var/backups/darban-pki`, readable only by root, with a `.manifest.json` beside each backup: when it was made, on which server, the CA fingerprint, how many clients, and the checksum of the archive. The newest 14 are kept. **This copy is on this server. To recover from a lost server you need a copy elsewhere and your private key.** The tool shows an `scp` command for it. A user other than `root` gets a copy in its home folder, which is safe, since it is encrypted.
+
+**Write the CA fingerprint down.** **Back up the CA now** and **Diagnostics** show it. A restore asks for it, or for a profile from one of your devices, because it must know the right CA from something outside the backup.
+
+**Hooks.** After each backup, every program in `/etc/darban/backup-hooks/` gets the paths of the archive and its manifest, and nothing else. Only root's own files with mode 700 run, in a folder with mode 700, two minutes at most each. A hook that fails never fails the backup; **Diagnostics** name it. Ready-made hooks for Telegram, email or cloud storage come in v1.1.
+
+### Restore
+
+Open the backup on your computer, copy the `.tar` to the server, and restore it:
+
+```bash
+age -d -i darban-backup.key darban-pki-<server>-<time>.tar.age > darban-pki.tar
+```
+
+```bash
+sudo darban restore darban-pki.tar --ca-fingerprint <the SHA-256 fingerprint you wrote down>
+```
+
+Instead of the fingerprint, `--ca-from client.ovpn` takes the CA from a profile of one of your devices. On a new server, set the server up first as usual; the restore then replaces its new CA.
+
+Nothing changes until every check has passed: the archive may hold only the files above, as regular files of a limited size; each must match its checksum; the CA must be the one you named, with its private key; the server certificate must come from that CA. `server.conf` is written again from the template of this tool, with only its port, network, routing, DNS, ciphers, keepalive and log detail taken from the backup; any other line, such as `up`, refuses the whole restore. A CRL that is missing, cannot be read or has expired is said so, and a new one is made with the restored CA.
+
+**Revocations after the backup.** On the same server, a client revoked after the backup was made would be valid again, so the restore is refused, and the tool names those clients. On a new server, or one without a blocklist of the same CA, the tool cannot know them. It says "Revocations made after <time> cannot be known." and asks you to type the server name. After the restore, **Diagnostics** warn until you revoke, and issue again, any client you are not sure of, and then run:
+
+```bash
+sudo darban restore --acknowledge
+```
+
+**If a restore stops half way,** for example at a power cut, OpenVPN stays off, even after a reboot, until it is done. The next run of this tool, or of the installer, finishes it. To finish it or undo it yourself:
+
+```bash
+sudo darban restore --resume
+```
+
+```bash
+sudo darban restore --rollback
+```
+
+What the restore replaced is kept, readable only by root, in `/var/backups/darban-pki/pre-restore-<id>`.
+
+### The copy Remove everything offers
+
+The backup that **Remove everything** offers is a `.tar.gz` file in `/root`, readable only by root. It holds the CA private key and is **not encrypted**. Move it off the server, and keep it encrypted. **Remove everything** keeps the encrypted backups in `/var/backups/darban-pki`.
 
 ## What removal does
 

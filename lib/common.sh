@@ -11,6 +11,8 @@ DARBAN_CRL=$DARBAN_SERVER_DIR/crl.pem
 DARBAN_UNIT=openvpn-server@server.service
 # Root-owned /run, not the world-writable /run/lock, so other users cannot pre-create or redirect it.
 DARBAN_LOCK=/run/darban.lock
+# A restore of the CA that has not finished; while it is there, nothing starts OpenVPN.
+DARBAN_RESTORE_JOURNAL=/var/lib/darban/restore.journal
 DARBAN_TMP_FILES=()
 # Only 'darban-crl-maintain --renew --allow-crl-shrink' sets this; it is never read from the environment.
 DARBAN_ALLOW_CRL_SHRINK=0
@@ -269,7 +271,11 @@ darban_crl_has_serial() {
 }
 darban_crl_signature_ok() {
     # Only a CRL really signed by this CA counts as evidence of what was revoked; its dates may have passed.
-    [[ -s $1 ]] && openssl crl -in "$1" -noout -verify -CAfile "$DARBAN_PKI/ca.crt" >/dev/null 2>&1
+    # Before OpenSSL 3.3, a bad signature can still exit 0. Require the positive verification message too.
+    local verification
+    [[ -s $1 ]] || return 1
+    verification=$(LC_ALL=C openssl crl -in "$1" -noout -verify -CAfile "$DARBAN_PKI/ca.crt" -no-CApath -no-CAstore 2>&1) || return 1
+    [[ $verification == 'verify OK' ]]
 }
 darban_index_rows() {
     # Prints state<TAB>expiry<TAB>serial for each CA record. Fails on an unreadable or malformed database;

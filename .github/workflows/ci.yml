@@ -171,6 +171,27 @@ jobs:
       - name: rc.10 from its release, the update to this code, Restore previous version, and back
         run: sudo bash tests/rc10-upgrade-ci.sh --i-know
 
+  # The backup of the CA with a real age key, and its restore: refused when it would undo a revocation or run a
+  # program, and the way back from a lost server.
+  restore:
+    name: Backup and restore of the CA (Ubuntu ${{ matrix.ubuntu }})
+    needs: lint
+    if: needs.lint.outputs.code == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        ubuntu: ['24.04', '26.04']
+    runs-on: ubuntu-${{ matrix.ubuntu }}
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: The runner must not already have a PKI or server
+        run: sudo test ! -e /root/pki && test ! -e /etc/openvpn/server/server.conf
+      - name: Backup, refused restores, and a restore on a new server
+        run: sudo bash tests/restore-ci.sh --i-know
+
   # A real virtual machine, so a real reboot. Not on every push: it takes several minutes.
   reboot:
     name: Reboot test (Ubuntu ${{ matrix.ubuntu }})
@@ -181,7 +202,7 @@ jobs:
       matrix:
         ubuntu: ['24.04', '26.04']
     runs-on: ubuntu-24.04
-    timeout-minutes: 30
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -215,7 +236,7 @@ jobs:
   result:
     name: CI result
     if: always()
-    needs: [lint, test, acceptance, public-setup, rc10-upgrade, acceptance-arm, reboot]
+    needs: [lint, test, acceptance, public-setup, rc10-upgrade, restore, acceptance-arm, reboot]
     runs-on: ubuntu-24.04
     timeout-minutes: 2
     steps:
@@ -227,10 +248,11 @@ jobs:
           ACCEPTANCE: ${{ needs.acceptance.result }}
           PUBLIC: ${{ needs.public-setup.result }}
           RC10: ${{ needs.rc10-upgrade.result }}
+          RESTORE: ${{ needs.restore.result }}
           ARM: ${{ needs.acceptance-arm.result }}
           REBOOT: ${{ needs.reboot.result }}
         run: |
-          echo "Lint: $LINT, Test: $TEST, Acceptance: $ACCEPTANCE, public address: $PUBLIC, from rc.10: $RC10, arm64: $ARM, reboot: $REBOOT, code changed: $CODE"
+          echo "Lint: $LINT, Test: $TEST, Acceptance: $ACCEPTANCE, public address: $PUBLIC, from rc.10: $RC10, restore: $RESTORE, arm64: $ARM, reboot: $REBOOT, code changed: $CODE"
           test "$LINT" = success
           test "$ARM" = success || test "$ARM" = skipped
           test "$REBOOT" = success || test "$REBOOT" = skipped
@@ -239,9 +261,11 @@ jobs:
             test "$ACCEPTANCE" = success
             test "$PUBLIC" = success
             test "$RC10" = success
+            test "$RESTORE" = success
           else
             test "$TEST" = skipped
             test "$ACCEPTANCE" = skipped
             test "$PUBLIC" = skipped
             test "$RC10" = skipped
+            test "$RESTORE" = skipped
           fi

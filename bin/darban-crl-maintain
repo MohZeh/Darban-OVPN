@@ -5,6 +5,8 @@ umask 077
 source /usr/local/lib/darban/common.sh
 
 darban_require_root
+# A restore that stopped half way owns the CA and OpenVPN until it is finished.
+if [[ -e $DARBAN_RESTORE_JOURNAL ]]; then darban_error 'A restore is unfinished, so the CRL is not touched. Finish it: sudo darban restore --resume'; exit 1; fi
 mode=${1:---check}
 case "$#:$mode:${2:-}" in
     0:--check:|1:--check:|1:--auto:|1:--renew:) ;;

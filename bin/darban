@@ -17,6 +17,12 @@ LINK_DIR=/run/darban-links
 EVENT_SCRIPT=/usr/local/libexec/darban-ovpn-event
 EVENT_DIR=/run/darban-events
 LEDGER_DIR=/var/lib/darban/clients
+# Encrypted backups of the CA, apart from the copies of the tool in $BACKUP_ROOT, which an update prunes. A restore
+# that could not know later revocations leaves this mark until the owner acknowledges it.
+PKI_BACKUP_DIR=/var/backups/darban-pki
+PKI_BACKUPS_KEPT=14
+RESTORE_WARN=/var/lib/darban/restore-unverified
+BACKUP_PY=$DARBAN_LIB/backup.py
 # Each run of the worker takes at most this many events, or this many seconds; the path unit starts it again.
 EVENT_MAX=500
 EVENT_SECONDS=60
@@ -53,6 +59,9 @@ LINK_CERT_LOG=/var/lib/darban/link-certificates.log
 CONFIG_FILE=$CONFIG_DIR/config
 # The lines this tool added to server.conf for connection events, so their removal takes only those.
 EVENT_LINES_FILE=$CONFIG_DIR/.event-lines
+# The owner's age public key for backups, and the programs that get each new backup (v1.1 delivers them).
+BACKUP_CONF=$CONFIG_DIR/backup.conf
+BACKUP_HOOKS=$CONFIG_DIR/backup-hooks
 TLS_KEY=$DARBAN_SERVER_DIR/tls-crypt.key
 DEFAULT_DATA_CIPHERS=AES-256-GCM:AES-128-GCM
 PORT_BACKUPS_KEPT=5
@@ -232,6 +241,13 @@ setup() {
 }
 server_problem() {
     # Prints why this server cannot be managed; nothing when it can.
+    if [[ -f $DARBAN_RESTORE_JOURNAL ]]; then
+        printf 'A restore is unfinished, so OpenVPN stays off. Finish it: sudo darban restore --resume, or undo it: sudo darban restore --rollback\n'; return 0
+    fi
+    server_files_problem
+}
+server_files_problem() {
+    # Prints what in the CA or the server files keeps OpenVPN from running; nothing when they are whole.
     local out
     out=$(C_RED='' C_RESET='' darban_preflight 2>&1) || { printf '%s\n' "${out##*ERROR: }"; return 0; }
     if [[ ! -s $TLS_KEY ]]; then printf 'OpenVPN tls-crypt.key is missing.\n'; return 0; fi
@@ -842,7 +858,9 @@ create_client() {
     if ! write_profile "$name" no; then
         fail 'The certificate was issued but the .ovpn export failed. Use Share (menu 5) instead of creating it again.'; return 1
     fi
+    backup_auto "client created: $name"
     ca_unlock
+    backup_hooks_start
     say
     if (( ! UI_TTY )); then
         # A script has nobody to answer the sharing questions.
@@ -3256,6 +3274,7 @@ generate_and_publish_crl() {
     fi
     darban_publish_crl "$DARBAN_PKI/crl.pem" || { urgent 'The CRL was not published; the previous CRL stays active.'; return 1; }
     ok 'New CRL published to OpenVPN and verified.'
+    backup_auto 'CRL published'
 }
 revoke_and_publish() {
     local name=$1 client_serial=$2
@@ -4126,6 +4145,8 @@ restore_previous() {
     # The timer for the next kept file first: the version restored sets its own, if it knows one.
     systemctl stop darban-expire.timer >/dev/null 2>&1 || true
     if (( without_events )); then darban_events_units_remove "$UNIT_DIR"; audit 'connection events turned off for an older version'; fi
+    # A version without the daily backup gets no unit that would call a command it does not have.
+    if [[ ! -e $newest/units/darban-backup.service ]]; then rm -f -- "$UNIT_DIR/darban-backup.service"; fi
     cp -a -- "$newest/sbin/." "$SBIN_DIR/" && cp -a -- "$newest/lib/." "$DARBAN_LIB/" && cp -a -- "$newest/units/." "$UNIT_DIR/" || {
         critical_end
         urgent "The restore did not finish. The files are in $newest."
@@ -4413,6 +4434,9 @@ health() {
     group 'Connection events'
     events_health
 
+    group 'Backup of the CA'
+    backup_health
+
     group 'Profiles & downloads'
     host=$(domain)
     if valid_domain "$host"; then
@@ -4626,13 +4650,594 @@ settings_menu() {
         esac
     done
 }
+# ---------- backup and restore of the CA ----------
+# A backup is one tar of a closed list of files (lib/backup.py), encrypted with age for the owner's public key: this
+# server can make one at any time and can never read one back. Beside it, a manifest says what it holds, readable
+# without the key. Only the owner's computer opens it; "darban restore" then takes the opened tar.
+BACKUP_MADE='' BACKUP_WHY='' RESTORE_WHY='' RESTORE_RENAMES=0 RESTORE_NEW_CRL=0 RESTORE_KEPT=''
+valid_age_key() { [[ $1 =~ ^age1[0-9a-z]{58}$ ]]; }
+backup_recipient() {
+    local value
+    value=$(awk -F= '$1=="BACKUP_RECIPIENT" {v=$2} END {print v}' "$BACKUP_CONF" 2>/dev/null) || value=''
+    valid_age_key "$value" || return 1
+    printf '%s\n' "$value"
+}
+backup_set_recipient() {
+    local temp
+    install -d -m 700 "$CONFIG_DIR" || return 1
+    temp=$(mktemp "$CONFIG_DIR/.backup.XXXXXXXX") || return 1
+    darban_tmp_register "$temp"
+    printf 'BACKUP_RECIPIENT=%s\n' "$1" >"$temp" && chmod 600 "$temp" && mv -f -- "$temp" "$BACKUP_CONF"
+}
+ca_fingerprint_label() {
+    # The SHA-256 fingerprint of a CA certificate, as openssl prints it. A restore asks for it.
+    openssl x509 -in "${1:-$DARBAN_PKI/ca.crt}" -noout -fingerprint -sha256 2>/dev/null | sed 's/^[^=]*=//'
+}
+fingerprint_hex() {
+    # fingerprint_hex <fingerprint in any case, with or without colons>: 64 lowercase hex digits, or 1.
+    local value=${1//:/}
+    value=${value,,}
+    [[ $value =~ ^[0-9a-f]{64}$ ]] || return 1
+    printf '%s\n' "$value"
+}
+backup_host() { local host; host=$(hostname -s 2>/dev/null) || host=''; host=${host//[!A-Za-z0-9.-]/}; printf '%s' "${host:-server}"; }
+backup_latest_value() {
+    # backup_latest_value <field>: one value from the manifest of the newest backup.
+    [[ -f $PKI_BACKUP_DIR/latest.manifest.json ]] || return 1
+    python3 -I -c 'import json, sys
+value = json.load(open(sys.argv[1])).get(sys.argv[2], "")
+print(value if isinstance(value, (str, int)) else "")' "$PKI_BACKUP_DIR/latest.manifest.json" "$1" 2>/dev/null
+}
+backup_make() {
+    # backup_make <auto|now> <reason> [passphrase]: one backup, under the CA lock the caller holds, so the index, the
+    # serial, the CRL and the certificates are of one moment. An automatic one is skipped when nothing changed since
+    # the newest. Sets BACKUP_MADE to the archive, empty when skipped; BACKUP_WHY when it fails.
+    local mode=$1 reason=$2 secret=${3:-} recipient='' tmp facts content name stamp encryption=recipient link
+    BACKUP_MADE='' BACKUP_WHY=''
+    if [[ $secret != passphrase ]]; then recipient=$(backup_recipient) || { BACKUP_WHY='no backup key is set'; return 1; }; fi
+    command -v age >/dev/null || { BACKUP_WHY='age is not installed'; return 1; }
+    { install -d -o root -g root -m 700 "$PKI_BACKUP_DIR" 2>/dev/null || install -d -m 700 "$PKI_BACKUP_DIR"; } && chmod 700 "$PKI_BACKUP_DIR" || { BACKUP_WHY="$PKI_BACKUP_DIR cannot be made"; return 1; }
+    tmp=$(mktemp -d "$PKI_BACKUP_DIR/.new.XXXXXXXX") || { BACKUP_WHY='no room for a new backup'; return 1; }
+    if ! facts=$(python3 -I "$BACKUP_PY" pack --out "$tmp/archive.tar" --inner "$tmp/inner.json" --pki "$DARBAN_PKI" \
+        --server "$DARBAN_SERVER_DIR" --config "$CONFIG_DIR" --ledger "$LEDGER_DIR" --host "$(backup_host)" --version "$DARBAN_VERSION" 2>&1); then
+        rm -rf -- "$tmp"; BACKUP_WHY=${facts##*REFUSED: }; return 1
+    fi
+    content=$(sed -n 's/^content=//p' <<<"$facts")
+    if [[ $mode == auto && -n $content && $content == "$(backup_latest_value content)" ]]; then rm -rf -- "$tmp"; return 0; fi
+    if [[ $secret == passphrase ]]; then
+        encryption=passphrase
+        if ! age -p -o "$tmp/archive.tar.age" "$tmp/archive.tar" </dev/tty; then rm -rf -- "$tmp"; BACKUP_WHY='age did not encrypt it'; return 1; fi
+    elif ! age -r "$recipient" -o "$tmp/archive.tar.age" "$tmp/archive.tar" </dev/null; then
+        rm -rf -- "$tmp"; BACKUP_WHY='age did not encrypt it'; return 1
+    fi
+    rm -f -- "$tmp/archive.tar"
+    sync -- "$tmp/archive.tar.age" 2>/dev/null || sync
+    stamp=$(date -u +%Y%m%dT%H%M%SZ)
+    name=darban-pki-$(backup_host)-$stamp
+    while [[ -e $PKI_BACKUP_DIR/$name.tar.age ]]; do name=darban-pki-$(backup_host)-$stamp-$RANDOM; done
+    if ! mv -- "$tmp/archive.tar.age" "$PKI_BACKUP_DIR/$name.tar.age"; then rm -rf -- "$tmp"; BACKUP_WHY='the archive could not be put in place'; return 1; fi
+    sync -- "$PKI_BACKUP_DIR" 2>/dev/null || true
+    if ! python3 -I "$BACKUP_PY" outer --inner "$tmp/inner.json" --archive "$PKI_BACKUP_DIR/$name.tar.age" --encryption "$encryption" >"$tmp/manifest.json" \
+        || ! chmod 600 "$tmp/manifest.json" || ! mv -- "$tmp/manifest.json" "$PKI_BACKUP_DIR/$name.manifest.json"; then
+        rm -rf -- "$tmp"; BACKUP_WHY='its manifest could not be written'; return 1
+    fi
+    rm -rf -- "$tmp"
+    # The names "latest" change in one step each.
+    for link in tar.age manifest.json; do
+        ln -sfn -- "$name.$link" "$PKI_BACKUP_DIR/.latest.$link" && mv -T -f -- "$PKI_BACKUP_DIR/.latest.$link" "$PKI_BACKUP_DIR/latest.$link"
+    done
+    backup_prune
+    BACKUP_MADE=$PKI_BACKUP_DIR/$name.tar.age
+    audit "CA backup made: $name.tar.age ($reason)"
+}
+backup_prune() {
+    # Only after a new backup worked: the newest PKI_BACKUPS_KEPT stay, and always the one "latest" names.
+    local latest file
+    local -a all=()
+    latest=$(readlink "$PKI_BACKUP_DIR/latest.tar.age" 2>/dev/null) || latest=''
+    mapfile -t all < <(find "$PKI_BACKUP_DIR" -maxdepth 1 -type f -name 'darban-pki-*.tar.age' -printf '%T@ %f\n' 2>/dev/null | sort -rn | cut -d' ' -f2-)
+    for file in "${all[@]:PKI_BACKUPS_KEPT}"; do
+        [[ $file != "$latest" ]] || continue
+        rm -f -- "$PKI_BACKUP_DIR/$file" "$PKI_BACKUP_DIR/${file%.tar.age}.manifest.json"
+    done
+}
+backup_hooks_run() {
+    # backup_hooks_run <archive> <manifest>: each program in backup-hooks/ gets the two paths and nothing else: no
+    # secret, no environment, two minutes at most. Only root's own files with mode 700, in root's folder with mode
+    # 700. A hook that fails never fails the backup; Diagnostics name it.
+    local hook failed=''
+    [[ -d $BACKUP_HOOKS && ! -L $BACKUP_HOOKS && -O $BACKUP_HOOKS && $(stat -c %a "$BACKUP_HOOKS" 2>/dev/null) == 700 ]] || return 0
+    for hook in "$BACKUP_HOOKS"/*; do
+        [[ -f $hook && ! -L $hook && -O $hook && $(stat -c %a "$hook" 2>/dev/null) == 700 ]] || continue
+        if timeout 120 env -i PATH=/usr/sbin:/usr/bin:/sbin:/bin "$hook" "$1" "$2" </dev/null >/dev/null 2>&1; then
+            audit "backup hook ran: ${hook##*/}"
+        else
+            failed+="${failed:+, }${hook##*/}"
+        fi
+    done
+    if [[ -n $failed ]]; then
+        printf '%s %s\n' "$(date -u +%s)" "$failed" >"$PKI_BACKUP_DIR/.hooks-failed" 2>/dev/null || true
+        audit "backup hook failed: $failed"
+    else
+        rm -f -- "$PKI_BACKUP_DIR/.hooks-failed"
+    fi
+}
+backup_hooks_start() {
+    # The hooks of the backup just made, apart from this process and without the CA lock it may hold.
+    [[ -n $BACKUP_MADE && -d $BACKUP_HOOKS ]] || return 0
+    ( exec 9>&-; backup_hooks_run "$BACKUP_MADE" "${BACKUP_MADE%.tar.age}.manifest.json" ) </dev/null >/dev/null 2>&1 &
+}
+backup_auto() {
+    # backup_auto <reason>: after a change to the CA, under its lock, and daily. Only with a key set, and only when
+    # something changed. Never fails what came before it.
+    backup_recipient >/dev/null && command -v age >/dev/null || return 0
+    if backup_make auto "$1"; then
+        rm -f -- "$PKI_BACKUP_DIR/.failed"
+        return 0
+    fi
+    warn "The automatic backup of the CA failed: $BACKUP_WHY. See: sudo darban status"
+    printf '%s %s\n' "$(date -u +%s)" "$BACKUP_WHY" >"$PKI_BACKUP_DIR/.failed" 2>/dev/null || true
+    audit "CA backup failed: $BACKUP_WHY"
+    return 0
+}
+backup_command() {
+    # darban backup-auto <reason> (darban-backup.service, after the daily CRL check): the hooks run here, in the
+    # foreground, since systemd ends what a finished job leaves running.
+    darban_lock 60 || return 1
+    CA_LOCKED=1
+    backup_auto "$1"
+    ca_unlock
+    if [[ -n $BACKUP_MADE ]]; then backup_hooks_run "$BACKUP_MADE" "${BACKUP_MADE%.tar.age}.manifest.json"; fi
+}
+backup_ask_key() {
+    info 'On your own computer, make a key once: age-keygen -o darban-backup.key. It prints a public key starting with age1. Keep that file safe: only it opens the backups.'
+    prompt_valid 'Your age public key, starting with age1 (Enter = cancel): ' valid_age_key \
+        'Paste the public key age-keygen printed: age1 and 58 more letters and digits.' || return 1
+    backup_set_recipient "$REPLY" || { fail 'Could not save the key.'; return 1; }
+    audit "backup key set: ${REPLY:0:12}"
+    ok 'Saved. Backups are also made after each change to the CA, and daily when something changed.'
+}
+backup_now() {
+    # Maintenance 4.
+    local recipient secret='' file manifest home name
+    info 'A backup holds the CA and its private key, every client certificate, the blocklist and the server settings, encrypted with age.'
+    if ! command -v age >/dev/null; then
+        confirm_choice 'The small age package encrypts the backup. Install it?' 'No, not now' 'Install age' normal || { cancelled; return 0; }
+        apt-get -o DPkg::Lock::Timeout=120 -qq update >/dev/null || true
+        apt-get -o DPkg::Lock::Timeout=120 -y -q --no-install-recommends install age >/dev/null || true
+        command -v age >/dev/null || { fail 'Could not install age. Install it yourself: sudo apt install age'; return 1; }
+        if [[ -e $CONFIG_DIR/.server-setup-started ]]; then printf 'package age\n' >>"$CONFIG_DIR/.server-setup-started" || true; fi
+    fi
+    if recipient=$(backup_recipient); then
+        kv Key "${recipient:0:12}${S_ELL}${recipient: -6}"
+        choose_one 'Back up now?' 'Back up with this key' 'Use another key' || { cancelled; return 0; }
+        if (( CHOSEN == 2 )); then backup_ask_key || { cancelled; return 0; }; fi
+    else
+        CHOSEN=1
+        if (( UI_TTY )); then
+            choose_one 'How is the backup locked?' 'With your age public key; automatic backups too' 'With a passphrase, for this backup only' || { cancelled; return 0; }
+        fi
+        if (( CHOSEN == 1 )); then backup_ask_key || { cancelled; return 0; }; else secret=passphrase; fi
+    fi
+    ca_lock || return 1
+    if ! backup_make now 'Backup now' "$secret"; then ca_unlock; fail "No backup was made: $BACKUP_WHY."; return 1; fi
+    ca_unlock
+    backup_hooks_start
+    file=$BACKUP_MADE
+    manifest=${file%.tar.age}.manifest.json
+    ok "Backup made: $file"
+    kv Manifest "$manifest"
+    kv 'CA fingerprint' "$(ca_fingerprint_label)"
+    info 'Write the fingerprint down: a restore asks for it, or for a profile from one of your devices.'
+    info 'This copy is on this server. To recover from a lost server you need a copy elsewhere and your private key.'
+    # Encrypted, so another SSH user may get a copy it can read.
+    if [[ $DOWNLOAD_SSH_USER != root ]] && home=$(ssh_user_home); then
+        if install -o "$DOWNLOAD_SSH_USER" -m 600 "$file" "$home/${file##*/}"; then file=$home/${file##*/}; fi
+    fi
+    if [[ -n $DOWNLOAD_SSH_HOST ]]; then
+        say
+        say '  Copy it to your computer:'
+        printf '%s%s%s\n' "$C_CMD" "scp -P $DOWNLOAD_SSH_PORT $DOWNLOAD_SSH_USER@$DOWNLOAD_SSH_HOST:$file ./" "$C_RESET" || true
+    fi
+    name=${file##*/}
+    say
+    info "To restore: on your computer, age -d -i darban-backup.key $name > darban-pki.tar; then on the server, sudo darban restore darban-pki.tar --ca-fingerprint <the fingerprint above>."
+}
+backup_health() {
+    # The Diagnostics group "Backup of the CA".
+    local value created when
+    if [[ -f $DARBAN_RESTORE_JOURNAL ]]; then
+        check bad "A restore is unfinished, so OpenVPN stays off $S_ARROW sudo darban restore --resume (or --rollback)"
+    fi
+    if [[ -f $RESTORE_WARN ]]; then
+        read -r when <"$RESTORE_WARN" || when='?'
+        check warn "The CA was restored from a backup of $(safe_text "$when"); revocations made after it cannot be known. Revoke, and issue again, any client you are not sure of $S_ARROW sudo darban restore --acknowledge"
+    fi
+    if [[ -s $DARBAN_PKI/ca.crt ]]; then check info "CA fingerprint $(ca_fingerprint_label); a restore asks for it"; fi
+    if ! backup_recipient >/dev/null; then
+        check info "No backup key is set, so the CA is not backed up by itself $S_ARROW Maintenance $S_CRUMB 4"
+    elif ! command -v age >/dev/null; then
+        check warn "A backup key is set, but age is not installed, so no backup is made $S_ARROW sudo apt install age"
+    fi
+    if created=$(backup_latest_value created) && [[ -n $created ]]; then
+        check ok "Newest backup of the CA: $created, in $PKI_BACKUP_DIR"
+        check info 'This copy is on this server. To recover from a lost server you need a copy elsewhere and your private key.'
+    elif backup_recipient >/dev/null; then
+        check warn "No backup of the CA has been made yet $S_ARROW Maintenance $S_CRUMB 4"
+    fi
+    if [[ -f $PKI_BACKUP_DIR/.failed ]]; then
+        read -r _ value <"$PKI_BACKUP_DIR/.failed" || value=''
+        check warn "The last automatic backup failed: $(safe_text "${value:-unknown}") $S_ARROW Maintenance $S_CRUMB 4"
+    fi
+    if [[ -f $PKI_BACKUP_DIR/.hooks-failed ]]; then
+        read -r _ value <"$PKI_BACKUP_DIR/.hooks-failed" || value=''
+        check warn "A backup hook failed: $(safe_text "${value:-unknown}") $S_ARROW sudo journalctl -t darban"
+    fi
+}
+
+# A restore takes the opened tar of a backup. Nothing changes until every check has passed; then the CA folder and
+# the server folder are each swapped by two renames, with a journal, and OpenVPN stays off from the first rename
+# until the end, even across a reboot. Any later run of this tool, or of the installer, finishes a restore that
+# stopped half way.
+journal_value() { awk -F= -v k="$1" '$1==k {v=substr($0, length(k) + 2)} END {print v}' "$DARBAN_RESTORE_JOURNAL" 2>/dev/null; }
+journal_write() {
+    # journal_write <key=value>...: the journal with these values set, written and synced with its folder.
+    local temp line pair
+    install -d -m 700 "${DARBAN_RESTORE_JOURNAL%/*}" || return 1
+    temp=$(mktemp "${DARBAN_RESTORE_JOURNAL%/*}/.journal.XXXXXXXX") || return 1
+    {
+        if [[ -f $DARBAN_RESTORE_JOURNAL ]]; then
+            while IFS= read -r line; do
+                for pair; do if [[ ${pair%%=*} == "${line%%=*}" ]]; then continue 2; fi; done
+                printf '%s\n' "$line"
+            done <"$DARBAN_RESTORE_JOURNAL"
+        fi
+        printf '%s\n' "$@"
+    } >"$temp" || { rm -f -- "$temp"; return 1; }
+    sync -- "$temp" 2>/dev/null || sync
+    mv -f -- "$temp" "$DARBAN_RESTORE_JOURNAL" || { rm -f -- "$temp"; return 1; }
+    sync -- "${DARBAN_RESTORE_JOURNAL%/*}" 2>/dev/null || sync
+}
+restore_tree_live() { case $1 in pki) printf '%s' "$DARBAN_PKI" ;; server) printf '%s' "$DARBAN_SERVER_DIR" ;; esac; }
+restore_rename() {
+    # restore_rename <from> <to>: one rename of a restore, made durable before the next.
+    mv -T -- "$1" "$2" || return 1
+    sync -- "${2%/*}" 2>/dev/null || sync
+    RESTORE_RENAMES=$(( RESTORE_RENAMES + 1 ))
+    # For the tests only: stop here as a crash or a power cut would.
+    if [[ ${DARBAN_TEST_RESTORE_STOP:-} == "$RESTORE_RENAMES" ]]; then printf 'Stopped after rename %s, as the test asked.\n' "$RESTORE_RENAMES" >&2; exit 99; fi
+}
+restore_swap_tree() {
+    # restore_swap_tree <pki|server> <id>: what the folder, its staged copy and its previous copy show decides the
+    # step, so this works the same the first time and after a stop at any point.
+    local live stage pre state
+    live=$(restore_tree_live "$1"); stage=$live.restore-$2; pre=$live.pre-restore
+    if [[ -e $live/.restore-$2 ]]; then state=new; elif [[ -e $live ]]; then state=old; else state=none; fi
+    state+=:$([[ -e $stage ]] && echo yes || echo no):$([[ -e $pre ]] && echo yes || echo no)
+    case $state in
+        old:yes:no) restore_rename "$live" "$pre" && restore_rename "$stage" "$live" ;;
+        none:yes:no|none:yes:yes) restore_rename "$stage" "$live" ;;
+        new:no:yes|new:no:no) return 0 ;;
+        *) RESTORE_WHY="$live is in a state a restore cannot go on from (folder $state, staged and previous copy). Look at $live, $stage and $pre, then: sudo darban restore --rollback"; return 1 ;;
+    esac
+}
+restore_nat() {
+    # The NAT file, written again from server.conf as the installer does, and loaded.
+    local net iface file=$CONFIG_DIR/nat.nft
+    [[ -f $file || -e $UNIT_DIR/darban-nat.service ]] || return 0
+    net=$(darban_conf_net)
+    iface=$(darban_nat_iface "$file" 2>/dev/null) || iface=''
+    if [[ -z $iface ]] || ! ip link show dev "$iface" >/dev/null 2>&1; then iface=$(darban_default_iface); fi
+    valid_ipv4 "${net:-}" && [[ $iface =~ ^[A-Za-z0-9_.@-]+$ ]] || { warn 'NAT was not written again: server.conf has no single /24 network, or no outgoing interface was found.'; return 0; }
+    darban_nat_rules "$net" "$iface" >"$file.new" && chmod 600 "$file.new" && nft -c -f "$file.new" 2>/dev/null && mv -f -- "$file.new" "$file" \
+        || { rm -f -- "$file.new"; warn "NAT could not be written again; see: sudo darban status"; return 0; }
+    nft -f "$file" 2>/dev/null || warn "The NAT rules did not load; see: sudo darban status"
+}
+restore_stage_trees() {
+    # restore_stage_trees <checked files> <id> <rebuilt server.conf>: the new CA folder and server folder, beside the
+    # ones they replace, so each swap is a rename on one file system. Built, never copied, where the contract says so:
+    # the server folder gets the CA and the CRL of the CA folder, and server.conf from the template.
+    local files=$1 id=$2 spki=$DARBAN_PKI.restore-$2 ssrv=$DARBAN_SERVER_DIR.restore-$2 dir cnf log
+    rm -rf -- "$spki" "$ssrv"
+    install -d -m 700 "$spki" || return 1
+    cp -a -- "$files/pki/." "$spki/" || return 1
+    for dir in issued private reqs certs_by_serial revoked revoked/certs_by_serial revoked/private_by_serial revoked/reqs_by_serial renewed renewed/certs_by_serial renewed/private_by_serial renewed/reqs_by_serial; do
+        install -d -m 700 "$spki/$dir" || return 1
+    done
+    find "$spki" -type f -exec chmod 600 {} + || return 1
+    # Easy-RSA's own settings come from this server's Easy-RSA, not from the archive.
+    cnf=${DARBAN_EASYRSA%/*}/openssl-easyrsa.cnf
+    if [[ ! -e $spki/openssl-easyrsa.cnf && -f $cnf ]]; then install -m 600 "$cnf" "$spki/openssl-easyrsa.cnf" || return 1; fi
+    if (( RESTORE_NEW_CRL )); then
+        log=$(env EASYRSA_PKI="$spki" EASYRSA_BATCH=1 "$DARBAN_EASYRSA" gen-crl </dev/null 2>&1) || { RESTORE_WHY="a new CRL could not be made with the restored CA: ${log##*$'\n'}"; return 1; }
+    fi
+    install -d -m 755 "$ssrv" || return 1
+    install -m 644 "$spki/ca.crt" "$ssrv/ca.crt" && install -m 644 "$files/server/server.crt" "$ssrv/server.crt" \
+        && install -m 600 "$files/server/server.key" "$ssrv/server.key" && install -m 600 "$files/server/tls-crypt.key" "$ssrv/tls-crypt.key" \
+        && install -m 644 "$spki/crl.pem" "$ssrv/crl.pem" && install -m 644 "$3" "$ssrv/server.conf" || return 1
+    # Checked as the restored server will be: its CA, its index and its own server certificate.
+    ( DARBAN_PKI=$spki DARBAN_SERVER_DIR=$ssrv DARBAN_SERVER_CONF=$ssrv/server.conf; darban_verify_crl "$ssrv/crl.pem" ) >/dev/null 2>&1 \
+        || { RESTORE_WHY='the CRL does not cover the revocations of the backup, and no new one could be made'; return 1; }
+    : >"$spki/.restore-$id" && : >"$ssrv/.restore-$id" || return 1
+    sync 2>/dev/null || true
+}
+restore_finish() {
+    # After both swaps, and on every resume: what goes with the folders, then OpenVPN, then the end. Each step can
+    # run again without harm.
+    local id stage file name dest tree live
+    id=$(journal_value id); stage=$(journal_value stage)
+    journal_write state=swapped || return 1
+    for file in config domain; do
+        [[ -f $stage/files/darban/$file ]] || continue
+        if [[ -e $CONFIG_DIR/$file && ! -e $CONFIG_DIR/$file.pre-restore ]]; then cp -a -- "$CONFIG_DIR/$file" "$CONFIG_DIR/$file.pre-restore" || return 1; fi
+        install -m 600 "$stage/files/darban/$file" "$CONFIG_DIR/.$file.restore" && mv -f -- "$CONFIG_DIR/.$file.restore" "$CONFIG_DIR/$file" || return 1
+    done
+    # When each client was seen: a record this server has stays; one only the backup has comes back.
+    for file in "$stage"/files/clients/*; do
+        [[ -f $file ]] || continue
+        name=${file##*/}
+        valid_existing_name "$name" || continue
+        if [[ ! -e $LEDGER_DIR/$name ]]; then install -D -m 600 "$file" "$LEDGER_DIR/$name" || true; fi
+    done
+    restore_nat
+    # Connection events, when this server can have them: the lines go into the new server.conf while OpenVPN is off.
+    if ! events_lines_on && ! events_blocker >/dev/null; then
+        printf 'script-security 2\nclient-connect %s\nclient-disconnect %s\n' "$EVENT_SCRIPT" "$EVENT_SCRIPT" >>"$DARBAN_SERVER_CONF" || return 1
+    fi
+    chmod 644 "$DARBAN_CRL" 2>/dev/null || true
+    if [[ -n $(server_files_problem) ]]; then RESTORE_WHY="the restored server cannot run: $(server_files_problem)"; return 1; fi
+    darban_verify_crl "$DARBAN_CRL" >/dev/null 2>&1 || { RESTORE_WHY='the restored CRL does not pass its checks'; return 1; }
+    journal_write state=starting || return 1
+    if [[ $(journal_value unit_enabled) == yes ]]; then systemctl enable --now "$DARBAN_UNIT" >/dev/null 2>&1 || true; else systemctl start "$DARBAN_UNIT" >/dev/null 2>&1 || true; fi
+    if ! wait_for_port "$(server_port 2>/dev/null || echo 0)"; then RESTORE_WHY='OpenVPN did not come back with the restored files'; return 1; fi
+    journal_write state=done || return 1
+    # What was replaced is kept, root-only, with the backups.
+    dest=$PKI_BACKUP_DIR/pre-restore-$id
+    install -d -m 700 "$PKI_BACKUP_DIR" "$dest" || return 1
+    for tree in pki server; do
+        live=$(restore_tree_live "$tree")
+        rm -f -- "$live/.restore-$id"
+        if [[ -e $live.pre-restore ]]; then mv -T -- "$live.pre-restore" "$dest/$tree" || return 1; fi
+    done
+    for file in config domain; do
+        if [[ -e $CONFIG_DIR/$file.pre-restore ]]; then install -d -m 700 "$dest/darban" && mv -f -- "$CONFIG_DIR/$file.pre-restore" "$dest/darban/$file" || return 1; fi
+    done
+    if [[ $(journal_value unverified) == yes ]]; then printf '%s\n' "$(journal_value created)" >"$RESTORE_WARN"; fi
+    rm -rf -- "$stage"
+    rm -f -- "$DARBAN_RESTORE_JOURNAL"
+    sync 2>/dev/null || true
+    audit "CA restored from the backup of $(journal_value created 2>/dev/null)"
+    RESTORE_KEPT=$dest
+}
+restore_rollback() {
+    # darban restore --rollback: the folders as they were before the restore began, and OpenVPN as it was.
+    local id tree live stage pre file
+    [[ -f $DARBAN_RESTORE_JOURNAL ]] || { info 'No restore is unfinished.'; return 0; }
+    ca_lock || return 1
+    id=$(journal_value id)
+    critical_begin
+    systemctl stop "$DARBAN_UNIT" >/dev/null 2>&1 || true
+    for tree in server pki; do
+        live=$(restore_tree_live "$tree"); stage=$live.restore-$id; pre=$live.pre-restore
+        if [[ -e $live/.restore-$id ]]; then
+            if [[ -e $stage ]]; then urgent "Both $live and $stage are copies of the backup. Look at them, and at $pre, by hand."; critical_end; return 1; fi
+            mv -T -- "$live" "$stage" || { critical_end; return 1; }
+        fi
+        if [[ ! -e $live && -e $pre ]]; then mv -T -- "$pre" "$live" || { critical_end; return 1; }; fi
+        rm -rf -- "$stage"
+        sync -- "${live%/*}" 2>/dev/null || sync
+    done
+    for file in config domain; do
+        if [[ -e $CONFIG_DIR/$file.pre-restore ]]; then mv -f -- "$CONFIG_DIR/$file.pre-restore" "$CONFIG_DIR/$file" || true; fi
+    done
+    restore_nat
+    if [[ $(journal_value unit_enabled) == yes ]]; then systemctl enable --now "$DARBAN_UNIT" >/dev/null 2>&1 || true; fi
+    rm -rf -- "$(journal_value stage)"
+    rm -f -- "$DARBAN_RESTORE_JOURNAL"
+    critical_end
+    ca_unlock
+    audit 'CA restore rolled back'
+    ok 'The restore was undone: the CA, the clients and the server files are as they were before it.'
+}
+restore_resume() {
+    # darban restore --resume, and every run of this tool or of the installer while a restore is unfinished: it is
+    # finished forward, since both copies of each folder are still there.
+    local id tree
+    [[ -f $DARBAN_RESTORE_JOURNAL ]] || { info 'No restore is unfinished.'; return 0; }
+    id=$(journal_value id)
+    [[ $id =~ ^[0-9a-zA-Z]+$ ]] || { urgent "The restore journal $DARBAN_RESTORE_JOURNAL cannot be read. Look at it by hand."; return 1; }
+    ca_lock || return 1
+    info "A restore of the backup of $(journal_value created) is unfinished; it is finished now."
+    critical_begin
+    if [[ $(journal_value state) != "done" ]]; then
+        systemctl disable --now "$DARBAN_UNIT" >/dev/null 2>&1 || true
+        for tree in pki server; do
+            restore_swap_tree "$tree" "$id" || { critical_end; urgent "The restore cannot go on: $RESTORE_WHY"; return 1; }
+        done
+    fi
+    if ! restore_finish; then
+        critical_end
+        urgent "The restore is not finished: $RESTORE_WHY. OpenVPN stays off. To go back: sudo darban restore --rollback"
+        return 1
+    fi
+    critical_end
+    ca_unlock
+    ok "The restore is finished. What it replaced is kept in $RESTORE_KEPT."
+}
+restore_acknowledge() {
+    [[ -f $RESTORE_WARN ]] || { info 'There is nothing to acknowledge.'; return 0; }
+    rm -f -- "$RESTORE_WARN"
+    audit 'restore acknowledged: revocations after the backup were checked by the owner'
+    ok 'Acknowledged. Diagnostics no longer warn about revocations made after the backup.'
+}
+restore_serial_name() {
+    # restore_serial_name <normalized serial> <index>: the client name of that serial in a CA index.
+    awk -F '\t' -v s="$1" '{v=toupper($4); gsub(/:/, "", v); sub(/^0+/, "", v); if (v == "") v = "0"; if (v == s) {cn=$6; sub(/^.*\/CN=/, "", cn); sub(/\/.*/, "", cn); print cn; exit}}' "$2" 2>/dev/null
+}
+restore_from() {
+    # darban restore <tar> --ca-fingerprint <sha256> | --ca-from <profile.ovpn>
+    local file='' want='' from='' stage id facts got created host version valid revoked crl_state='' unverified=no rows serial state
+    local now next undone="" line tree name
+    local -a stale=()
+    while (( $# )); do
+        case $1 in
+            --ca-fingerprint) want=${2:-}; shift 2 || shift ;;
+            --ca-from) from=${2:-}; shift 2 || shift ;;
+            -*) fail "Unknown option: $1"; return 2 ;;
+            *) file=$1; shift ;;
+        esac
+    done
+    if [[ -z $file ]]; then
+        fail 'Name the opened backup: sudo darban restore darban-pki.tar --ca-fingerprint <SHA-256>'
+        info "Open it on your computer first: age -d -i darban-backup.key <backup>.tar.age > darban-pki.tar"
+        return 2
+    fi
+    [[ -f $file && ! -L $file ]] || { fail "$file is not a file."; return 1; }
+    [[ ! -e $DARBAN_RESTORE_JOURNAL ]] || { fail 'A restore is unfinished. Finish it: sudo darban restore --resume, or undo it: sudo darban restore --rollback'; return 1; }
+    # The CA the backup must hold comes from outside the backup: a profile on a device, or the fingerprint noted.
+    if [[ -n $from ]]; then
+        [[ -f $from ]] || { fail "$from is not a file."; return 1; }
+        want=$(awk '/^<ca>\r?$/ {f=1; next} /^<\/ca>\r?$/ {f=0} f' "$from" | openssl x509 -noout -fingerprint -sha256 2>/dev/null | sed 's/^[^=]*=//')
+        [[ -n $want ]] || { fail "$from has no <ca> block this tool can read."; return 1; }
+    fi
+    if ! want=$(fingerprint_hex "$want"); then
+        fail 'Say which CA the backup must hold, from outside the backup: --ca-fingerprint <the SHA-256 fingerprint the backup message and Diagnostics showed>, or --ca-from <a profile from one of your devices>.'
+        return 2
+    fi
+    if [[ $(head -n 1 "$DARBAN_SERVER_CONF" 2>/dev/null) != '# Created by Darban OVPN server-setup.' ]]; then
+        fail "This server was not set up by this tool's setup. Set it up first; a restore then replaces its new CA, clients and server files."
+        return 1
+    fi
+    install -d -m 700 "${DARBAN_RESTORE_JOURNAL%/*}" || return 1
+    stage=$(mktemp -d "${DARBAN_RESTORE_JOURNAL%/*}/.restore-stage.XXXXXXXX") || return 1
+    mkdir -m 700 "$stage/files" || return 1
+    restore_refuse() { rm -rf -- "$stage"; fail "Not restored: $1"; info 'Nothing on this server was changed.'; return 1; }
+    facts=$(python3 -I "$BACKUP_PY" check --archive "$file" --stage "$stage/files" 2>&1) || { restore_refuse "${facts##*REFUSED: }"; return 1; }
+    got=$(sed -n 's/^ca_fingerprint=//p' <<<"$facts")
+    created=$(sed -n 's/^created=//p' <<<"$facts"); host=$(sed -n 's/^host=//p' <<<"$facts"); version=$(sed -n 's/^version=//p' <<<"$facts")
+    valid=$(sed -n 's/^valid=//p' <<<"$facts"); revoked=$(sed -n 's/^revoked=//p' <<<"$facts")
+    [[ $got == "$want" ]] || { restore_refuse 'the CA in the backup is not the CA you named. A backup of another CA, or one changed by someone, is never restored.'; return 1; }
+    local files=$stage/files
+    if ! cmp -s <(openssl x509 -in "$files/pki/ca.crt" -noout -pubkey 2>/dev/null) <(openssl pkey -in "$files/pki/private/ca.key" -pubout 2>/dev/null); then
+        restore_refuse 'the CA private key in the backup does not belong to its CA certificate.'; return 1
+    fi
+    if ! openssl verify -CAfile "$files/pki/ca.crt" "$files/server/server.crt" >/dev/null 2>&1 \
+        || ! cmp -s <(openssl x509 -in "$files/server/server.crt" -noout -pubkey 2>/dev/null) <(openssl pkey -in "$files/server/server.key" -pubout 2>/dev/null); then
+        restore_refuse 'the server certificate in the backup is not valid from its CA, or does not match its key.'; return 1
+    fi
+    ( DARBAN_PKI=$files/pki; darban_index_rows ) >/dev/null 2>&1 || { restore_refuse 'the CA index in the backup cannot be read.'; return 1; }
+    # The CRL of the backup: missing, unreadable, signed by another CA, or expired; each is said apart.
+    RESTORE_NEW_CRL=0
+    now=$(date -u +%s)
+    if [[ ! -s $files/pki/crl.pem ]]; then
+        crl_state='The backup has no CRL; a new one is made with the restored CA.'; RESTORE_NEW_CRL=1
+    elif ! openssl crl -in "$files/pki/crl.pem" -noout 2>/dev/null; then
+        crl_state='The CRL in the backup cannot be read; a new one is made with the restored CA.'; RESTORE_NEW_CRL=1
+    elif ! ( DARBAN_PKI=$files/pki; darban_crl_signature_ok "$files/pki/crl.pem" ); then
+        restore_refuse 'the CRL in the backup is not signed by its CA.'; return 1
+    else
+        next=$(darban_crl_expiry_epoch "$files/pki/crl.pem" 2>/dev/null) || next=0
+        if (( next <= now )); then crl_state='The CRL in the backup has expired; a new one is made with the restored CA.'; RESTORE_NEW_CRL=1; fi
+        if ! ( DARBAN_PKI=$files/pki DARBAN_SERVER_DIR=$files/server DARBAN_SERVER_CONF=$files/server/server.conf; darban_verify_crl "$files/pki/crl.pem" ) >/dev/null 2>&1; then
+            crl_state=${crl_state:-'The CRL in the backup does not list every revocation of its index; a new one is made.'}; RESTORE_NEW_CRL=1
+        fi
+    fi
+    # The archive as a whole first: a server.conf with a line this tool does not restore refuses it.
+    if ! python3 -I "$BACKUP_PY" conf --conf "$files/server/server.conf" --server-dir "$DARBAN_SERVER_DIR" >"$stage/server.conf" 2>"$stage/conf.notes"; then
+        restore_refuse "$(sed -n 's/^REFUSED: //p' "$stage/conf.notes")"; return 1
+    fi
+    # I13: a client this server revoked must not come back. A CRL of the same CA shows those revocations; without
+    # one, they cannot be known, and the restore says so.
+    if ( DARBAN_PKI=$files/pki; darban_crl_signature_ok "$DARBAN_CRL" ); then
+        rows=$( DARBAN_PKI=$files/pki; darban_index_rows 2>/dev/null ) || rows=""
+        while IFS= read -r serial; do
+            serial=$(darban_norm_serial "$serial") || continue
+            state=$(awk -F '\t' -v s="$serial" '{v=toupper($3); gsub(/:/, "", v); sub(/^0+/, "", v); if (v == "") v = "0"; if (v == s) {print $1; exit}}' <<<"$rows")
+            # Revoked here, so it must be revoked in the backup too. One the backup does not know at all, issued after
+            # it, would connect again just the same: its certificate is of this CA, and the restored CRL omits it.
+            if [[ $state != R ]]; then
+                name=$(restore_serial_name "$serial" "$files/pki/index.txt")
+                [[ -n $name ]] || name=$(restore_serial_name "$serial" "$DARBAN_PKI/index.txt")
+                undone+="${undone:+, }${name:-serial $serial}"
+            fi
+        done < <(darban_crl_serials "$DARBAN_CRL" 2>/dev/null)
+        if [[ -n $undone ]]; then
+            restore_refuse "this server revoked $(safe_text "$undone") after the backup was made, and the backup would make them valid again."; return 1
+        fi
+    else
+        unverified=yes
+    fi
+    # What would happen, before anything does.
+    say
+    kv Backup "${created:-unknown time}"
+    kv Server "${host:-unknown}"
+    kv Version "${version:-unknown}"
+    kv 'CA fingerprint' "$(ca_fingerprint_label "$files/pki/ca.crt")"
+    kv Clients "$valid valid $S_SEP $revoked revoked"
+    if [[ -n $crl_state ]]; then info "$crl_state"; fi
+    while IFS= read -r line; do [[ -z $line ]] || info "${line#NOTE: }"; done <"$stage/conf.notes"
+    info 'server.conf is written again from the template of this tool, with its port, network, routing, DNS, ciphers, keepalive and log detail.'
+    if [[ -e $DARBAN_PKI ]]; then info "The CA, clients and server files of this server are replaced. What they are now is kept in $PKI_BACKUP_DIR."; fi
+    info 'OpenVPN stays off from the first change until the end, even across a reboot.'
+    mapfile -t stale < <(share_rows 2>/dev/null | awk -F '\t' '$1!="orphan" {print $3}' | sort -u)
+    if (( ${#stale[@]} )); then info "Links and files kept on this server hold profiles of the CA in use now; after the restore, share those clients again: $(safe_text "${stale[*]}")."; fi
+    say
+    if [[ $unverified == yes ]]; then
+        warn "Revocations made after ${created:-the backup} cannot be known."
+        info 'This server has no blocklist of the same CA, so a client revoked after the backup was made would be valid again. After the restore, revoke, and issue again, any client you are not sure of. Diagnostics warn until you acknowledge it.'
+        if ! ask "To restore anyway, type the server name of the backup, ${host:-server} (Enter = cancel): " || [[ $REPLY != "${host:-server}" ]]; then
+            rm -rf -- "$stage"; cancelled; return 0
+        fi
+    elif ! confirm_choice "Restore the backup of ${created:-unknown time}?" 'No, keep this server as it is' 'Restore it' caution restore; then
+        rm -rf -- "$stage"; cancelled; return 0
+    fi
+    ca_lock || { rm -rf -- "$stage"; return 1; }
+    if [[ -e $DARBAN_PKI.pre-restore || -e $DARBAN_SERVER_DIR.pre-restore ]]; then
+        rm -rf -- "$stage"; fail "An earlier restore left $DARBAN_PKI.pre-restore or $DARBAN_SERVER_DIR.pre-restore. Move it away first."; return 1
+    fi
+    id=$(date -u +%Y%m%d%H%M%S)$RANDOM
+    if ! restore_stage_trees "$files" "$id" "$stage/server.conf"; then
+        rm -rf -- "$stage" "$DARBAN_PKI.restore-$id" "$DARBAN_SERVER_DIR.restore-$id"
+        fail "Not restored: ${RESTORE_WHY:-the new folders could not be made}."; info 'Nothing on this server was changed.'; return 1
+    fi
+    critical_begin
+    journal_write "id=$id" "created=${created:-unknown}" "stage=$stage" "unverified=$unverified" \
+        "unit_enabled=$([[ $(systemctl is-enabled "$DARBAN_UNIT" 2>/dev/null) == enabled ]] && echo yes || echo no)" state=staged || { critical_end; return 1; }
+    # From here on, no boot starts OpenVPN until the restore is done or undone.
+    systemctl disable --now "$DARBAN_UNIT" >/dev/null 2>&1 || true
+    journal_write state=swapping || { critical_end; return 1; }
+    for tree in pki server; do
+        restore_swap_tree "$tree" "$id" || { critical_end; urgent "The restore stopped: $RESTORE_WHY"; return 1; }
+    done
+    if ! restore_finish; then
+        urgent "The restore did not finish: $RESTORE_WHY. It is undone now."
+        critical_end
+        restore_rollback || true
+        return 1
+    fi
+    critical_end
+    ca_unlock
+    ok "Restored the backup of ${created:-unknown time}. OpenVPN runs with the restored CA."
+    info "What this replaced is kept in $RESTORE_KEPT."
+    if [[ $unverified == yes ]]; then warn 'Revoke, and issue again, any client you are not sure of, then: sudo darban restore --acknowledge'; fi
+}
+restore_command() {
+    # darban restore ...: the one command of a restore; it has no menu item, since it needs the opened backup.
+    case ${1:-} in
+        --resume) restore_resume ;;
+        --rollback) restore_rollback ;;
+        --acknowledge) restore_acknowledge ;;
+        *) restore_from "$@" ;;
+    esac
+}
 draw_maintenance() {
     clear_screen
     title_bar Maintenance
-    printf ' %sCheck the server, and fix what a revocation left unfinished.%s\n' "$C_DIM" "$C_RESET" || true
+    printf ' %sCheck the server, fix what a revocation left unfinished, and back up the CA.%s\n' "$C_DIM" "$C_RESET" || true
     menu_item 1 'Diagnostics (read-only)'
     menu_item 2 'Fix the blocklist (CRL), or finish a revocation'
     menu_item 3 'Restart OpenVPN'
+    menu_item 4 'Back up the CA now (encrypted)'
     menu_item 0 'Back'
     hr
 }
@@ -4641,13 +5246,14 @@ maintenance_menu() {
     while :; do
         if (( redraw )); then draw_maintenance || true; fi
         redraw=1
-        ask 'Choose [0-3, Enter = back]: ' || return 0
+        ask 'Choose [0-4, Enter = back]: ' || return 0
         case $REPLY in
             1) menu_action 'Diagnostics' health_view ;;
             2) menu_action 'Fix the blocklist' repair_crl ;;
             3) menu_action 'Restart OpenVPN' restart_openvpn ;;
+            4) menu_action 'Back up the CA now' backup_now ;;
             0|'') return 0 ;;
-            *) warn "Unknown option \"$REPLY\". Enter a number from 0 to 3."; redraw=0 ;;
+            *) warn "Unknown option \"$REPLY\". Enter a number from 0 to 4."; redraw=0 ;;
         esac
     done
 }
@@ -4817,6 +5423,8 @@ Commands:
   about      show the version, project address and contact
   uninstall  remove this tool; OpenVPN, the PKI and the CRL are kept
   remove-all remove this tool, OpenVPN, the CA and all profiles (only after server-setup)
+  restore    restore the CA from an opened backup: restore <file.tar> --ca-fingerprint <SHA-256>
+             (or --ca-from <profile.ovpn>); --resume or --rollback a restore that stopped; --acknowledge
   version    print the version
   help       show this help
 
@@ -4840,6 +5448,14 @@ main() {
             about) about_text; exit 0 ;;
             # For certbot's deploy hook only; it needs nothing else from the tool.
             reload-links) reload_links_now; exit $? ;;
+            # For systemd only: the daily backup of the CA, after the CRL check.
+            backup-auto)
+                darban_require_root || exit 1
+                load_config
+                run_action backup_command "${2:-daily}"
+                exit "$ACTION_RC" ;;
+            # It takes the rest of the line as its own.
+            restore) cmd=restore; shift; RESTORE_ARGS=("$@"); break ;;
             # For systemd only: the jobs of connection events, which need nothing of the menu.
             events|sweep|events-setup)
                 darban_require_root || exit 1
@@ -4855,6 +5471,11 @@ main() {
     if (( LIST_ALL )) && [[ $cmd != list ]]; then printf -- '--all only works with list.\n\n' >&2; usage >&2; exit 2; fi
     ui_init
     setup
+    # A restore that stopped half way is finished first; Diagnostics only report it.
+    if [[ -f $DARBAN_RESTORE_JOURNAL && $cmd != restore && $cmd != status ]]; then
+        run_action restore_resume || true
+        SERVER_PROBLEM=$(server_problem)
+    fi
     # Diagnostics, updates and removal must work on a broken server; these two cannot.
     if [[ -n $SERVER_PROBLEM ]] && [[ $cmd == list || $cmd == repair-crl || $cmd == connected || $cmd == welcome || $cmd == enable-events ]]; then
         fail "$SERVER_PROBLEM"
@@ -4871,6 +5492,7 @@ main() {
         uninstall) run_action uninstall_tool; exit "$ACTION_RC" ;;
         remove-all) run_action remove_everything; exit "$ACTION_RC" ;;
         enable-events) run_action enable_events; exit "$ACTION_RC" ;;
+        restore) run_action restore_command "${RESTORE_ARGS[@]}"; exit "$ACTION_RC" ;;
     esac
     if [[ -n $SERVER_PROBLEM ]]; then recovery_menu; fi
     main_menu

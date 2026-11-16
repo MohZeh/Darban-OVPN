@@ -239,6 +239,10 @@ fi
 if (( ${#added_kernel[@]} > 0 && ! KERNEL )); then
     printf 'The Virtual HWE kernel was kept. It is safe to leave installed.\n'
 fi
+# Encrypted for the owner's key, and the one way back to this CA.
+if [[ -d /var/backups/darban-pki ]]; then
+    printf 'Kept: the encrypted backups of the CA in /var/backups/darban-pki. Delete them once you have a copy elsewhere, or no longer need this CA.\n'
+fi
 if (( ${#KEPT[@]} > 0 )); then
     echo 'Kept because other software depends on them:'
     printf '  %s\n' "${KEPT[@]}"

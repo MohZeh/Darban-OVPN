@@ -106,6 +106,14 @@ in_vm 'systemctl is-active --quiet darban-nat.service'
 in_vm 'systemctl is-active --quiet darban-crl.timer'
 in_vm 'sudo nft list table ip darban >/dev/null'
 in_vm 'test "$(sysctl -n net.ipv4.ip_forward)" = 1'
+# The expiry timer is transient. The first sweep (one minute after boot, with 10 s accuracy) rebuilds it from
+# the kept files. SSH and OpenVPN can be ready before that sweep; wait for its result before checking health.
+for attempt in $(seq 1 45); do
+    if in_vm 'systemctl is-active --quiet darban-expire.timer'; then break; fi
+    sleep 2
+done
+in_vm 'systemctl is-active --quiet darban-expire.timer'
+echo 'PASS: the first sweep after the reboot restores the expiry timer for the kept file.'
 in_vm 'sudo darban status' | tee "$WORK/status.log"
 grep -q 'DCO kernel module: ovpn' "$WORK/status.log"
 in_vm 'ip -d link show tun0' | grep -w ovpn >/dev/null
@@ -136,4 +144,38 @@ done
 if in_vm 'sudo test -e /root/openvpn-clients/vmclient.ovpn'; then echo 'FAIL: the first connection after the reboot left the kept file.'; exit 1; fi
 ping -c 3 -W 5 -I tun9 10.8.0.1 >/dev/null
 echo 'PASS: a profile made before the reboot connects from outside, and data flows through the tunnel.'
+kill "$(cat "$CLIENT_PID")" 2>/dev/null || true
+sleep 1
+ip link del tun9 2>/dev/null || true
+
+# T65 and C.15.8: a restore stopped after each of its four renames, then a real reboot: OpenVPN stays off after the
+# boot, and the next run of the tool finishes the restore.
+in_vm 'sudo apt-get -o Acquire::Retries=3 -qq update && sudo apt-get -o Acquire::Retries=3 -y -q install age >/dev/null'
+in_vm 'age-keygen -o owner.key 2>/dev/null && age-keygen -y owner.key > owner.pub'
+in_vm 'printf "8\n4\n%s\n0\n0\n" "$(cat owner.pub)" | sudo darban >/dev/null'
+in_vm 'sudo age -d -i owner.key -o backup.tar "$(sudo readlink -f /var/backups/darban-pki/latest.tar.age)"'
+fp=$(in_vm "sudo openssl x509 -in /root/pki/ca.crt -noout -fingerprint -sha256 | sed 's/^[^=]*=//'")
+for step in 1 2 3 4; do
+    in_vm "printf '2\n' | sudo DARBAN_TEST_RESTORE_STOP=$step darban restore backup.tar --ca-fingerprint '$fp' >/dev/null 2>&1" || true
+    in_vm 'sudo test -s /var/lib/darban/restore.journal'
+    in_vm 'sudo reboot' || true
+    sleep 15
+    wait_for_ssh
+    in_vm 'cloud-init status --wait >/dev/null 2>&1 || true'
+    sleep 10
+    if in_vm 'systemctl is-active --quiet openvpn-server@server.service'; then echo "FAIL: OpenVPN started at boot during a restore stopped after rename $step."; exit 1; fi
+    in_vm 'sudo darban status || true' | grep 'A restore is unfinished' >/dev/null
+    in_vm 'sudo darban restore --resume </dev/null'
+    in_vm 'systemctl is-active --quiet openvpn-server@server.service && systemctl is-enabled --quiet openvpn-server@server.service'
+    in_vm 'sudo test ! -e /var/lib/darban/restore.journal'
+    echo "T65: stopped after rename $step, then a reboot: OpenVPN stayed off, and the resume finished the restore."
+done
+openvpn --config "$WORK/client.ovpn" --route-nopull --dev tun9 --daemon --writepid "$CLIENT_PID" --log "$WORK/client2.log" --verb 3
+for attempt in $(seq 1 30); do
+    if grep -q 'Initialization Sequence Completed' "$WORK/client2.log"; then break; fi
+    sleep 1
+done
+grep -q 'Initialization Sequence Completed' "$WORK/client2.log"
+ping -c 3 -W 5 -I tun9 10.8.0.1 >/dev/null
+echo 'PASS: after every stopped restore and reboot, OpenVPN stays off until the resume, and the profile connects after it.'
 echo 'All reboot checks passed.'
