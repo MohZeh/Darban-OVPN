@@ -249,6 +249,10 @@ server_problem() {
     if [[ -f $DARBAN_RESTORE_JOURNAL ]]; then
         if restore_committed; then
             printf 'A restore is done, but its cleanup is unfinished. Finish it: sudo darban restore --resume\n'
+        elif [[ $(journal_value state) == undoing ]]; then
+            printf 'A rollback of a restore is unfinished. Finish it: sudo darban restore --rollback\n'
+        elif [[ $(journal_value state) == starting ]]; then
+            printf 'A restore is unfinished: OpenVPN may be running with the restored files, and is not enabled at boot. Finish it: sudo darban restore --resume, or undo it: sudo darban restore --rollback\n'
         else
             printf 'A restore is unfinished, so OpenVPN stays off. Finish it: sudo darban restore --resume, or undo it: sudo darban restore --rollback\n'
         fi
@@ -4953,6 +4957,8 @@ backup_hooks_run() {
     [[ ! -e $DARBAN_RESTORE_JOURNAL ]] || return 0
     [[ -d $BACKUP_HOOKS && ! -L $BACKUP_HOOKS && -O $BACKUP_HOOKS && $(stat -c %a "$BACKUP_HOOKS" 2>/dev/null) == 700 ]] || return 0
     for hook in "$BACKUP_HOOKS"/*; do
+        # Checked before each one: a hook already running finishes, but none starts once a restore has begun.
+        [[ ! -e $DARBAN_RESTORE_JOURNAL ]] || break
         [[ -f $hook && ! -L $hook && -O $hook && $(stat -c %a "$hook" 2>/dev/null) == 700 ]] || continue
         # A hook that ignores the end of its time is killed ten seconds later.
         if timeout -k 10 "$BACKUP_HOOK_SECONDS" env -i PATH=/usr/sbin:/usr/bin:/sbin:/bin "$hook" "$1" "$2" </dev/null >/dev/null 2>&1; then
@@ -5054,6 +5060,10 @@ backup_health() {
     local value created when
     if [[ -f $DARBAN_RESTORE_JOURNAL ]] && restore_committed; then
         check warn "A restore is done, and OpenVPN runs with the restored CA, but its cleanup is unfinished $S_ARROW sudo darban restore --resume"
+    elif [[ -f $DARBAN_RESTORE_JOURNAL && $(journal_value state) == undoing ]]; then
+        check bad "A rollback of a restore is unfinished $S_ARROW sudo darban restore --rollback"
+    elif [[ -f $DARBAN_RESTORE_JOURNAL && $(journal_value state) == starting ]]; then
+        check bad "A restore is unfinished: OpenVPN may be running with the restored files, and is not enabled at boot $S_ARROW sudo darban restore --resume (or --rollback)"
     elif [[ -f $DARBAN_RESTORE_JOURNAL ]]; then
         check bad "A restore is unfinished, so OpenVPN stays off $S_ARROW sudo darban restore --resume (or --rollback)"
     fi
@@ -5116,6 +5126,17 @@ restore_committed() { (( $(journal_state_rank "$(journal_value state)") >= 5 ));
 restore_failpoint() {
     # For the tests only: DARBAN_TEST_RESTORE_FAIL=<step> makes that step fail, as a full disk would.
     if [[ ${DARBAN_TEST_RESTORE_FAIL:-} == "$1" ]]; then RESTORE_WHY="step $1 failed, as the test asked"; return 1; fi
+}
+restore_point() {
+    # For the tests only: DARBAN_TEST_RESTORE_STOP=after:<step> stops right after that step, as a crash or a power
+    # cut would; DARBAN_TEST_RESTORE_WAIT=<step> waits there, holding what it holds, until the test deletes the file
+    # DARBAN_TEST_RESTORE_WAIT_FILE.
+    local i
+    if [[ ${DARBAN_TEST_RESTORE_STOP:-} == "after:$1" ]]; then printf 'Stopped after %s, as the test asked.\n' "$1" >&2; exit 99; fi
+    if [[ ${DARBAN_TEST_RESTORE_WAIT:-} == "$1" && -n ${DARBAN_TEST_RESTORE_WAIT_FILE:-} ]]; then
+        : >"$DARBAN_TEST_RESTORE_WAIT_FILE"
+        for (( i = 0; i < 600; i++ )); do [[ -e $DARBAN_TEST_RESTORE_WAIT_FILE ]] || return 0; sleep 0.1; done
+    fi
 }
 restore_tree_live() { case $1 in pki) printf '%s' "$DARBAN_PKI" ;; server) printf '%s' "$DARBAN_SERVER_DIR" ;; esac; }
 restore_rename() {
@@ -5257,7 +5278,9 @@ restore_commit() {
     # the restore is committed. What it changes besides the two folders is in the journal, so a rollback undoes it.
     local stage file name added
     stage=$(journal_value stage)
-    journal_write state=swapped || return 1
+    # Forward only: a resume from "starting" does not write an earlier state.
+    if (( $(journal_state_rank "$(journal_value state)") < 3 )); then journal_write state=swapped || return 1; fi
+    restore_point swapped
     for file in config domain; do
         [[ -f $stage/files/darban/$file ]] || continue
         if [[ -z $(journal_value "saved_$file") ]]; then
@@ -5277,7 +5300,7 @@ restore_commit() {
         [[ ! -e $LEDGER_DIR/$name ]] || continue
         added=$(journal_value added_ledger)
         journal_write "added_ledger=${added:+$added }$name" || return 1
-        install -D -m 600 "$file" "$LEDGER_DIR/$name" || true
+        install -D -m 600 "$file" "$LEDGER_DIR/$name" 2>/dev/null || { RESTORE_WHY="the record of when $name was seen could not be put back in $LEDGER_DIR"; return 1; }
     done
     if ! restore_nat; then journal_write nat=failed || return 1; fi
     # Connection events, when this server can have them: the lines go into the new server.conf while OpenVPN is off.
@@ -5290,9 +5313,12 @@ restore_commit() {
     restore_failpoint commit || return 1
     journal_write state=starting || return 1
     # C.16.7: the check here is the service, its port, the CRL and Diagnostics; a real client is proven in CI.
-    if [[ $(journal_value unit_enabled) == yes ]]; then systemctl enable --now "$DARBAN_UNIT" >/dev/null 2>&1 || true; else systemctl start "$DARBAN_UNIT" >/dev/null 2>&1 || true; fi
+    # Started, not enabled: a crash before the commit leaves OpenVPN off after a reboot. The cleanup enables it.
+    systemctl start "$DARBAN_UNIT" >/dev/null 2>&1 || true
+    restore_point started
     if ! wait_for_port "$(server_port 2>/dev/null || echo 0)"; then RESTORE_WHY='OpenVPN did not come back with the restored files'; return 1; fi
-    journal_write state=committed
+    journal_write state=committed || return 1
+    restore_point committed
 }
 restore_cleanup() {
     # After the commit: what the restore replaced goes to where it is kept, each step once, so a stop at any point
@@ -5301,6 +5327,14 @@ restore_cleanup() {
     id=$(journal_value id); stage=$(journal_value stage)
     dest=$PKI_BACKUP_DIR/pre-restore-$id
     journal_write state=cleanup || return 1
+    # Enabled at boot only now, when the restore is done, and only when it was before.
+    if [[ $(journal_value unit_enabled) == yes && $(journal_value enabled) != yes ]]; then
+        restore_failpoint enable || return 1
+        systemctl enable "$DARBAN_UNIT" >/dev/null 2>&1 || true
+        [[ $(systemctl is-enabled "$DARBAN_UNIT" 2>/dev/null) == enabled ]] || { RESTORE_WHY='OpenVPN runs, but could not be enabled at boot'; return 1; }
+        journal_write enabled=yes || return 1
+        restore_point enabled
+    fi
     install -d -m 700 "$PKI_BACKUP_DIR" "$dest" || { RESTORE_WHY="$dest could not be made"; return 1; }
     for tree in pki server; do
         live=$(restore_tree_live "$tree")
@@ -5315,6 +5349,7 @@ restore_cleanup() {
                 sync -- "$dest" 2>/dev/null || sync
             fi
             journal_write "kept_$tree=yes" || return 1
+            restore_point "kept-$tree"
         fi
         if [[ -e $dest/$tree ]]; then rm -rf -- "$live.pre-restore"; fi
         rm -f -- "$live/.restore-$id"
@@ -5325,13 +5360,15 @@ restore_cleanup() {
             install -d -m 700 "$dest/darban" && mv -f -- "$CONFIG_DIR/$file.pre-restore" "$dest/darban/$file" || { RESTORE_WHY="the previous $file could not be kept"; return 1; }
         fi
         journal_write "kept_$file=yes" || return 1
+        restore_point "kept-$file"
     done
     # The time it is kept from (C.16.5).
-    if [[ ! -e $dest/.restored ]]; then date -u +%s >"$dest/.restored" || return 1; fi
+    if [[ ! -e $dest/.restored ]]; then date -u +%s >"$dest/.restored" || return 1; restore_point restored; fi
     if [[ $(journal_value unverified) == yes ]]; then printf '%s\n' "$(journal_value created)" >"$RESTORE_WARN" || return 1; fi
     RESTORE_NAT_FAILED=$([[ $(journal_value nat) == failed ]] && echo 1 || echo 0)
     audit "CA restored from the backup of $(journal_value created)"
     rm -rf -- "$stage"
+    restore_point cleaned
     rm -f -- "$DARBAN_RESTORE_JOURNAL"
     sync 2>/dev/null || true
     RESTORE_KEPT=$dest
@@ -5346,30 +5383,55 @@ restore_done_message() {
         return 1
     fi
 }
+restore_unit_as_before() {
+    # OpenVPN as it was before the restore, and checked: active and enabled at boot as the journal recorded.
+    local active enabled
+    active=$(journal_value unit_active); enabled=$(journal_value unit_enabled)
+    if [[ $enabled == yes ]]; then
+        systemctl enable --now "$DARBAN_UNIT" >/dev/null 2>&1 || true
+    elif [[ $active == yes ]]; then
+        systemctl start "$DARBAN_UNIT" >/dev/null 2>&1 || true
+    fi
+    if [[ $enabled == yes ]] && [[ $(systemctl is-enabled "$DARBAN_UNIT" 2>/dev/null) != enabled ]]; then return 1; fi
+    if [[ $enabled == yes || $active == yes ]] && ! systemctl is-active --quiet "$DARBAN_UNIT" 2>/dev/null; then return 1; fi
+}
 restore_rollback() {
     # darban restore --rollback: before the commit, the folders as they were, every other change undone, and OpenVPN
-    # as it was; and only "undone" once that is checked. After the commit, nothing to undo.
-    local id tree live stage pre file name
+    # as it was; "undone" only once each of them is checked. What could not be undone keeps the journal, in the state
+    # "undoing", so nothing finishes the restore forward any more and the next rollback goes on. After the commit,
+    # nothing to undo. Everything is decided from the journal read under the lock.
+    local id tree live stage pre file name from failed=''
     [[ -f $DARBAN_RESTORE_JOURNAL ]] || { info 'No restore is unfinished.'; return 0; }
+    DARBAN_RESTORE_OWNER=1
+    ca_lock || return 1
+    # Read again under the lock: another run may have finished, or undone, the restore while this one waited.
+    if [[ ! -f $DARBAN_RESTORE_JOURNAL ]]; then
+        ca_unlock; fail 'Not undone: the restore was finished, or undone, while this waited. Nothing was changed.'; return 1
+    fi
     if restore_committed; then
+        ca_unlock
         fail "The restore of the backup of $(journal_value created) was completed: OpenVPN runs with the restored CA, so it is not undone. Only its cleanup is left: sudo darban restore --resume"
         return 1
     fi
-    DARBAN_RESTORE_OWNER=1
-    ca_lock || return 1
     id=$(journal_value id)
+    [[ $id =~ ^[0-9a-zA-Z]+$ ]] || { ca_unlock; urgent "The restore journal $DARBAN_RESTORE_JOURNAL cannot be read. Look at it by hand."; return 1; }
     critical_begin
+    from=$(journal_value undo_from)
+    if [[ -z $from ]]; then
+        from=$(journal_value state)
+        journal_write "undo_from=${from:-unknown}" state=undoing || { critical_end; return 1; }
+    fi
     # Before the swaps began nothing was moved, so OpenVPN need not be off to undo what was prepared.
-    if [[ $(journal_value state) != staged ]] && ! restore_openvpn_off; then
-        critical_end; urgent "Not undone, and nothing was moved: $RESTORE_WHY."; return 1
+    if [[ $from != staged ]] && ! restore_openvpn_off; then
+        critical_end; urgent "Not undone, and this rollback moved nothing: $RESTORE_WHY. To try again: sudo darban restore --rollback"; return 1
     fi
     for tree in server pki; do
         live=$(restore_tree_live "$tree"); stage=$live.restore-$id; pre=$live.pre-restore
         if [[ -e $live/.restore-$id ]]; then
             if [[ -e $stage ]]; then urgent "Both $live and $stage are copies of the backup. Look at them, and at $pre, by hand."; critical_end; return 1; fi
-            mv -T -- "$live" "$stage" || { critical_end; return 1; }
+            mv -T -- "$live" "$stage" || { critical_end; urgent "Not undone: $live could not be moved back. To try again: sudo darban restore --rollback"; return 1; }
         fi
-        if [[ ! -e $live && -e $pre ]]; then mv -T -- "$pre" "$live" || { critical_end; return 1; }; fi
+        if [[ ! -e $live && -e $pre ]]; then mv -T -- "$pre" "$live" || { critical_end; urgent "Not undone: $pre could not be moved back. To try again: sudo darban restore --rollback"; return 1; }; fi
         rm -rf -- "$stage"
         sync -- "${live%/*}" 2>/dev/null || sync
     done
@@ -5382,35 +5444,52 @@ restore_rollback() {
     done
     for file in config domain; do
         case $(journal_value "saved_$file") in
-            copy) if [[ -e $CONFIG_DIR/$file.pre-restore ]]; then mv -f -- "$CONFIG_DIR/$file.pre-restore" "$CONFIG_DIR/$file" || true; fi ;;
-            absent) rm -f -- "$CONFIG_DIR/$file" ;;
+            copy)
+                if [[ -e $CONFIG_DIR/$file.pre-restore ]]; then mv -f -- "$CONFIG_DIR/$file.pre-restore" "$CONFIG_DIR/$file" 2>/dev/null || true; fi
+                if [[ -e $CONFIG_DIR/$file.pre-restore || ! -e $CONFIG_DIR/$file ]]; then failed+="${failed:+, }$CONFIG_DIR/$file"; fi ;;
+            absent)
+                rm -f -- "$CONFIG_DIR/$file" 2>/dev/null || true
+                if [[ -e $CONFIG_DIR/$file ]]; then failed+="${failed:+, }$CONFIG_DIR/$file"; fi ;;
         esac
     done
     for name in $(journal_value added_ledger); do
-        if valid_existing_name "$name"; then rm -f -- "$LEDGER_DIR/$name"; fi
+        valid_existing_name "$name" || continue
+        rm -f -- "$LEDGER_DIR/$name" 2>/dev/null || true
+        if [[ -e $LEDGER_DIR/$name ]]; then failed+="${failed:+, }$LEDGER_DIR/$name"; fi
     done
-    restore_nat || true
-    if [[ $(journal_value unit_enabled) == yes ]]; then
-        systemctl enable --now "$DARBAN_UNIT" >/dev/null 2>&1 || true
-    elif [[ $(journal_value unit_active) == yes ]]; then
-        systemctl start "$DARBAN_UNIT" >/dev/null 2>&1 || true
+    if ! restore_nat; then failed+="${failed:+, }the NAT rules"; fi
+    if ! restore_unit_as_before; then failed+="${failed:+, }OpenVPN as it was (active $(journal_value unit_active), enabled at boot $(journal_value unit_enabled))"; fi
+    if [[ -n $failed ]]; then
+        critical_end
+        ca_unlock
+        audit "CA restore rollback unfinished: $failed"
+        urgent "The CA, the clients and the server files are as they were before the restore, but this could not be put back: $failed. The journal stays; fix that, then: sudo darban restore --rollback"
+        return 1
     fi
     rm -rf -- "$(journal_value stage)"
     rm -f -- "$DARBAN_RESTORE_JOURNAL"
     critical_end
     ca_unlock
     audit 'CA restore rolled back'
-    ok 'The restore was undone: the CA, the clients, the server files and the settings are as they were before it.'
+    ok 'The restore was undone: the CA, the clients, the server files, the settings and OpenVPN are as they were before it.'
 }
 restore_resume() {
     # darban restore --resume, and every run of this tool or of the installer while a restore is unfinished: it is
-    # finished forward. Before the commit the swaps go on; after it, only the cleanup is left.
+    # finished forward. Before the commit the swaps go on; after it, only the cleanup is left. Everything is decided
+    # from the journal read under the lock.
     local id tree
     [[ -f $DARBAN_RESTORE_JOURNAL ]] || { info 'No restore is unfinished.'; return 0; }
-    id=$(journal_value id)
-    [[ $id =~ ^[0-9a-zA-Z]+$ ]] || { urgent "The restore journal $DARBAN_RESTORE_JOURNAL cannot be read. Look at it by hand."; return 1; }
     DARBAN_RESTORE_OWNER=1
     ca_lock || return 1
+    # Read again under the lock: another run may have finished, or undone, the restore while this one waited.
+    if [[ ! -f $DARBAN_RESTORE_JOURNAL ]]; then ca_unlock; info 'The restore was finished, or undone, while this waited. Nothing was changed.'; return 0; fi
+    id=$(journal_value id)
+    [[ $id =~ ^[0-9a-zA-Z]+$ ]] || { ca_unlock; urgent "The restore journal $DARBAN_RESTORE_JOURNAL cannot be read. Look at it by hand."; return 1; }
+    if [[ $(journal_value state) == undoing ]]; then
+        ca_unlock
+        urgent 'A rollback of this restore is unfinished, so it is not finished forward. Finish the rollback: sudo darban restore --rollback'
+        return 1
+    fi
     info "A restore of the backup of $(journal_value created) is unfinished; it is finished now."
     critical_begin
     if ! restore_committed; then
@@ -5443,15 +5522,18 @@ restore_acknowledge() {
 pre_restore_prune() {
     # C.16.5: what a finished restore replaced is deleted PRE_RESTORE_KEEP_DAYS after it. Never while a restore is
     # unfinished, never one without its time, or with a time in the future, and never anything but such a folder.
-    local dir when now
+    local dir when now found
     [[ ! -e $DARBAN_RESTORE_JOURNAL ]] || return 0
     now=$(date -u +%s)
     for dir in "$PKI_BACKUP_DIR"/pre-restore-*; do
         [[ -d $dir && ! -L $dir && -f $dir/.restored && ! -L $dir/.restored ]] || continue
         [[ -d $dir/pki || -d $dir/server ]] || continue
         # Only what a restore keeps there, and no link anywhere in it.
-        [[ -z $(find "$dir" -mindepth 1 -maxdepth 1 ! -name pki ! -name server ! -name darban ! -name .restored -print -quit 2>/dev/null) ]] || continue
-        [[ -z $(find "$dir" -type l -print -quit 2>/dev/null) ]] || continue
+        # A find that fails cannot say so, so the folder stays.
+        found=$(find "$dir" -mindepth 1 -maxdepth 1 ! -name pki ! -name server ! -name darban ! -name .restored -print -quit 2>/dev/null) || continue
+        [[ -z $found ]] || continue
+        found=$(find "$dir" -type l -print -quit 2>/dev/null) || continue
+        [[ -z $found ]] || continue
         read -r when <"$dir/.restored" || continue
         [[ $when =~ ^[0-9]{1,12}$ ]] || continue
         if (( when > now || now - when < PRE_RESTORE_KEEP_DAYS * 86400 )); then continue; fi
@@ -5529,6 +5611,8 @@ restore_from() {
         restore_refuse 'the server certificate in the backup is not valid from its CA, or does not match its key.'; return 1
     fi
     ( DARBAN_PKI=$files/pki; darban_index_rows ) >/dev/null 2>&1 || { restore_refuse 'the CA index in the backup cannot be read.'; return 1; }
+    # An index that names one certificate twice says two things of it; such a backup is not restored.
+    restore_index_unique "$( DARBAN_PKI=$files/pki; darban_index_rows 2>/dev/null )" || { restore_refuse 'the CA index in the backup names a certificate twice.'; return 1; }
     # The CRL of the backup: missing, unreadable, signed by another CA, or expired; each is said apart.
     RESTORE_NEW_CRL=0
     now=$(date -u +%s)
@@ -5591,6 +5675,7 @@ restore_from() {
     # The lock refuses while a journal is there: another restore may have started while the question was open.
     ca_lock || { rm -rf -- "$stage"; info 'Nothing on this server was changed.'; return 1; }
     DARBAN_RESTORE_OWNER=1
+    restore_point locked
     # Under the lock, again: another session may have revoked or issued while the question was open.
     if ! restore_history "$files" || [[ -n $RESTORE_UNDONE ]]; then
         ca_unlock
@@ -5614,7 +5699,7 @@ restore_from() {
     # From here on, no boot starts OpenVPN until the restore is done or undone; no rename is made before that is so.
     if ! restore_openvpn_off; then
         critical_end
-        urgent "Not restored: $RESTORE_WHY. No folder was moved; this undoes what was prepared."
+        urgent "Not restored: $RESTORE_WHY. No folder was moved."
         restore_rollback || true
         return 1
     fi
@@ -5623,7 +5708,7 @@ restore_from() {
         restore_swap_tree "$tree" "$id" || { critical_end; urgent "The restore stopped: $RESTORE_WHY"; return 1; }
     done
     if ! restore_commit; then
-        urgent "The restore did not finish: $RESTORE_WHY. It is undone now."
+        urgent "The restore did not finish: $RESTORE_WHY. Undoing it:"
         critical_end
         restore_rollback || true
         return 1

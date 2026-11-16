@@ -155,7 +155,7 @@ in_vm 'age-keygen -o owner.key 2>/dev/null && age-keygen -y owner.key > owner.pu
 in_vm 'printf "8\n4\n%s\n0\n0\n" "$(cat owner.pub)" | sudo darban >/dev/null'
 in_vm 'sudo age -d -i owner.key -o backup.tar "$(sudo readlink -f /var/backups/darban-pki/latest.tar.age)"'
 fp=$(in_vm "sudo openssl x509 -in /root/pki/ca.crt -noout -fingerprint -sha256 | sed 's/^[^=]*=//'")
-for step in 1 2 3 4; do
+for step in 1 2 3 4 after:started; do
     in_vm "printf '2\n' | sudo DARBAN_TEST_RESTORE_STOP=$step darban restore backup.tar --ca-fingerprint '$fp' >/dev/null 2>&1" || true
     in_vm 'sudo test -s /var/lib/darban/restore.journal'
     in_vm 'sudo reboot' || true

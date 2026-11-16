@@ -4720,6 +4720,10 @@ opened_backup() {
     age -d -i key.txt -o "$1" "$E/pki-backups/latest.tar.age"
 }
 restore_run() { bash "$E/manager.sh" restore "$@" 2>&1; }
+# The systemctl stand-in remembers whether OpenVPN's unit was stopped or disabled.
+unit_on() { [[ ! -e $E/unit-state/openvpn-server@server.service.stopped && ! -e $E/unit-state/openvpn-server@server.service.disabled ]]; }
+unit_running() { [[ ! -e $E/unit-state/openvpn-server@server.service.stopped ]]; }
+unit_enabled() { [[ ! -e $E/unit-state/openvpn-server@server.service.disabled ]]; }
 craft() {
     # craft <good tar> <out tar> <case> [file]: a changed copy of an archive. With "keep-manifest" the checksums
     # stay as they were; otherwise manifest.json follows the change.
@@ -4754,6 +4758,8 @@ elif case == 'up':
 elif case == 'tamper':
     result = [(m, d + b'\n') if m.name == 'pki/serial' else (m, d) for m, d in result]
     keep = True
+elif case == 'dupserial':
+    result = [(m, d + d.splitlines(True)[-1]) if m.name == 'pki/index.txt' else (m, d) for m, d in result]
 elif case == 'nocrl':
     result = [(m, d) for m, d in result if m.name != 'pki/crl.pem']
 elif case == 'badcrl':
@@ -4873,8 +4879,11 @@ test_restore_puts_the_ca_back() {
     ok_if 'no journal is left' test ! -e "$E/varlib/restore.journal"
     ok_if 'what it replaced is kept' test -n "$(find "$E/pki-backups" -maxdepth 2 -path '*pre-restore-*/pki' -type d)"
     ok_if 'with the time it is kept from' test -s "$(find "$E/pki-backups" -maxdepth 2 -path '*pre-restore-*/.restored' | head -n1)"
-    [[ $(grep -n 'systemctl disable --now openvpn-server@server.service' "$STUB_LOG" | cut -d: -f1 | head -n1) -lt $(grep -n 'systemctl enable --now openvpn-server@server.service' "$STUB_LOG" | cut -d: -f1 | tail -n1) ]]
+    [[ $(grep -n 'systemctl disable --now openvpn-server@server.service' "$STUB_LOG" | cut -d: -f1 | head -n1) -lt $(grep -n 'systemctl start openvpn-server@server.service' "$STUB_LOG" | cut -d: -f1 | tail -n1) ]]
     rc_is 'OpenVPN is turned off first and on at the end' 0 "$?"
+    [[ $(grep -n 'systemctl start openvpn-server@server.service' "$STUB_LOG" | cut -d: -f1 | tail -n1) -lt $(grep -n 'systemctl enable openvpn-server@server.service' "$STUB_LOG" | cut -d: -f1 | tail -n1) ]]
+    rc_is 'and enabled at boot only after the commit' 0 "$?"
+    ok_if 'it runs, and is enabled at boot' unit_on
     out=$(bash "$E/manager.sh" restore "$E/backup.tar" 2>&1 </dev/null); rc_is 'without an anchor it refuses' 2 "$?"
     has 'and says what to give' '--ca-fingerprint' "$out"
     out=$(printf '2\n' | bash "$E/manager.sh" restore "$E/backup.tar" --ca-from "$E/clients/bob.ovpn" 2>&1); rc_is 'a profile from a device is an anchor too' 0 "$?"
@@ -4902,7 +4911,7 @@ test_a_restore_refuses_before_changing_anything() {
     snapshot=$(cat "$PKI/index.txt" "$SERVER_CONF")
     for kind in extra:'not one a backup holds' symlink:'not a regular file' hardlink:'not a regular file' duplicate:'appears twice' \
         big:'larger than' absolute:'not allowed' dotdot:'not allowed' up:'line 25, up' tamper:'does not match its checksum' \
-        noschema:'has no manifest.json'; do
+        noschema:'has no manifest.json' dupserial:'names a certificate twice'; do
         craft "$E/backup.tar" "$E/bad.tar" "${kind%%:*}"
         : > "$STUB_LOG"
         out=$(printf '2\n' | bash "$E/manager.sh" restore "$E/bad.tar" --ca-fingerprint "$fp" 2>&1); rc_is "${kind%%:*}: refused" 1 "$?"
@@ -5003,13 +5012,13 @@ test_a_restore_that_stops_finishes_or_goes_back() {
         : > "$STUB_LOG"
         printf '2\n' | DARBAN_TEST_RESTORE_STOP=$step bash "$E/manager.sh" restore "$E/backup.tar" --ca-fingerprint "$fp" >/dev/null 2>&1; rc_is "stopped after rename $step" 99 "$?"
         ok_if "after rename $step a journal is left" test -s "$E/varlib/restore.journal"
-        lacks "after rename $step OpenVPN is not started" 'systemctl enable' "$(cat "$STUB_LOG")"
+        lacks "after rename $step OpenVPN is not started" 'systemctl start openvpn' "$(cat "$STUB_LOG")"
         has "after rename $step Diagnostics say so" 'A restore is unfinished' "$(mgr status)"
         out=$(maintain --check 2>&1); rc_is "after rename $step the CRL timer leaves it alone" 1 "$?"
         mgr list >/dev/null
         ok_if "after rename $step the next run finishes it" test ! -e "$E/varlib/restore.journal"
         ok_if "after rename $step the backup is in place" test ! -e "$PKI/old-pki" -a ! -e "$E/server/old-server"
-        grep -q 'systemctl enable --now openvpn-server@server.service' "$STUB_LOG"; rc_is "after rename $step OpenVPN is on again" 0 "$?"
+        ok_if "after rename $step OpenVPN is on again, and enabled at boot" unit_on
     done
     # A step before the commit fails: everything the restore did is undone, and checked.
     rm -f "$E/varlib/clients/carol" "$E/cfg/domain"
@@ -5037,7 +5046,7 @@ test_a_restore_that_stops_finishes_or_goes_back() {
     : > "$STUB_LOG"
     out=$(printf '2\n' | DARBAN_TEST_RESTORE_FAIL=keep-server bash "$E/manager.sh" restore "$E/backup.tar" --ca-fingerprint "$fp" 2>&1); rc_is 'a cleanup that fails after the commit' 1 "$?"
     has 'says the restore is done and the cleanup is not' 'but the cleanup is unfinished' "$out"
-    grep -q 'systemctl enable --now openvpn-server@server.service' "$STUB_LOG"; rc_is 'and OpenVPN runs' 0 "$?"
+    ok_if 'and OpenVPN runs, enabled at boot' unit_on
     has 'Diagnostics say only the cleanup is left' 'its cleanup is unfinished' "$(mgr status)"
     out=$(restore_run --rollback); rc_is 'after the commit it is not undone' 1 "$?"
     has 'and says so' 'so it is not undone' "$out"
@@ -5206,6 +5215,198 @@ test_what_a_restore_replaced_is_deleted_after_30_days() {
     rm -f "$E/varlib/restore.journal"
     mgr sweep >/dev/null
     ok_if 'after 30 days it is deleted' test ! -e "$dir"
+}
+
+real_flock() { mkdir -p "$E/realflock"; ln -sf /usr/bin/flock "$E/realflock/flock"; }
+wait_for() { local i; for i in $(seq 1 150); do if eval "$1"; then return 0; fi; sleep 0.1; done; return 1; }
+paused_restore() {
+    # paused_restore <step> <out> [VAR=value]...: a restore, with the real lock, that waits at <step> holding what it
+    # holds until $E/paused is deleted. Its status lands in <out>.rc.
+    local step=$1 out=$2 fp
+    shift 2
+    fp=$(ca_fp)
+    rm -f "$E/paused"
+    ( printf '2\n' | env PATH="$E/realflock:$PATH" DARBAN_TEST_RESTORE_WAIT="$step" DARBAN_TEST_RESTORE_WAIT_FILE="$E/paused" "$@" \
+        bash "$E/manager.sh" restore "$E/backup.tar" --ca-fingerprint "$fp" >"$out" 2>&1; echo "$?" >"$out.rc" ) &
+    wait_for '[[ -e $E/paused ]]'
+}
+
+test_a_resume_or_rollback_that_waited_decides_under_the_lock() {
+    # R24-A01 and C.16.9, with the real lock: --resume and --rollback decide from the journal they read once they hold
+    # the CA lock. One that waited while another restore finished changes nothing and says so; a rollback that waited
+    # never undoes a restore that was committed meanwhile.
+    local kind
+    backed_up_server
+    real_flock
+    for kind in --resume --rollback; do
+        paused_restore swapped "$E/first.out"; rc_is "$kind: the first restore holds the lock half way" 0 "$?"
+        ( env PATH="$E/realflock:$PATH" bash "$E/manager.sh" restore "$kind" >"$E/second.out" 2>&1; echo "$?" >"$E/second.out.rc" ) &
+        wait_for 'grep -q "waiting up to" "$E/second.out" 2>/dev/null'; rc_is "$kind: the second one waits for the lock" 0 "$?"
+        rm -f "$E/paused"
+        wait
+        rc_is "$kind: the first restore finishes" 0 "$(cat "$E/first.out.rc")"
+        has "$kind: the one that waited says what happened meanwhile" 'while this waited' "$(cat "$E/second.out")"
+        lacks "$kind: and undoes nothing" 'The restore was undone' "$(cat "$E/second.out")"
+        ok_if "$kind: OpenVPN runs, enabled at boot" unit_on
+        ok_if "$kind: no journal is left" test ! -e "$E/varlib/restore.journal"
+    done
+    # The first restore is committed, and then its cleanup fails.
+    : > "$PKI/old-pki"
+    paused_restore swapped "$E/first.out" DARBAN_TEST_RESTORE_FAIL=keep-pki
+    ( env PATH="$E/realflock:$PATH" bash "$E/manager.sh" restore --rollback >"$E/second.out" 2>&1; echo "$?" >"$E/second.out.rc" ) &
+    wait_for 'grep -q "waiting up to" "$E/second.out" 2>/dev/null'
+    rm -f "$E/paused"
+    wait
+    rc_is 'the first restore is committed, with its cleanup unfinished' 1 "$(cat "$E/first.out.rc")"
+    rc_is 'a rollback that waited is refused' 1 "$(cat "$E/second.out.rc")"
+    has 'and says why' 'so it is not undone' "$(cat "$E/second.out")"
+    ok_if 'the restored CA stays' test ! -e "$PKI/old-pki"
+    ok_if 'and OpenVPN runs' unit_running
+    has 'the cleanup is then finished' 'The restore is finished.' "$(restore_run --resume)"
+}
+
+test_a_restore_stopped_once_openvpn_started_is_off_after_a_reboot() {
+    # R24-A03, C.15.8 and C.16.9: before the commit, OpenVPN is started but not enabled at boot, so a crash there
+    # leaves it off after a reboot, and Diagnostics say it may be running. The journal never goes back a state; the
+    # restore can be finished, twice from the same point, or undone.
+    local fp out
+    backed_up_server
+    fp=$(ca_fp)
+    printf '2\n' | DARBAN_TEST_RESTORE_STOP=after:started bash "$E/manager.sh" restore "$E/backup.tar" --ca-fingerprint "$fp" >/dev/null 2>&1
+    rc_is 'stopped once OpenVPN was started' 99 "$?"
+    ok_if 'OpenVPN is not enabled at boot' test -e "$E/unit-state/openvpn-server@server.service.disabled"
+    has 'Diagnostics say it may be running' 'OpenVPN may be running with the restored files' "$(mgr status)"
+    out=$(DARBAN_TEST_RESTORE_STOP=after:started restore_run --resume); rc_is 'a resume stopped at the same point' 99 "$?"
+    grep -qx 'state=starting' "$E/varlib/restore.journal"; rc_is 'the journal stays at starting, never an earlier state' 0 "$?"
+    out=$(restore_run --resume); rc_is 'the next resume finishes it' 0 "$?"
+    has 'and says so' 'The restore is finished.' "$out"
+    ok_if 'OpenVPN runs, enabled at boot' unit_on
+    : > "$PKI/old-pki"
+    printf '2\n' | DARBAN_TEST_RESTORE_STOP=after:started bash "$E/manager.sh" restore "$E/backup.tar" --ca-fingerprint "$fp" >/dev/null 2>&1
+    has 'from the same point it can be undone' 'The restore was undone' "$(restore_run --rollback)"
+    ok_if 'the CA is as it was' test -e "$PKI/old-pki"
+    ok_if 'and OpenVPN runs, enabled at boot' unit_on
+}
+
+test_a_rollback_says_undone_only_once_it_is() {
+    # R24-A02 and C.16.9: a rollback that cannot put OpenVPN or the NAT rules back says what is left, keeps the
+    # journal, and no resume finishes the restore forward from there; the next rollback finishes it.
+    local fp out
+    backed_up_server
+    fp=$(ca_fp)
+    : > "$PKI/old-pki"
+    out=$(printf '2\n' | DARBAN_TEST_RESTORE_FAIL=commit FAKE_START_FAILS=1 bash "$E/manager.sh" restore "$E/backup.tar" --ca-fingerprint "$fp" 2>&1)
+    rc_is 'a restore whose rollback cannot start OpenVPN' 1 "$?"
+    lacks 'is not called undone' 'The restore was undone' "$out"
+    lacks 'nor said to be undone before it is' 'It is undone now' "$out"
+    has 'it names what was not put back' 'OpenVPN as it was' "$out"
+    ok_if 'the CA is back' test -e "$PKI/old-pki"
+    ok_if 'the journal stays' test -s "$E/varlib/restore.journal"
+    has 'Diagnostics say a rollback is unfinished' 'A rollback of a restore is unfinished' "$(mgr status)"
+    out=$(restore_run --resume); rc_is 'a resume does not finish it forward' 1 "$?"
+    has 'and says why' 'not finished forward' "$out"
+    ok_if 'so the CA stays as it was' test -e "$PKI/old-pki"
+    out=$(restore_run --rollback); rc_is 'the next rollback finishes' 0 "$?"
+    has 'and says so' 'The restore was undone' "$out"
+    ok_if 'OpenVPN runs, enabled at boot' unit_on
+    ok_if 'and no journal is left' test ! -e "$E/varlib/restore.journal"
+    # NAT rules that do not load again.
+    printf 'table ip darban {\n    chain postrouting {\n        ip saddr 10.8.0.0/24 oifname "eth0" masquerade\n    }\n    chain forward {\n        ip saddr 10.8.0.0/24 ip daddr 10.8.0.0/24 drop\n    }\n}\n' > "$E/cfg/nat.nft"
+    printf '#!/usr/bin/env bash\necho "nft $*" >> "$STUB_LOG"\nif [[ $1 == -f ]]; then exit 1; fi\n' > "$E/bin/nft"; chmod +x "$E/bin/nft"
+    out=$(printf '2\n' | DARBAN_TEST_RESTORE_FAIL=commit bash "$E/manager.sh" restore "$E/backup.tar" --ca-fingerprint "$fp" 2>&1)
+    has 'NAT rules that do not load again are named' 'the NAT rules' "$out"
+    lacks 'and the rollback is not called done' 'The restore was undone' "$out"
+    ok_if 'the journal stays' test -s "$E/varlib/restore.journal"
+    printf '#!/usr/bin/env bash\necho "nft $*" >> "$STUB_LOG"\n' > "$E/bin/nft"
+    has 'once NAT loads, the rollback finishes' 'The restore was undone' "$(restore_run --rollback)"
+}
+
+test_a_restore_that_cannot_put_a_client_record_back_is_undone() {
+    # R24-A04 and C.16.8: a client record only the backup has comes back, or the restore is not done.
+    local fp out before
+    backed_up_server
+    fp=$(ca_fp)
+    mkdir -p "$E/varlib/clients"; printf 'first_seen=5\n' > "$E/varlib/clients/carol"
+    mgr backup-auto test >/dev/null
+    (cd "$E" && opened_backup "$E/backup.tar")
+    rm -rf "$E/varlib/clients"; : > "$E/varlib/clients"
+    : > "$PKI/old-pki"
+    out=$(printf '2\n' | bash "$E/manager.sh" restore "$E/backup.tar" --ca-fingerprint "$fp" 2>&1); rc_is 'refused' 1 "$?"
+    has 'it says which record' 'the record of when carol was seen could not be put back' "$out"
+    has 'and the restore is undone' 'The restore was undone' "$out"
+    ok_if 'the CA is as it was' test -e "$PKI/old-pki"
+    ok_if 'and OpenVPN runs, enabled at boot' unit_on
+    rm -f "$E/varlib/clients"
+}
+
+test_a_restore_stopped_after_its_commit_finishes_each_step_once() {
+    # R24-A-gap-1, R21-01 and C.16.9: a restore stopped after each step of its cleanup is finished by the next resume,
+    # and a second finds nothing; what it replaced is kept whole, the config it replaced too, and OpenVPN runs.
+    local fp point id dest
+    backed_up_server
+    fp=$(ca_fp)
+    for point in committed enabled kept-pki kept-server kept-config kept-domain restored cleaned; do
+        printf '# before %s\n' "$point" >> "$E/cfg/config"
+        printf '2\n' | DARBAN_TEST_RESTORE_STOP=after:$point bash "$E/manager.sh" restore "$E/backup.tar" --ca-fingerprint "$fp" >/dev/null 2>&1
+        rc_is "$point: stopped there" 99 "$?"
+        id=$(sed -n 's/^id=//p' "$E/varlib/restore.journal")
+        has "$point: Diagnostics say only the cleanup is left" 'its cleanup is unfinished' "$(mgr status)"
+        has "$point: the next resume finishes it" 'The restore is finished.' "$(restore_run --resume)"
+        has "$point: a second finds nothing to do" 'No restore is unfinished.' "$(restore_run --resume)"
+        dest=$E/pki-backups/pre-restore-$id
+        ok_if "$point: what it replaced is kept whole" test -s "$dest/pki/index.txt" -a -s "$dest/server/server.conf" -a -s "$dest/.restored"
+        grep -qx "# before $point" "$dest/darban/config"; rc_is "$point: the config it replaced is kept as it was" 0 "$?"
+        lacks "$point: and the restored one is in place" "# before $point" "$(cat "$E/cfg/config")"
+        ok_if "$point: OpenVPN runs, enabled at boot" unit_on
+        ok_if "$point: nothing is left beside the live folders" test ! -e "$PKI.pre-restore" -a ! -e "$E/server.pre-restore"
+    done
+}
+
+test_a_job_that_waited_on_the_real_lock_finds_the_journal() {
+    # R24-A-gap-2 and C.16.9, with the real lock: the CRL job and the daily backup start before a restore makes its
+    # journal, wait for the lock, and once the restore stops half way, as a crash would, change nothing.
+    local fp count before
+    backed_up_server
+    fp=$(ca_fp)
+    real_flock
+    before=$(sha256sum "$CRL")
+    paused_restore locked "$E/first.out" DARBAN_TEST_RESTORE_STOP=2
+    ( env PATH="$E/realflock:$PATH" bash "$E/crl-maintain" --renew >"$E/job.out" 2>&1; echo "$?" >"$E/job.out.rc" ) &
+    wait_for 'grep -q "waiting up to" "$E/job.out" 2>/dev/null'; rc_is 'the CRL job waits for the lock' 0 "$?"
+    rm -f "$E/paused"
+    wait
+    rc_is 'the restore stops half way' 99 "$(cat "$E/first.out.rc")"
+    rc_is 'the CRL job is refused' 1 "$(cat "$E/job.out.rc")"
+    has 'and says why' 'A restore is unfinished, so nothing is changed' "$(cat "$E/job.out")"
+    [[ $(sha256sum "$CRL") == "$before" ]]; rc_is 'and the CRL is untouched' 0 "$?"
+    has 'the restore is then finished' 'The restore is finished.' "$(restore_run --resume)"
+    mkdir -p "$E/varlib/clients"; printf 'first_seen=9\n' > "$E/varlib/clients/zz-new"
+    count=$(backups)
+    paused_restore locked "$E/first.out" DARBAN_TEST_RESTORE_STOP=2
+    ( env PATH="$E/realflock:$PATH" bash "$E/manager.sh" backup-auto daily >"$E/job.out" 2>&1; echo "$?" >"$E/job.out.rc" ) &
+    wait_for 'grep -q "waiting up to" "$E/job.out" 2>/dev/null'; rc_is 'the daily backup waits for the lock' 0 "$?"
+    rm -f "$E/paused"
+    wait
+    [[ $(backups) == "$count" ]]; rc_is 'and makes none' 0 "$?"
+    has 'it says why' 'A restore is unfinished, so nothing is changed' "$(cat "$E/job.out")"
+    has 'the restore is then finished' 'The restore is finished.' "$(restore_run --resume)"
+}
+
+test_a_restore_known_by_the_server_ca_only_still_checks_the_crl() {
+    # R24-A-gap-7 and C.16.1: when only the server's CA, or the CRL, shows the same CA, the CRL of that CA still names
+    # a revocation since the backup; without it, the restore says what cannot be known.
+    local fp out
+    backed_up_server
+    fp=$(ca_fp)
+    revoke_menu bob >/dev/null
+    openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes -keyout "$E/other-ca.key" -out "$PKI/ca.crt" \
+        -days 30 -subj /CN=other >/dev/null 2>&1
+    out=$(printf '2\n' | bash "$E/manager.sh" restore "$E/backup.tar" --ca-fingerprint "$fp" 2>&1); rc_is 'refused by the CRL of the same CA' 1 "$?"
+    has 'and it names the client' 'bob (serial ' "$out"
+    rm -f "$CRL"
+    out=$(printf 'wrong\n' | bash "$E/manager.sh" restore "$E/backup.tar" --ca-fingerprint "$fp" 2>&1)
+    has 'without the CRL it cannot know' 'Revocations and certificates issued after' "$out"
+    ok_if 'and a wrong name changes nothing' test ! -e "$E/varlib/restore.journal"
 }
 
 two_homes() {
