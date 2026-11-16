@@ -1026,12 +1026,14 @@ choose_profile_password() {
 # when it is shared again. A revocation also deletes every recorded copy that holds the revoked certificate, and the
 # file of that name in the home of the user set now when it holds it too. Nothing is deleted or written over unless,
 # at that moment, it is still the file this tool made: the same inode, size, change and modification time, and one
-# name. The SSH user receives private keys, so is trusted like the owner with these files: nothing here holds
+# name. A copy changed after it was made is kept, and so is its record, marked kept: Diagnostics name it, a
+# revocation still deletes it when it holds the revoked certificate, and the record goes once the file is gone.
+# The SSH user receives private keys, so is trusted like the owner with these files: nothing here holds
 # against a race by the owner of that home.
-HC_ENTRY='' HC_NAME='' HC_SERIAL='' HC_PATH='' HC_FILE='' HC_SHARE='' HC_USER='' HC_DONE='' HC_KEPT=''
+HC_ENTRY='' HC_NAME='' HC_SERIAL='' HC_PATH='' HC_FILE='' HC_SHARE='' HC_USER='' HC_KEPT_AT='' HC_DONE='' HC_KEPT=''
 # Writes the copy only through its folder, opened without following a link, and only as a new file: never over
-# anything already there, a link or another file of the same name included. Exit 3: no folder of that user's own;
-# exit 4: the name is taken.
+# anything already there, a link or another file of the same name included. What fails after the file was made
+# removes it. Exit 3: no folder of that user's own; exit 4: the name is taken.
 HOME_COPY_PY='
 import os, sys
 src, home, name, uid, gid = sys.argv[1], sys.argv[2], sys.argv[3], int(sys.argv[4]), int(sys.argv[5])
@@ -1052,9 +1054,19 @@ try:
         os.fchown(fd, uid, gid)
     os.fchmod(fd, 0o600)
     view = memoryview(data)
+    if os.environ.get("DARBAN_TEST_COPY_FAIL") == "write":
+        os.write(fd, view[:len(view) // 2])
+        raise OSError(28, "No space left on device, as the test asked")
     while view:
         view = view[os.write(fd, view):]
     os.fsync(fd)
+except BaseException:
+    # A copy only begun is no copy: it goes, so nothing half written stays in that home.
+    try:
+        os.unlink(name, dir_fd=folder)
+    except OSError:
+        pass
+    raise
 finally:
     os.close(fd)
 '
@@ -1075,12 +1087,12 @@ copy_holds() {
 home_copy_read() {
     # home_copy_read <entry>: one record of a copy into HC_*.
     local key value
-    HC_ENTRY=$1 HC_NAME='' HC_SERIAL='' HC_PATH='' HC_FILE='' HC_SHARE='' HC_USER=''
+    HC_ENTRY=$1 HC_NAME='' HC_SERIAL='' HC_PATH='' HC_FILE='' HC_SHARE='' HC_USER='' HC_KEPT_AT=''
     [[ -f $1 && ! -L $1 ]] || return 1
     while IFS='=' read -r key value; do
         case $key in
             name) HC_NAME=$value ;; serial) HC_SERIAL=$value ;; path) HC_PATH=$value ;;
-            file) HC_FILE=$value ;; share) HC_SHARE=$value ;; user) HC_USER=$value ;;
+            file) HC_FILE=$value ;; share) HC_SHARE=$value ;; user) HC_USER=$value ;; kept) HC_KEPT_AT=$value ;;
         esac
     done <"$1" || return 1
     valid_existing_name "$HC_NAME" && [[ $HC_PATH == /* && $HC_FILE =~ ^[0-9]+:[0-9]+:[0-9]+:[0-9]+$ && $HC_SHARE =~ ^[0-9a-f]{16}$ ]]
@@ -1103,8 +1115,9 @@ home_copy_record() {
 }
 home_copy_drop() {
     # home_copy_drop <entry> <why> [revoked serial]: under the CA lock. The copy goes only when it is, now, the file
-    # this tool made, or, with a revoked serial, one that holds that certificate. Anything else at that path stays,
-    # and is named in HC_KEPT. The record goes either way: what it described is gone.
+    # this tool made, or, with a revoked serial, one that holds that certificate; then its record goes too. Anything
+    # else at that path stays, and so does the record, marked kept, so the copy is still known and named in
+    # Diagnostics. A record whose path is empty goes.
     if ! home_copy_read "$1"; then rm -f -- "$1"; return 0; fi
     # For the tests only: what another program could do between the question and the deletion.
     if [[ -n ${DARBAN_TEST_HOME_COPY_HOOK:-} ]]; then bash -c "$DARBAN_TEST_HOME_COPY_HOOK" _ "$HC_PATH" >/dev/null 2>&1 || true; fi
@@ -1113,8 +1126,12 @@ home_copy_drop() {
         HC_DONE+="${HC_DONE:+$'\n'}$HC_PATH"
         audit "profile deleted from server: $HC_PATH, $2"
     elif [[ -e $HC_PATH || -L $HC_PATH ]]; then
-        HC_KEPT+="${HC_KEPT:+$'\n'}$HC_PATH"
-        audit "copy kept, it changed since this tool made it: $HC_PATH, $2"
+        if [[ -z $HC_KEPT_AT ]]; then
+            printf 'kept=%s\n' "$(date -u +%s)" >>"$1" || return 1
+            HC_KEPT+="${HC_KEPT:+$'\n'}$HC_PATH"
+            audit "copy kept, it changed since this tool made it: $HC_PATH, $2"
+        fi
+        return 0
     fi
     rm -f -- "$1"
 }
@@ -1123,7 +1140,7 @@ home_copy_end_share() {
     local entry rc=0
     [[ -n $1 ]] || return 0
     while IFS= read -r entry; do
-        home_copy_read "$entry" && [[ $HC_SHARE == "$1" ]] || continue
+        home_copy_read "$entry" && [[ $HC_SHARE == "$1" && -z $HC_KEPT_AT ]] || continue
         home_copy_drop "$entry" "$2" || rc=1
     done < <(home_copy_entries)
     return "$rc"
@@ -1167,16 +1184,26 @@ home_copy_sweep() {
     while IFS= read -r entry; do
         if ! home_copy_read "$entry"; then rm -f -- "$entry"; continue; fi
         if [[ ! -e $HC_PATH && ! -L $HC_PATH ]]; then rm -f -- "$entry"; continue; fi
+        # A kept copy stays known until it is gone.
+        [[ -z $HC_KEPT_AT ]] || continue
         if share_record_read "$OUT_DIR/$HC_NAME.ovpn" && [[ $SR_ID == "$HC_SHARE" ]]; then continue; fi
         home_copy_drop "$entry" 'its share ended' || true
     done < <(home_copy_entries)
     find "$OUT_DIR" -maxdepth 1 -name '.homecopy-new.*' -mmin +10 -delete 2>/dev/null || true
 }
+home_copy_health() {
+    # The Diagnostics lines for copies this tool made and kept, since they changed after they were made.
+    local entry
+    while IFS= read -r entry; do
+        home_copy_read "$entry" && [[ -n $HC_KEPT_AT ]] && [[ -e $HC_PATH || -L $HC_PATH ]] || continue
+        check warn "$(safe_text "$HC_PATH"), a copy of $(safe_text "$HC_NAME") this tool made for $(safe_text "${HC_USER:-the SSH user}"), changed after it was made, so it was kept. Delete it if it is no longer needed; this tool then forgets it"
+    done < <(home_copy_entries)
+}
 home_copy_report() {
     # What the last drops did, said to the person at the terminal.
     local path
     while IFS= read -r path; do [[ -z $path ]] || ok "Copy for $DOWNLOAD_SSH_USER deleted: $path"; done <<<"$HC_DONE"
-    while IFS= read -r path; do [[ -z $path ]] || warn "$path changed since this tool made it, so it was kept. Delete it yourself if it is still a profile."; done <<<"$HC_KEPT"
+    while IFS= read -r path; do [[ -z $path ]] || warn "$path changed since this tool made it, so it was kept. Diagnostics name it until it is deleted."; done <<<"$HC_KEPT"
     HC_DONE='' HC_KEPT=''
 }
 prepare_download_copy() {
@@ -2325,6 +2352,12 @@ share_rows() {
     while IFS= read -r entry; do
         home_copy_read "$entry" && [[ -e $HC_PATH ]] || continue
         recorded[$HC_PATH]=1
+        if [[ -n $HC_KEPT_AT ]]; then
+            # Changed since it was made: only a certificate of this CA for that name makes it a share.
+            state=$(share_state "$HC_PATH" "$HC_NAME")
+            if [[ $state != unknown ]]; then printf '%s\tcopy\t%s\t%s\n' "$state" "$HC_NAME" "$entry"; fi
+            continue
+        fi
         if [[ -n $HC_SERIAL ]] && state=$(index_state_of_serial "$HC_SERIAL"); then
             if [[ $state == R ]]; then state=revoked; else state=current; fi
         else
@@ -2378,13 +2411,16 @@ revoked_share_names() {
 }
 drop_share() {
     # drop_share <kind> <file>: a link goes with all its files, under the lock the link service takes too.
+    local serial
     if [[ $1 == link ]]; then
         links_locked rm -f -- "$2" "${2%.meta}.ovpn" "${2%.meta}.url" "${2%.meta}.tmp"
     elif [[ $1 == server ]]; then
         rm -f -- "$2" "${2%.ovpn}.share"
     elif [[ $1 == copy ]]; then
         home_copy_read "$2" || { rm -f -- "$2"; return 0; }
-        home_copy_drop "$2" 'its certificate is revoked' "$HC_SERIAL"
+        serial=$HC_SERIAL
+        if [[ -n $HC_KEPT_AT ]]; then serial=$(share_serial "$HC_PATH" "$HC_NAME") || serial=''; fi
+        home_copy_drop "$2" 'its certificate is revoked' "$serial"
     else
         rm -f -- "$2"
     fi
@@ -4652,6 +4688,7 @@ health() {
         check bad "Server address not set $S_ARROW Settings $S_CRUMB 1"
     fi
     if [[ -n $DOWNLOAD_SSH_HOST ]]; then check ok "Download endpoint $DOWNLOAD_SSH_USER@$DOWNLOAD_SSH_HOST:$DOWNLOAD_SSH_PORT"; fi
+    home_copy_health
     for issue in "${CONFIG_ISSUES[@]}"; do check warn "$issue"; done
     exports=$(find "$OUT_DIR" -maxdepth 1 -type f -name '*.ovpn' 2>/dev/null | wc -l)
     if (( exports > 0 )); then

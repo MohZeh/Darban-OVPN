@@ -587,6 +587,22 @@ if [[ -n ${SUDO_USER:-} && $SUDO_USER != root ]]; then
     echo 'PASS: menu 6 says a kept file was read once its copy was read, and claims nothing without access times.'
 fi
 
+# R24-B04: an SSH user whose home is not its own gets no copy there, as root, with the real owner checked.
+if [[ -n ${SUDO_USER:-} && $SUDO_USER != root ]]; then
+    useradd -M -d /home/darban-other -s /usr/sbin/nologin darban-other
+    install -d -o root -g root -m 755 /home/darban-other
+    cp /etc/darban/config "$LOG/config.saved"
+    sed -i '/^DOWNLOAD_SSH_USER=/d' /etc/darban/config
+    echo 'DOWNLOAD_SSH_USER=darban-other' >>/etc/darban/config
+    printf '5\nkept2\n2\n0\n' | darban >"$LOG/other-home.log" 2>&1 || true
+    grep 'is a link or not its own, so no copy was made' "$LOG/other-home.log" >/dev/null
+    if compgen -G '/home/darban-other/*.ovpn' >/dev/null; then echo 'FAIL: a copy was made in a home its user does not own.'; exit 1; fi
+    cp "$LOG/config.saved" /etc/darban/config
+    userdel darban-other
+    rm -rf /home/darban-other
+    echo 'PASS: an SSH user whose home is not its own gets no copy there.'
+fi
+
 # T56, C.11 and E13 in part: only with the flag does a profile name its share; a real OpenVPN 2.6 client then sends
 # it, and the server gets it: a connection naming another share leaves the file, and one naming its own deletes it.
 echo 'SHARE_ID_IN_PROFILE=yes' >>/etc/darban/config
