@@ -5489,9 +5489,12 @@ test_a_rollback_that_cannot_put_settings_or_records_back_keeps_its_journal() {
     (cd "$E" && opened_backup "$E/backup.tar")
     rm -f "$E/varlib/clients/carol"
     printf '2\n' | DARBAN_TEST_RESTORE_STOP=after:started bash "$E/manager.sh" restore "$E/backup.tar" --ca-fingerprint "$fp" >/dev/null 2>&1
-    chmod 555 "$E/cfg" "$E/varlib/clients"
+    # The settings cannot be moved back, and the client record cannot be taken away.
+    printf '#!/usr/bin/env bash\nif [[ " $* " == *"config.pre-restore "* ]]; then exit 1; fi\nexec /usr/bin/mv "$@"\n' > "$E/bin/mv"; chmod +x "$E/bin/mv"
+    chmod 555 "$E/varlib/clients"
     out=$(restore_run --rollback); rc_is 'settings and a client record that cannot be put back' 1 "$?"
-    chmod 755 "$E/cfg" "$E/varlib/clients"
+    rm -f "$E/bin/mv"
+    chmod 755 "$E/varlib/clients"
     has 'the settings are named' "$E/cfg/config" "$out"
     has 'and the client record' "$E/varlib/clients/carol" "$out"
     lacks 'and nothing is called undone' 'The restore was undone' "$out"
