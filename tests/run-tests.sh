@@ -4956,7 +4956,11 @@ test_a_restore_with_a_crl_missing_unreadable_or_expired() {
     local fp kind out
     backed_up_server
     fp=$(ca_fp)
-    (cd "$PKI" && openssl ca -batch -config openssl.cnf -gencrl -crlsec 1 -out "$E/short-crl.pem" 2>/dev/null)
+    # A CRL of this CA that has just expired, from a config of its own: the real Easy-RSA keeps no openssl.cnf.
+    printf '[ca]\ndefault_ca = d\n[d]\ndatabase = %s/index.txt\ncertificate = %s/ca.crt\nprivate_key = %s/private/ca.key\ndefault_md = sha256\n' \
+        "$PKI" "$PKI" "$PKI" > "$E/short-crl.cnf"
+    openssl ca -batch -config "$E/short-crl.cnf" -gencrl -crlsec 1 -out "$E/short-crl.pem" 2>/dev/null
+    ok_if 'an expired CRL of this CA is made for the test' test -s "$E/short-crl.pem"
     sleep 2
     for kind in nocrl:'The backup has no CRL' badcrl:'cannot be read' crl:'has expired'; do
         craft "$E/backup.tar" "$E/crl.tar" "${kind%%:*}" "$E/short-crl.pem"
