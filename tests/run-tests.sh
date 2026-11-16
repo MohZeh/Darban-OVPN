@@ -5584,7 +5584,7 @@ test_a_copy_that_could_not_be_written_leaves_nothing() {
     local out
     two_homes
     ssh_user ali
-    out=$(DARBAN_TEST_COPY_FAIL=write keep_file alice)
+    out=$(export DARBAN_TEST_COPY_FAIL=write; keep_file alice)
     has 'it says so' 'Could not make a copy for ali' "$out"
     ok_if 'and nothing half written stays' test -z "$(compgen -G "$E/home/ali/alice*.ovpn")"
     [[ $(copies) == 0 ]]; rc_is 'nor a record' 0 "$?"
