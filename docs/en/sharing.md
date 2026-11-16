@@ -12,7 +12,7 @@ A profile (`.ovpn` file) holds a private key: whoever has it can connect as that
 ## Temporary link
 
 1. Choose **Temporary link**.
-2. The link works for at most the time set in **Settings › Link lifetime**: 24 hours, unless you set another whole number of hours from 1 to 72. If the link's certificate ends sooner, the link gets the whole hours the certificate has left, and the tool says so.
+2. The link works for at most the time set in **Settings › Shares expire after**: 24 hours, unless you set another whole number of hours from 1 to 72. If the link's certificate ends sooner, the link gets the whole hours the certificate has left, and the tool says so.
 3. Open the TCP port the tool shows in your provider's firewall.
 4. Send what the tool shows under **Send this to the person**: the link, and the password and the note when there are any. Enter copies them all; see [Copying what you send](#copying-what-you-send).
 
@@ -49,7 +49,9 @@ Use this when a link cannot be used, for example when your provider does not let
 
 1. Choose **Keep it on the server**.
 2. The tool asks which computer will download it: Windows, macOS or Linux, or an SFTP app such as WinSCP or FileZilla. It shows only that command or address, and offers to copy it, as in [Copying what you send](#copying-what-you-send). Run it now or later; menu 6 shows the commands again.
-3. After downloading, delete the server copy from menu `6`.
+3. The file goes by the same rule as a link: when its time in **Settings › Shares expire after** is up, or once the server sees a connection with this profile, whichever comes first. At its time it is deleted within a few seconds as a rule, and at the latest by the next five-minute check. To delete it sooner, use menu `6`.
+
+Menu `6` shows how long each file has left, and **file read** once the file the command fetches was read after it was made. Darban cannot tell by whom; it is a hint, and never a reason to delete. It is not shown on a file system mounted with `noatime`, where reads leave no trace, or before the copy for a user other than `root` is made. A file kept from a version before `v1.0.0` gets the whole time from the first check after the update.
 
 This way asks for no password: the file comes to you over SSH, which already checks that it is your server.
 

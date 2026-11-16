@@ -16,13 +16,15 @@ DARBAN_TMP_FILES=()
 DARBAN_ALLOW_CRL_SHRINK=0
 
 # The units of connection events, in the order they stop: the watchers, the jobs, then the queue and its tmpfs.
-DARBAN_EVENT_UNITS='darban-events.path darban-sweep.timer darban-events.service darban-sweep.service darban-events-setup.service run-darban\x2devents.mount'
+# darban-expire.service is started only by darban-expire.timer, a timer the tool sets itself, which has no file.
+DARBAN_EVENT_UNITS='darban-events.path darban-sweep.timer darban-events.service darban-sweep.service darban-expire.service darban-events-setup.service run-darban\x2devents.mount'
 darban_error() { printf 'ERROR: %s\n' "$*" >&2 || true; }
 darban_events_units_remove() {
-    # darban_events_units_remove <unit folder>: stops and removes the units of connection events and their queue.
-    # The script and its lines in server.conf stay: without its queue the script writes nothing, and connections
-    # go on as before.
+    # darban_events_units_remove <unit folder>: stops and removes the units of connection events and their queue,
+    # the timer for the next kept file first. The script and its lines in server.conf stay: without its queue the
+    # script writes nothing, and connections go on as before.
     local unit
+    systemctl stop darban-expire.timer >/dev/null 2>&1 || true
     for unit in $DARBAN_EVENT_UNITS; do systemctl disable --now "$unit" >/dev/null 2>&1 || true; done
     for unit in $DARBAN_EVENT_UNITS; do rm -f -- "$1/$unit"; done
     systemctl daemon-reload >/dev/null 2>&1 || true

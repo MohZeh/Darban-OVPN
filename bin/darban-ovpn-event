@@ -30,6 +30,9 @@ us=${EPOCHREALTIME//[!0-9]/}
 [[ $us =~ ^[0-9]{16}$ ]] || exit 0
 serial=${tls_serial_hex_0-}
 [[ $serial =~ ^[0-9A-Fa-f:]{1,64}$ ]] || serial=-
+# Which share the profile came from, when it says so; the client sets it, so it can only narrow what ends.
+share=''
+if [[ $kind == connect && ${UV_DARBAN_SHARE-} =~ ^[0-9a-f]{16}$ ]]; then share=" $UV_DARBAN_SHARE"; fi
 rx=- tx=- duration=- start=-
 if [[ $kind == disconnect ]]; then
     [[ ${bytes_received-} =~ ^[0-9]{1,20}$ ]] && rx=$bytes_received
@@ -43,7 +46,7 @@ pending=("$queue"/new/*)
 (( ${#pending[@]} < 1000 )) || exit 0
 id=$boot-$cs-$$-$RANDOM
 set -C
-printf 'darban-event 1 %s %s %s %s %s %s %s %s %s %s %s\n' "$kind" "$cn" "$boot" "$cs" "$us" "$ip" "$serial" "$rx" "$tx" "$duration" "$start" \
+printf 'darban-event 1 %s %s %s %s %s %s %s %s %s %s %s%s\n' "$kind" "$cn" "$boot" "$cs" "$us" "$ip" "$serial" "$rx" "$tx" "$duration" "$start" "$share" \
     2>/dev/null >"$queue/tmp/$id" || exit 0
 mv -n -- "$queue/tmp/$id" "$queue/new/$id" 2>/dev/null
 exit 0

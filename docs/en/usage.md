@@ -51,7 +51,7 @@ Revoking also ends the open links of that client and deletes the copies of its p
 
 ## See a link again, cancel it, or delete a file left on the server
 
-Press `6` **Links and files**. It lists the open links, with the time left and whether the file was downloaded, and then the profile files kept on the server. Choose one, and the tool shows what you can do with it:
+Press `6` **Links and files**. It lists the open links, with the time left and whether the file was downloaded, and then the profile files kept on the server, with the time left and whether the file was read. Choose one, and the tool shows what you can do with it:
 
 - **A link:** show it again and copy it, if you lost it, or cancel it. A link made before `v1.0.0-rc.8` cannot be shown again.
 - **A file:** show the download commands again and copy one, or delete the file after you confirm.
@@ -67,7 +67,7 @@ Open **7 Settings**:
 
 After changing either one, send the profiles again, because each profile holds the address it was made with. A new port must also be open in your provider's firewall.
 
-The same menu holds the link settings: `3` **Link lifetime**, `4` **Link port** and `5` **Link certificate**. `6` **Advanced** holds the VPN settings; see [Advanced settings](advanced.md#advanced-settings).
+The same menu holds the sharing settings: `3` **Shares expire after**, for links and files kept on the server, `4` **Link port** and `5` **Link certificate**. `6` **Advanced** holds the VPN settings; see [Advanced settings](advanced.md#advanced-settings).
 
 ## Update the tool
 

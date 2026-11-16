@@ -65,8 +65,12 @@ DOWNLOAD_SSH_USER=root
 CLIENT_CERT_DAYS=''
 # TCP port of temporary links; empty means the first free one is chosen when it is first needed.
 LINK_PORT=''
-# Hours a temporary link works at most; empty means 24.
+# Hours a link, or a file kept on the server, lasts at most; empty means 24. The name stays from when it was for
+# links only.
 LINK_HOURS=''
+# Whether a new profile carries the identity of its share, so a connection with another copy of the same client
+# does not end it. Off until OpenVPN Connect on every platform is shown to import such a profile.
+SHARE_ID_IN_PROFILE=no
 # The menu looks for a new release when it starts, at most once an hour; no turns that off.
 UPDATE_CHECK=yes
 CONFIG_ISSUES=()
@@ -170,7 +174,7 @@ load_config() {
     # The defaults first: the menu reads the file again after each action, and a setting returned to its
     # default has no line left in the file.
     DOWNLOAD_SSH_HOST='' DOWNLOAD_SSH_PORT=22 DOWNLOAD_SSH_USER=root CLIENT_CERT_DAYS='' LINK_PORT='' LINK_HOURS=''
-    UPDATE_CHECK=yes
+    UPDATE_CHECK=yes SHARE_ID_IN_PROFILE=no
     CONFIG_ISSUES=()
     [[ -f $CONFIG_FILE ]] || { CONFIG_ISSUES+=("$CONFIG_FILE is missing; download commands are disabled."); return 0; }
     # Parsed as data, never sourced.
@@ -184,6 +188,7 @@ load_config() {
             LINK_PORT) LINK_PORT=$value ;;
             LINK_HOURS) LINK_HOURS=$value ;;
             UPDATE_CHECK) UPDATE_CHECK=$value ;;
+            SHARE_ID_IN_PROFILE) SHARE_ID_IN_PROFILE=$value ;;
             *) CONFIG_ISSUES+=("Unknown setting ignored in $CONFIG_FILE: $key") ;;
         esac
     done <"$CONFIG_FILE"
@@ -206,9 +211,12 @@ load_config() {
         CONFIG_ISSUES+=("Invalid LINK_PORT in $CONFIG_FILE; choosing a free port."); LINK_PORT=''
     fi
     if [[ -n $LINK_HOURS ]] && ! valid_link_hours "$LINK_HOURS"; then
-        CONFIG_ISSUES+=("Invalid LINK_HOURS in $CONFIG_FILE; links work for 24 hours."); LINK_HOURS=''
+        CONFIG_ISSUES+=("Invalid LINK_HOURS in $CONFIG_FILE; shares expire after 24 hours."); LINK_HOURS=''
     fi
     if [[ -n $LINK_HOURS ]]; then LINK_HOURS=$((10#$LINK_HOURS)); fi
+    if [[ $SHARE_ID_IN_PROFILE != yes && $SHARE_ID_IN_PROFILE != no ]]; then
+        CONFIG_ISSUES+=("Invalid SHARE_ID_IN_PROFILE in $CONFIG_FILE; using no."); SHARE_ID_IN_PROFILE=no
+    fi
     if [[ -z $DOWNLOAD_SSH_HOST ]] && (( ${#CONFIG_ISSUES[@]} == 0 )); then
         CONFIG_ISSUES+=("DOWNLOAD_SSH_HOST is not set in $CONFIG_FILE; download commands are disabled.")
     fi
@@ -485,7 +493,7 @@ pick_client() {
 # ---------- profiles and downloads ----------
 assemble_profile() {
     # Every step is checked explicitly: callers use this from an if, where errexit does not apply.
-    local name=$1 host=$2 port=$3 ciphers=$4
+    local name=$1 host=$2 port=$3 ciphers=$4 share=${5:-}
     cat <<EOF || return 1
 client
 dev tun
@@ -501,6 +509,11 @@ persist-tun
 verb 3
 # The name OpenVPN Connect shows for this profile, instead of the server address. Other clients ignore it.
 setenv FRIENDLY_NAME "$name"
+EOF
+    # Which share this copy is, sent to the server at each connection: a connection of another copy of the same
+    # client then leaves this one. Only with SHARE_ID_IN_PROFILE=yes.
+    if [[ -n $share ]]; then printf 'setenv UV_DARBAN_SHARE %s\npush-peer-info\n' "$share" || return 1; fi
+    cat <<EOF || return 1
 
 <ca>
 EOF
@@ -525,7 +538,9 @@ profile_complete() {
                     c["</ca>"]==1 && c["</cert>"]==1 && c["</key>"]==1 && c["</tls-crypt>"]==1)}' "$1"
 }
 write_profile() {
-    local name=$1 replace=${2:-no} host port ciphers outfile tmp
+    # write_profile <name> [replace]: under the CA lock. The file is a new share, kept on the server until its time
+    # is up or the client connects, and its record says so.
+    local name=$1 replace=${2:-no} host port ciphers outfile tmp share serial uv=''
     client_valid "$name" || { warn 'The client certificate/key is missing, expired, server-capable or does not match.'; return 1; }
     profile_preconditions || return 1
     host=$(domain)
@@ -533,13 +548,21 @@ write_profile() {
     ciphers=$(server_data_ciphers) || return 1
     outfile="$OUT_DIR/$name.ovpn"
     if [[ -e $outfile && $replace != yes ]]; then warn "Profile exists and will not be replaced: $outfile"; return 1; fi
+    share=$(openssl rand -hex 8) || return 1
+    serial=$(openssl x509 -in "$DARBAN_PKI/issued/$name.crt" -noout -serial 2>/dev/null | sed 's/^serial=//')
+    serial=$(darban_norm_serial "$serial") || serial=''
+    if [[ $SHARE_ID_IN_PROFILE == yes ]]; then uv=$share; fi
     tmp=$(mktemp "$OUT_DIR/.profile.XXXXXXXX") || return 1
     darban_tmp_register "$tmp"
-    if ! assemble_profile "$name" "$host" "$port" "$ciphers" >"$tmp" || ! profile_complete "$tmp"; then
+    if ! assemble_profile "$name" "$host" "$port" "$ciphers" "$uv" >"$tmp" || ! profile_complete "$tmp"; then
         rm -f -- "$tmp"; warn 'Could not assemble profile.'; return 1
     fi
     chmod 600 "$tmp" || return 1
+    # The old record goes first: for a moment the file has none, which can only make it last longer.
+    rm -f -- "$OUT_DIR/$name.share"
     if ! mv -f -- "$tmp" "$outfile"; then rm -f -- "$tmp"; return 1; fi
+    share_record_write "$name" "$share" "$serial" "remote $host $port" || { warn "Could not record when $outfile is deleted; the five-minute check gives it $(hours_label "$(link_hours)")."; return 0; }
+    expire_schedule || warn "The timer that deletes $outfile on time could not be set; the five-minute check deletes it once its time is up."
 }
 security_note() {
     printf '%s%s This file contains a private key; do not share or publish it.%s\n' "$C_YELLOW" "$S_WARN" "$C_RESET" || true
@@ -552,7 +575,8 @@ download_panel() {
     name=${filename%.ovpn}
     ok "$title"
     hr
-    current_remote=$(grep -m1 '^remote ' "$file" || true)
+    # From the record of the file, so the file itself is never read again: a read is what "file read" shows.
+    if share_record_read "$file"; then current_remote=$SR_REMOTE; else current_remote=$(grep -m1 '^remote ' "$file" || true); fi
     kv File "$fetch"
     if [[ -n $current_remote ]]; then
         kv Server "$(awk '{print $2 ":" $3 "/UDP"}' <<<"$current_remote")"
@@ -850,7 +874,7 @@ share_client() {
     choose_one "How will $name get this profile?" \
         'Temporary link: send it to the user' \
         'Keep it on the server: download it with scp or sftp' || {
-        info "Kept on the server: $OUT_DIR/$name.ovpn. Share it from menu 5, or delete it from menu 6."
+        info "Kept on the server: $OUT_DIR/$name.ovpn. $(kept_until "$name") Share it from menu 5, or delete it from menu 6."
         return 0
     }
     method=$CHOSEN
@@ -969,6 +993,8 @@ prepare_download_copy() {
     fi
     if install -o "$DOWNLOAD_SSH_USER" -m 600 "$file" "$home/${file##*/}"; then
         DOWNLOAD_FILE=$home/${file##*/}
+        # The record names the copy, so it is found, and deleted with the file, without being read.
+        share_record_set "$file" home "$DOWNLOAD_FILE" home_file "$(file_id "$DOWNLOAD_FILE")" || true
     else
         warn "Could not make a copy for $DOWNLOAD_SSH_USER, which cannot read $file."
     fi
@@ -981,6 +1007,10 @@ home_copy_of() {
     home=$(getent passwd "$DOWNLOAD_SSH_USER" 2>/dev/null | cut -d: -f6) || return 1
     copy=$home/$name.ovpn
     [[ -n $home && -f $copy && ! -L $copy ]] || return 1
+    # The copy the record names, unchanged since: known without reading it.
+    if share_record_read "$OUT_DIR/$name.ovpn" && [[ $SR_HOME == "$copy" && -n $SR_HOME_FILE && $SR_HOME_FILE == "$(file_id "$copy")" ]]; then
+        printf '%s\n' "$copy"; return 0
+    fi
     want=$(openssl x509 -in "$DARBAN_PKI/issued/$name.crt" -noout -fingerprint -sha256 2>/dev/null) || return 1
     got=$(sed -n '/^<cert>$/,/^<\/cert>$/p' "$copy" | sed '1d;$d' | openssl x509 -noout -fingerprint -sha256 2>/dev/null) || return 1
     [[ -n $want && $want == "$got" ]] || return 1
@@ -997,7 +1027,9 @@ share_by_download() {
     local name=$1 file only=all
     local -a kinds=(windows unix sftp)
     file=$OUT_DIR/$name.ovpn
+    ca_lock || return 1
     prepare_download_copy "$file"
+    ca_unlock
     if (( UI_TTY )) && [[ -n $DOWNLOAD_SSH_HOST ]]; then
         info "Kept on the server: $file."
         choose_one 'Which computer will download it?' 'Windows' 'macOS or Linux' 'An SFTP app (WinSCP, FileZilla, Termius)' || {
@@ -1007,7 +1039,7 @@ share_by_download() {
         only=${kinds[CHOSEN - 1]}
     fi
     download_panel "$file" "Profile for \"$name\" rebuilt" "$only"
-    info "Kept on the server: $file. After downloading it, delete it from menu 6."
+    info "Kept on the server: $file. $(kept_until "$name")"
     [[ -n $DOWNLOAD_SSH_HOST && $only != all ]] || return 0
     offer_copy 'the command' '' 'Copy the command' "$(download_command "$only" "$file")"
 }
@@ -1927,8 +1959,126 @@ drop_links_of() {
 }
 
 # ---------- shares: the copies of a profile this tool keeps ----------
+# A file kept on the server, $OUT_DIR/<name>.ovpn, has a record beside it, <name>.share, written with the file: the
+# share's own identity, when it was made by both clocks, when it expires, the certificate it holds, where it points,
+# and the copy made for the SSH user. With it the tool never reads the file again, since a read is what "file read"
+# shows. A record that no longer describes its file, because something else wrote the file, does not count.
+SR_ID='' SR_SERIAL='' SR_CREATED='' SR_BOOT='' SR_CS='' SR_US='' SR_EXPIRES='' SR_REMOTE='' SR_FILE='' SR_HOME='' SR_HOME_FILE=''
+file_id() { stat -c '%i:%Y:%s' -- "$1" 2>/dev/null; }
+share_record_read() {
+    # share_record_read <profile>: the record of a kept file into SR_*, when it describes that very file.
+    local record=${1%.ovpn}.share key value
+    SR_ID='' SR_SERIAL='' SR_CREATED='' SR_BOOT='' SR_CS='' SR_US='' SR_EXPIRES='' SR_REMOTE='' SR_FILE='' SR_HOME='' SR_HOME_FILE=''
+    [[ -f $record && ! -L $record && -f $1 && ! -L $1 ]] || return 1
+    while IFS='=' read -r key value; do
+        case $key in
+            share_id) SR_ID=$value ;; serial) SR_SERIAL=$value ;; created) SR_CREATED=$value ;; created_boot) SR_BOOT=$value ;;
+            created_cs) SR_CS=$value ;; created_us) SR_US=$value ;; expires) SR_EXPIRES=$value ;; remote) SR_REMOTE=$value ;;
+            file) SR_FILE=$value ;; home) SR_HOME=$value ;; home_file) SR_HOME_FILE=$value ;;
+        esac
+    done <"$record" || return 1
+    [[ $SR_ID =~ ^[0-9a-f]{16}$ && $SR_CREATED =~ ^[0-9]{1,12}$ && $SR_EXPIRES =~ ^[0-9]{1,12}$ ]] || return 1
+    [[ $SR_SERIAL =~ ^[0-9A-F]+$ ]] || SR_SERIAL=''
+    [[ -n $SR_FILE && $SR_FILE == "$(file_id "$1")" ]]
+}
+share_record_write() {
+    # share_record_write <name> <share id> <serial or ''> <remote line> [expires]: under the CA lock, once the file
+    # is in place. Without [expires], the share lasts the hours of Settings from now.
+    local name=$1 file=$OUT_DIR/$1.ovpn temp now expires boot cs us id
+    now=$(date -u +%s)
+    expires=${5:-$(( now + $(link_hours) * 3600 ))}
+    id=$(file_id "$file") || return 1
+    read -r boot </proc/sys/kernel/random/boot_id || boot=''
+    cs=$(uptime_cs) || cs=''
+    us=${EPOCHREALTIME//[!0-9]/}
+    temp=$(mktemp "$OUT_DIR/.share.XXXXXXXX") || return 1
+    darban_tmp_register "$temp"
+    if ! {
+        printf 'share_id=%s\nname=%s\nserial=%s\ncreated=%s\nexpires=%s\nremote=%s\nfile=%s\n' "$2" "$name" "$3" "$now" "$expires" "$4" "$id"
+        if [[ $boot =~ ^[0-9a-f-]{36}$ && $cs =~ ^[0-9]+$ && $us =~ ^[0-9]{16}$ ]]; then
+            printf 'created_boot=%s\ncreated_cs=%s\ncreated_us=%s\n' "$boot" "$cs" "$us"
+        fi
+    } >"$temp" || ! chmod 600 "$temp" || ! mv -f -- "$temp" "$OUT_DIR/$name.share"; then
+        rm -f -- "$temp"
+        return 1
+    fi
+}
+share_record_set() {
+    # share_record_set <profile> <key> <value> [<key> <value>]...: changes fields of a record that still describes
+    # its file, under the CA lock.
+    local file=$1 record=${1%.ovpn}.share temp keys=' ' i
+    shift
+    share_record_read "$file" || return 1
+    for (( i = 1; i <= $#; i += 2 )); do keys+="${!i} "; done
+    temp=$(mktemp "$OUT_DIR/.share.XXXXXXXX") || return 1
+    darban_tmp_register "$temp"
+    if ! awk -F= -v keys="$keys" 'index(keys, " " $1 " ") == 0' "$record" >"$temp"; then rm -f -- "$temp"; return 1; fi
+    while (( $# >= 2 )); do printf '%s=%s\n' "$1" "$2" >>"$temp" || { rm -f -- "$temp"; return 1; }; shift 2; done
+    chmod 600 "$temp" && mv -f -- "$temp" "$record" || { rm -f -- "$temp"; return 1; }
+}
+time_left() {
+    # time_left <expires> <now>: "23 h 5 min", "40 min".
+    local minutes=$(( ($1 - $2 + 59) / 60 )) left
+    (( minutes > 0 )) || minutes=0
+    left="$minutes min"
+    if (( minutes >= 60 )); then left="$(( minutes / 60 )) h"; fi
+    if (( minutes >= 60 && minutes % 60 )); then left+=" $(( minutes % 60 )) min"; fi
+    printf '%s' "$left"
+}
+kept_until() {
+    # kept_until <name>: one sentence on when the kept file of <name> goes.
+    if share_record_read "$OUT_DIR/$1.ovpn"; then
+        printf 'It is deleted in %s, or when %s connects.' "$(time_left "$SR_EXPIRES" "$(date -u +%s)")" "$1"
+    else
+        printf 'It is deleted in %s, or when %s connects.' "$(hours_label "$(link_hours)")" "$1"
+    fi
+}
+kept_read_label() {
+    # kept_read_label <name>: "file read" when the file the download command fetches was read after it was made,
+    # "not read yet" when it was not, and nothing when that cannot be told: no record, no copy made for the SSH
+    # user yet, or a file system mounted without access times. A read in the second the file was made is not
+    # seen. Never a reason to delete.
+    local target=$OUT_DIR/$1.ovpn times atime mtime options
+    share_record_read "$target" || return 0
+    if [[ $DOWNLOAD_SSH_USER != root ]]; then
+        [[ -n $SR_HOME && -f $SR_HOME && ! -L $SR_HOME && $SR_HOME_FILE == "$(file_id "$SR_HOME")" ]] || return 0
+        target=$SR_HOME
+    fi
+    options=$(findmnt -n -o OPTIONS -T "$target" 2>/dev/null) || return 0
+    [[ ,$options, != *,noatime,* ]] || return 0
+    times=$(stat -c '%X %Y' -- "$target" 2>/dev/null) || return 0
+    read -r atime mtime <<<"$times"
+    [[ $atime =~ ^[0-9]+$ && $mtime =~ ^[0-9]+$ ]] || return 0
+    if (( atime > mtime && atime > SR_CREATED )); then printf 'file read'; else printf 'not read yet'; fi
+}
+kept_file_drop() {
+    # kept_file_drop <name> <why>: the kept file, its record and the copy made for the SSH user, under the CA lock.
+    local name=$1 file=$OUT_DIR/$1.ovpn copy
+    copy=$(home_copy_of "$name") || copy=''
+    rm -f -- "$file" "$OUT_DIR/$name.share" || return 1
+    audit "profile deleted from server: $file, $2"
+    if [[ -n $copy ]] && rm -f -- "$copy"; then audit "profile deleted from server: $copy, $2"; fi
+}
+expire_schedule() {
+    # One timer, darban-expire.timer, for the earliest time a kept file is due, under the CA lock. It only starts
+    # the same check as the five-minute timer, which reads every time from the records themselves, so a timer left
+    # from a file that went early never deletes a newer one. Returns 1 when the timer could not be set.
+    local earliest='' now
+    [[ -e $UNIT_DIR/darban-expire.service ]] || return 0
+    # One pass over every record. One left without its file only starts a check early, which removes it.
+    if compgen -G "$OUT_DIR/*.share" >/dev/null; then
+        earliest=$(awk -F= '$1=="expires" && $2 ~ /^[0-9]+$/ && length($2) <= 12 && (e == "" || $2 + 0 < e + 0) {e=$2} END {print e}' "$OUT_DIR"/*.share 2>/dev/null) || earliest=''
+    fi
+    systemctl stop darban-expire.timer >/dev/null 2>&1 || true
+    systemctl reset-failed darban-expire.timer >/dev/null 2>&1 || true
+    [[ -n $earliest ]] || return 0
+    now=$(date -u +%s)
+    if (( earliest <= now )); then earliest=$(( now + 1 )); fi
+    systemd-run --quiet --unit=darban-expire --on-calendar="@$earliest" --timer-property=AccuracySec=1s >/dev/null 2>&1
+}
 # A share is a profile that can still reach someone: an open link, the copy kept on the server, or the copy made
-# for the SSH user. The certificate inside it says which certificate it belongs to, so nothing else records it.
+# for the SSH user. The certificate inside it says which certificate it belongs to; a kept file's record says it
+# too, so that file is not read again.
 ssh_user_home() {
     local home
     [[ $DOWNLOAD_SSH_USER != root ]] || return 1
@@ -1970,13 +2120,13 @@ share_rows() {
     for file in "$OUT_DIR"/*.ovpn; do
         [[ -f $file ]] || continue
         name=${file##*/}; name=${name%.ovpn}
-        printf '%s\tserver\t%s\t%s\n' "$(share_state "$file" "$name")" "$name" "$file"
+        printf '%s\tserver\t%s\t%s\n' "$(kept_state "$file" "$name" "$file")" "$name" "$file"
     done
     home=$(ssh_user_home) || return 0
     for file in "$home"/*.ovpn; do
         [[ -f $file ]] || continue
         name=${file##*/}; name=${name%.ovpn}
-        state=$(share_state "$file" "$name")
+        state=$(kept_state "$file" "$name" "$OUT_DIR/$name.ovpn")
         if [[ $state != unknown ]]; then printf '%s\thome\t%s\t%s\n' "$state" "$name" "$file"; fi
     done
 }
@@ -1988,6 +2138,23 @@ share_state() {
     else
         printf 'unknown\n'
     fi
+}
+kept_state() {
+    # kept_state <file> <name> <kept file>: share_state of a kept file or of its copy for the SSH user, from the
+    # record of the kept file when that record describes this very file, so it is not read. A record that names no
+    # certificate it could identify means unknown, as the file itself would.
+    local state
+    if share_record_read "$3"; then
+        if [[ $1 == "$3" ]] || [[ $1 == "$SR_HOME" && -n $SR_HOME_FILE && $SR_HOME_FILE == "$(file_id "$1")" ]]; then
+            if [[ -n $SR_SERIAL ]] && state=$(index_state_of_serial "$SR_SERIAL"); then
+                if [[ $state == R ]]; then printf 'revoked\n'; else printf 'current\n'; fi
+            else
+                printf 'unknown\n'
+            fi
+            return 0
+        fi
+    fi
+    share_state "$1" "$2"
 }
 share_names() {
     # share_names <state> [rows]: the names with a share in that state, one per line.
@@ -2003,6 +2170,8 @@ drop_share() {
     # drop_share <kind> <file>: a link goes with all its files, under the lock the link service takes too.
     if [[ $1 == link ]]; then
         links_locked rm -f -- "$2" "${2%.meta}.ovpn" "${2%.meta}.url" "${2%.meta}.tmp"
+    elif [[ $1 == server ]]; then
+        rm -f -- "$2" "${2%.ovpn}.share"
     else
         rm -f -- "$2"
     fi
@@ -2041,7 +2210,7 @@ prepare_link() {
     ensure_link_cert "$host"
 }
 share_by_link() {
-    local name=$1 host hours minutes label token key now expires url temp note='' boot cs us
+    local name=$1 host hours minutes label token key now expires url temp note='' boot cs us share=''
     host=$(domain)
     if ! link_sees_connections; then
         warn "This server has no local management interface, so the link cannot see a connection: it works for $(hours_label "$(link_hours)")."
@@ -2084,6 +2253,9 @@ share_by_link() {
     if [[ $boot =~ ^[0-9a-f-]{36}$ && $cs =~ ^[0-9]+$ ]]; then
         printf 'created_boot=%s\ncreated_cs=%s\ncreated_us=%s\n' "$boot" "$cs" "$us" >>"$temp" || return 1
     fi
+    # The identity the profile carries, when it carries one: a connection that names another share leaves this one.
+    if share_record_read "$OUT_DIR/$name.ovpn"; then share=$SR_ID; fi
+    if [[ -n $share ]]; then printf 'share_id=%s\n' "$share" >>"$temp" || return 1; fi
     mv -f -- "$temp" "$LINK_DIR/$key.meta" || return 1
     if ! start_link_service "$host"; then
         rm -f -- "$LINK_DIR/$key.meta" "$LINK_DIR/$key.ovpn" "$LINK_DIR/$key.url"
@@ -2091,7 +2263,8 @@ share_by_link() {
         return 1
     fi
     # The link holds its own copy, so nothing stays behind in the download folder.
-    rm -f -- "$OUT_DIR/$name.ovpn"
+    rm -f -- "$OUT_DIR/$name.ovpn" "$OUT_DIR/$name.share"
+    expire_schedule || true
     ca_unlock
     audit "temporary link created: $name, valid for $label"
     note=$(link_note)
@@ -2189,8 +2362,11 @@ show_qr() {
 links_and_files() {
     # Menu 6: the links still open and the profile files kept on the server. Choosing a row shows what can be
     # done with it; nothing is removed by its number alone.
-    local meta name state expires now minutes left i cn path serial
+    local meta name state expires now left i cn path serial label any_read=0
     local -a kinds=() refs=() names=() details=()
+    # A file made before this version gets its record, and one whose time is up goes, as the five-minute check
+    # would do: the list then shows only what is still there.
+    if ca_lock; then sweep_files 2>/dev/null || true; expire_schedule 2>/dev/null || true; ca_unlock; fi
     now=$(date -u +%s)
     if [[ -d $LINK_DIR ]]; then
         for meta in "$LINK_DIR"/*.meta; do
@@ -2203,20 +2379,25 @@ links_and_files() {
             name=$(awk -F= '$1=="name" {print $2}' "$meta")
             state=$(awk -F= '$1=="downloads" {print $2}' "$meta")
             if [[ $state =~ ^[1-9][0-9]*$ ]]; then state='downloaded'; else state='not downloaded yet'; fi
-            minutes=$(( (expires - now + 59) / 60 ))
-            left="$minutes min"
-            if (( minutes >= 60 )); then left="$(( minutes / 60 )) h"; fi
-            if (( minutes >= 60 && minutes % 60 )); then left+=" $(( minutes % 60 )) min"; fi
+            left=$(time_left "$expires" "$now")
             kinds+=(link) refs+=("$meta") names+=("$name") details+=("$left left $S_SEP $state")
         done
     fi
     while IFS=$'\t' read -r cn _ _ serial; do
         if is_server_serial "$serial"; then continue; fi
         path=$(profile_path "$cn") || continue
-        kinds+=(file) refs+=("$path") names+=("$cn") details+=("$path")
+        if share_record_read "$path"; then
+            left="$(time_left "$SR_EXPIRES" "$now") left"
+            label=$(kept_read_label "$cn")
+            if [[ $label == "file read" ]]; then any_read=1; fi
+            kinds+=(file) refs+=("$path") names+=("$cn") details+=("$left${label:+ $S_SEP $label}")
+        else
+            kinds+=(file) refs+=("$path") names+=("$cn") details+=("$path")
+        fi
     done < <(client_effective_rows)
     info 'A link works until its time is up, or until the client connects.'
-    info 'A file stays on the server until you delete it.'
+    info 'A file on the server goes the same way. At its time it is deleted within seconds as a rule, and by the next five-minute check at the latest.'
+    if (( any_read )); then info 'file read: the file was read after it was made; Darban cannot tell by whom.'; fi
     say
     if (( ${#kinds[@]} == 0 )); then info 'No open links and no files on the server. Share a profile from menu 5.'; return 0; fi
     for i in "${!kinds[@]}"; do
@@ -2278,10 +2459,11 @@ delete_server_copy() {
     if [[ -n $home_copy ]]; then info "The copy made for $DOWNLOAD_SSH_USER is deleted too: $home_copy"; fi
     confirm_choice "Delete $path?" 'No, keep it' 'Delete the file' danger || { cancelled; return 0; }
     ca_lock || return 1
-    rm -f -- "$path"
+    rm -f -- "$path" "$OUT_DIR/$name.share"
     audit "profile deleted from server: $path"
     ok "Deleted: $path"
     delete_home_copy "$home_copy"
+    expire_schedule || true
 }
 run_easyrsa() {
     # Easy-RSA's own notices (e.g. "now run gen-crl") contradict the automated flow and bury the
@@ -2425,10 +2607,11 @@ mgmt_available() {
 # each entry to work/ under a name of its own, checks it there, where the script's user cannot reach it, applies it
 # and deletes it. A malformed entry goes to bad/ with its reason; one that cannot be applied now stays for a later
 # run. "darban sweep", every five minutes, takes what is left, ends expired links, and ends the links of a client
-# that is connected although no event said so.
-EVENT_RE='^darban-event 1 (connect|disconnect) ([A-Za-z0-9][A-Za-z0-9._@+-]{0,127}) ([0-9a-f-]{36}) ([0-9]{1,12}) ([0-9]{16}) ([0-9A-Fa-f.:]{2,45}|-) ([0-9A-Fa-f:]{1,64}|-) ([0-9]{1,20}|-) ([0-9]{1,20}|-) ([0-9]{1,10}|-) ([0-9]{1,12}|-)$'
+# that is connected although no event said so. A connection may end with the identity of the share its profile
+# came from, when the profile carries one.
+EVENT_RE='^darban-event 1 (connect|disconnect) ([A-Za-z0-9][A-Za-z0-9._@+-]{0,127}) ([0-9a-f-]{36}) ([0-9]{1,12}) ([0-9]{16}) ([0-9A-Fa-f.:]{2,45}|-) ([0-9A-Fa-f:]{1,64}|-) ([0-9]{1,20}|-) ([0-9]{1,20}|-) ([0-9]{1,10}|-) ([0-9]{1,12}|-)( [0-9a-f]{16})?$'
 EVENT_RUN='' EVENT_SEQ=0 EVENT_TAKEN=0 EVENT_WHY='' EVENT_REJECTED=0 EVENT_REJECT_WHY=''
-EVENT_DONE=0 EVENT_LEFT=0 EVENT_DEADLINE=0
+EVENT_DONE=0 EVENT_LEFT=0 EVENT_DEADLINE=0 EXPIRE_DIRTY=0
 EVENT_FIELDS=()
 events_user() {
     # The user OpenVPN runs the script as: the one server.conf names, or root without one.
@@ -2570,7 +2753,7 @@ events_claim() {
 }
 event_read() {
     # event_read <file> <uid>: the one line of an event, read once, in EVENT_FIELDS; else EVENT_WHY and 1.
-    local facts type owner links size line
+    local facts type owner links size line share
     EVENT_FIELDS=()
     if [[ -L $1 ]]; then EVENT_WHY='a symbolic link'; return 1; fi
     if ! facts=$(stat -c '%F|%u|%h|%s' -- "$1" 2>/dev/null); then EVENT_WHY='cannot be read'; return 1; fi
@@ -2583,7 +2766,10 @@ event_read() {
     # Read once: what follows uses this copy, whatever happens to the file.
     if ! line=$(head -c 513 -- "$1" 2>/dev/null); then EVENT_WHY='cannot be read'; return 1; fi
     if [[ ! $line =~ $EVENT_RE ]]; then EVENT_WHY='not an event line'; return 1; fi
-    EVENT_FIELDS=("${BASH_REMATCH[@]:1}")
+    # The twelve fields after "darban-event 1"; the share is - when the line has none.
+    share=${BASH_REMATCH[12]:-}
+    share=${share# }
+    EVENT_FIELDS=("${BASH_REMATCH[@]:1:11}" "${share:--}")
 }
 event_reject() {
     # event_reject <file> <reason>: a malformed entry is set aside and never applied. Its content is never logged.
@@ -2652,28 +2838,29 @@ ledger_update() {
         return 1
     fi
 }
-LM_NAME='' LM_EXPIRES='' LM_CREATED='' LM_BOOT='' LM_CS='' LM_US=''
+LM_NAME='' LM_EXPIRES='' LM_CREATED='' LM_BOOT='' LM_CS='' LM_US='' LM_SHARE=''
 link_meta() {
     # link_meta <meta>: the fields of a link record this tool uses, read in one pass.
     local key value
-    LM_NAME='' LM_EXPIRES='' LM_CREATED='' LM_BOOT='' LM_CS='' LM_US=''
+    LM_NAME='' LM_EXPIRES='' LM_CREATED='' LM_BOOT='' LM_CS='' LM_US='' LM_SHARE=''
     [[ -f $1 && ! -L $1 ]] || return 1
     while IFS='=' read -r key value; do
         case $key in
             name) LM_NAME=$value ;; expires) LM_EXPIRES=$value ;; created) LM_CREATED=$value ;;
             created_boot) LM_BOOT=$value ;; created_cs) LM_CS=$value ;; created_us) LM_US=$value ;;
+            share_id) LM_SHARE=$value ;;
         esac
     done <"$1" || return 1
     [[ -n $LM_NAME ]]
 }
 link_made_before() {
-    # link_made_before <meta> <cn> <boot> <cs> <serial>: true when a connection of <cn> at that moment ends the link.
-    # A link records the boot and the hundredth of a second it was made at, a clock NTP cannot move. Made in an
-    # earlier boot, it is older than any event in the queue, which is a tmpfs. Made at the very same hundredth, it
-    # stays. Without that record, made before an update, only its time ends it. A link whose certificate this tool
+    # link_made_before <meta> <cn> <boot> <cs> <serial> [share]: true when a connection of <cn> at that moment ends
+    # the link. A link records the boot and the hundredth of a second it was made at, a clock NTP cannot move. Made
+    # in an earlier boot, it is older than any event in the queue, which is a tmpfs. Made at the very same hundredth,
+    # it stays. Without that record, made before an update, only its time ends it. A link whose certificate this tool
     # cannot identify is never ended by an event: it stays until its time is up or it is deleted in menu 6, and the
-    # diagnostics name it. The serial OpenVPN gives, when it gives one, only narrows this: a link holding another
-    # certificate of the same name stays.
+    # diagnostics name it. The serial OpenVPN gives, and the share the profile names, when there are any, only
+    # narrow this: a link holding another certificate of the same name, or another share, stays.
     local share
     link_meta "$1" || return 1
     [[ $LM_NAME == "$2" ]] || return 1
@@ -2681,11 +2868,12 @@ link_made_before() {
     if [[ $LM_BOOT == "$3" ]] && (( 10#$4 <= 10#$LM_CS )); then return 1; fi
     share=$(share_serial "${1%.meta}.ovpn" "$2") || return 1
     if [[ $5 != - && $(darban_norm_serial "$5" 2>/dev/null) != "$share" ]]; then return 1; fi
+    if [[ ${6:--} != - && $6 != "$LM_SHARE" ]]; then return 1; fi
     return 0
 }
 events_end_links() {
-    # events_end_links <cn> <boot> <cs> <serial>: ends each open link of the client made before this connection.
-    # Without one, the lock of the link files is not needed at all.
+    # events_end_links <cn> <boot> <cs> <serial> <share>: ends each open link of the client made before this
+    # connection. Without one, the lock of the link files is not needed at all.
     local meta
     local -a found=()
     [[ -d $LINK_DIR ]] || return 0
@@ -2697,20 +2885,41 @@ events_end_links() {
     links_locked events_drop_links "$@" "${found[@]}"
 }
 events_drop_links() {
-    local cn=$1 boot=$2 cs=$3 serial=$4 meta
-    shift 4
+    local cn=$1 boot=$2 cs=$3 serial=$4 share=$5 meta
+    shift 5
     for meta; do
         # Read again under the lock: the link may have ended, or changed, since.
-        link_made_before "$meta" "$cn" "$boot" "$cs" "$serial" || continue
+        link_made_before "$meta" "$cn" "$boot" "$cs" "$serial" "$share" || continue
         rm -f -- "$meta" "${meta%.meta}.ovpn" "${meta%.meta}.url" "${meta%.meta}.tmp" || return 1
         audit "temporary link ended: $cn connected"
     done
 }
+kept_made_before() {
+    # kept_made_before <cn> <boot> <cs> <serial> <share>: true when a connection of <cn> at that moment deletes its
+    # kept file, by the same rules as a link. A file whose record is missing or no longer describes it, or names no
+    # certificate, stays until the five-minute check gives it a record, or its time is up.
+    share_record_read "$OUT_DIR/$1.ovpn" || return 1
+    [[ $SR_BOOT =~ ^[0-9a-f-]{36}$ && $SR_CS =~ ^[0-9]{1,12}$ && -n $SR_SERIAL ]] || return 1
+    if [[ $SR_BOOT == "$2" ]] && (( 10#$3 <= 10#$SR_CS )); then return 1; fi
+    if [[ $4 != - && $(darban_norm_serial "$4" 2>/dev/null) != "$SR_SERIAL" ]]; then return 1; fi
+    if [[ $5 != - && $5 != "$SR_ID" ]]; then return 1; fi
+    return 0
+}
+events_end_kept() {
+    # events_end_kept <cn> <boot> <cs> <serial> <share>: deletes the kept file of the client made before this
+    # connection, under the CA lock the worker holds.
+    valid_existing_name "$1" || return 0
+    kept_made_before "$@" || return 0
+    kept_file_drop "$1" "$1 connected" || return 1
+    EXPIRE_DIRTY=1
+}
 event_apply() {
-    # event_apply <kind> <cn> <boot> <cs> <us> <ip> <serial> <rx> <tx> <seconds> <start>. Applied first and deleted
-    # after, so a crash in between applies it again, which changes nothing more.
+    # event_apply <kind> <cn> <boot> <cs> <us> <ip> <serial> <rx> <tx> <seconds> <start> [share]. Applied first and
+    # deleted after, so a crash in between applies it again, which changes nothing more.
+    local share=${12:--}
     if ! ledger_update "$@"; then EVENT_WHY='the client record could not be written'; return 1; fi
-    if [[ $1 == connect ]] && ! events_end_links "$2" "$3" "$4" "$7" 2>/dev/null; then EVENT_WHY='the link files were busy'; return 1; fi
+    if [[ $1 == connect ]] && ! events_end_links "$2" "$3" "$4" "$7" "$share" 2>/dev/null; then EVENT_WHY='the link files were busy'; return 1; fi
+    if [[ $1 == connect ]] && ! events_end_kept "$2" "$3" "$4" "$7" "$share" 2>/dev/null; then EVENT_WHY='the kept file could not be deleted'; return 1; fi
     return 0
 }
 events_lock() {
@@ -2778,7 +2987,7 @@ events_run() {
     # and for those it took but did not apply, it leaves its mark in new/, which does the same.
     local before
     events_mounted || return 0
-    EVENT_RUN=$(event_run_id) EVENT_SEQ=0 EVENT_TAKEN=0 EVENT_DONE=0 EVENT_LEFT=0
+    EVENT_RUN=$(event_run_id) EVENT_SEQ=0 EVENT_TAKEN=0 EVENT_DONE=0 EVENT_LEFT=0 EXPIRE_DIRTY=0
     EVENT_DEADLINE=$(( SECONDS + EVENT_SECONDS ))
     while :; do
         before=$EVENT_TAKEN
@@ -2787,6 +2996,9 @@ events_run() {
         (( ! EVENT_LEFT && EVENT_TAKEN > before && EVENT_TAKEN < EVENT_MAX && SECONDS < EVENT_DEADLINE )) || break
     done
     if (( EVENT_LEFT )); then : >"$EVENT_DIR/new/$EVENT_RERUN" 2>/dev/null || true; fi
+    # A kept file went: the timer now waits for the next one.
+    if (( EXPIRE_DIRTY )) && events_lock; then expire_schedule || true; ca_unlock; fi
+    EXPIRE_DIRTY=0
 }
 sweep_links() {
     # Expired links, and the files of a link whose record is gone for a minute, as the link service removes them
@@ -2804,28 +3016,77 @@ sweep_links() {
         if [[ -n $(find "$file" -maxdepth 0 -mmin +1 2>/dev/null) ]]; then rm -f -- "$file"; fi
     done
 }
-sweep_connected_links() {
-    # sweep_connected_links <rows of connected_rows>: a client connected now ends the links made before its session
-    # began, when no event did, because it was lost or events are off. The wall clock is trusted only when it has
-    # not jumped since the link was made: its gap to the time since boot is the same within 2 seconds.
-    local rows=$1 boot up now offset made since meta
-    [[ -n $rows ]] || return 0
-    read -r boot </proc/sys/kernel/random/boot_id || return 0
-    up=$(uptime_cs) || return 0
+sweep_files() {
+    # The files kept on the server, under the CA lock. One made before this version, or rewritten by something that
+    # does not know records, gets a record now, and with it the whole time of Settings, once, in the journal. One
+    # whose time is up goes, with the copy made for the SSH user. A record without its file goes. Only <name>.ovpn,
+    # a regular file, of a name the CA knows: anything else there is someone else's.
+    local file record name now serial remote listed=0
+    local -A known=()
+    now=$(date -u +%s)
+    for file in "$OUT_DIR"/*.ovpn; do
+        [[ -f $file && ! -L $file ]] || continue
+        if (( ! listed )); then
+            while IFS=$'\t' read -r name _; do if [[ -n $name ]]; then known[$name]=1; fi; done < <(client_index_rows 2>/dev/null)
+            listed=1
+        fi
+        name=${file##*/}; name=${name%.ovpn}
+        valid_existing_name "$name" && [[ -n ${known[$name]:-} ]] || continue
+        if ! share_record_read "$file"; then
+            serial=$(share_serial "$file" "$name") || serial=''
+            remote=$(grep -m1 '^remote ' "$file" 2>/dev/null) || remote=''
+            share_record_write "$name" "$(openssl rand -hex 8)" "$serial" "$remote" || continue
+            audit "profile kept on the server from before: $file, deleted in $(hours_label "$(link_hours)") or when $name connects"
+            continue
+        fi
+        (( SR_EXPIRES <= now )) || continue
+        kept_file_drop "$name" 'its time was up' || return 1
+    done
+    for record in "$OUT_DIR"/*.share; do
+        [[ -f $record && ! -e ${record%.share}.ovpn ]] || continue
+        rm -f -- "$record"
+    done
+    find "$OUT_DIR" -maxdepth 1 -name '.share.*' -mmin +10 -delete 2>/dev/null || true
+}
+connected_after() {
+    # connected_after <rows of connected_rows> <name> <boot> <cs> <us>: true when <name> is connected now in a
+    # session that began after a share made at that moment. The wall clock is trusted only when it has not jumped
+    # since the share was made: its gap to the time since boot is the same within 2 seconds.
+    local boot up now offset made since
+    read -r boot </proc/sys/kernel/random/boot_id || return 1
+    [[ $3 == "$boot" && $4 =~ ^[0-9]{1,12}$ && $5 =~ ^[0-9]{16}$ ]] || return 1
+    up=$(uptime_cs) || return 1
     now=${EPOCHREALTIME//[!0-9]/}
     offset=$(( 10#$now / 10000 - 10#$up ))
+    made=$(( 10#$5 / 10000 - 10#$4 - offset ))
+    (( made >= -200 && made <= 200 )) || return 1
+    since=$(awk -F '\t' -v n="$2" '$1==n && $4 ~ /^[0-9]+$/ && $4 > s {s=$4} END {print s + 0}' <<<"$1")
+    (( since * 1000000 > 10#$5 ))
+}
+sweep_connected_links() {
+    # sweep_connected_links <rows of connected_rows>: a client connected now ends the links made before its session
+    # began, when no event did, because it was lost or events are off.
+    local rows=$1 meta
+    [[ -n $rows ]] || return 0
     for meta in "$LINK_DIR"/*.meta; do
         [[ -e $meta ]] || continue
         link_meta "$meta" || continue
-        [[ $LM_BOOT == "$boot" && $LM_CS =~ ^[0-9]{1,12}$ && $LM_US =~ ^[0-9]{16}$ ]] || continue
-        made=$(( 10#$LM_US / 10000 - 10#$LM_CS - offset ))
-        (( made >= -200 && made <= 200 )) || continue
-        since=$(awk -F '\t' -v n="$LM_NAME" '$1==n && $4 ~ /^[0-9]+$/ && $4 > s {s=$4} END {print s + 0}' <<<"$rows")
-        (( since * 1000000 > 10#$LM_US )) || continue
+        connected_after "$rows" "$LM_NAME" "$LM_BOOT" "$LM_CS" "$LM_US" || continue
         # A link with a certificate this tool cannot identify stays, as with an event.
         share_serial "${meta%.meta}.ovpn" "$LM_NAME" >/dev/null || continue
         rm -f -- "$meta" "${meta%.meta}.ovpn" "${meta%.meta}.url" "${meta%.meta}.tmp" || return 1
         audit "temporary link ended: $LM_NAME connected (seen by the five-minute check, with no event)"
+    done
+}
+sweep_connected_files() {
+    # sweep_connected_files <rows of connected_rows>: the same for the files kept on the server, under the CA lock.
+    local rows=$1 file name
+    [[ -n $rows ]] || return 0
+    for file in "$OUT_DIR"/*.ovpn; do
+        name=${file##*/}; name=${name%.ovpn}
+        valid_existing_name "$name" && share_record_read "$file" && [[ -n $SR_SERIAL ]] || continue
+        connected_after "$rows" "$name" "$SR_BOOT" "$SR_CS" "$SR_US" || continue
+        kept_file_drop "$name" "$name connected (seen by the five-minute check, with no event)" || return 1
     done
 }
 sweep_queue() {
@@ -2839,21 +3100,29 @@ sweep_queue() {
     for file in "${kept[@]:100}"; do rm -rf -- "$file" "$file.why" 2>/dev/null || true; done
 }
 sweep() {
-    # darban sweep (darban-sweep.timer: a minute after boot, then every five minutes). Quick when there is nothing
-    # to do.
-    local rows=''
+    # darban sweep (darban-sweep.timer: a minute after boot, then every five minutes; darban-expire.timer: when the
+    # next kept file is due). Quick when there is nothing to do.
+    local rows='' files=0
     # The watcher of the queue, failed for example under a burst of starts, is started again.
     if events_units_installed && systemctl is-failed --quiet darban-events.path 2>/dev/null; then
         systemctl reset-failed darban-events.path 2>/dev/null || true
         if systemctl start darban-events.path 2>/dev/null; then audit 'connection events: the queue watcher had failed, and was started again'; fi
     fi
     events_run
-    if [[ -d $LINK_DIR ]]; then
+    if compgen -G "$OUT_DIR/*.ovpn" >/dev/null || compgen -G "$OUT_DIR/*.share" >/dev/null; then files=1; fi
+    if [[ -d $LINK_DIR ]] || (( files )); then
         # Asked before any lock is taken: the management interface may be slow, and nothing waits on it.
         if mgmt_available; then rows=$(MGMT_TIMEOUT=3 connected_rows 2>/dev/null) || rows=''; fi
         if events_lock; then
-            links_locked sweep_links 2>/dev/null || true
-            links_locked sweep_connected_links "$rows" 2>/dev/null || true
+            if [[ -d $LINK_DIR ]]; then
+                links_locked sweep_links 2>/dev/null || true
+                links_locked sweep_connected_links "$rows" 2>/dev/null || true
+            fi
+            if (( files )); then
+                sweep_files 2>/dev/null || true
+                sweep_connected_files "$rows" 2>/dev/null || true
+                expire_schedule || true
+            fi
             ca_unlock
         fi
     fi
@@ -3107,7 +3376,7 @@ revoke_client() {
         return 1
     fi
     if path=$(profile_path "$name"); then
-        if rm -f -- "$path"; then ok "Server copy deleted: $path"; else warn 'Could not delete the server copy; the revocation still succeeded.'; fi
+        if rm -f -- "$path" "${path%.ovpn}.share"; then ok "Server copy deleted: $path"; else warn 'Could not delete the server copy; the revocation still succeeded.'; fi
     fi
     delete_home_copy "$home_copy"
     ca_unlock
@@ -3556,13 +3825,13 @@ set_client_days() {
 }
 set_link_hours() {
     kv Current "$(hours_label "$(link_hours)")"
-    info 'The longest time a temporary link works. It usually ends sooner, about 10 seconds after a connection with its profile is seen. Common values: 1, 6, 24 (the default), 48 or 72.'
+    info 'A link or a file kept on the server is removed after this time, or as soon as its client connects, whichever comes first. Common values: 1, 6, 24 (the default), 48 or 72.'
     say
     prompt_valid 'Hours, 1 to 72 (Enter = cancel): ' valid_link_hours 'Enter a whole number of hours from 1 to 72.' || return 0
     LINK_HOURS=$((10#$REPLY))
     save_config || { fail 'Could not save the setting.'; return 1; }
-    audit "link lifetime changed: $LINK_HOURS hours"
-    saved "links work for at most $(hours_label "$LINK_HOURS")" 'from the next link'
+    audit "share lifetime changed: $LINK_HOURS hours"
+    saved "shares expire after $(hours_label "$LINK_HOURS")" 'from the next share'
 }
 set_link_port() {
     kv Current "$(link_port_summary)"
@@ -3854,6 +4123,8 @@ restore_previous() {
     confirm_choice "Go back to v${version:-unknown}?" 'No, keep this version' 'Restore the previous version' caution restore || { cancelled; return 0; }
     ca_lock || return 1
     critical_begin
+    # The timer for the next kept file first: the version restored sets its own, if it knows one.
+    systemctl stop darban-expire.timer >/dev/null 2>&1 || true
     if (( without_events )); then darban_events_units_remove "$UNIT_DIR"; audit 'connection events turned off for an older version'; fi
     cp -a -- "$newest/sbin/." "$SBIN_DIR/" && cp -a -- "$newest/lib/." "$DARBAN_LIB/" && cp -a -- "$newest/units/." "$UNIT_DIR/" || {
         critical_end
@@ -4154,7 +4425,12 @@ health() {
     for issue in "${CONFIG_ISSUES[@]}"; do check warn "$issue"; done
     exports=$(find "$OUT_DIR" -maxdepth 1 -type f -name '*.ovpn' 2>/dev/null | wc -l)
     if (( exports > 0 )); then
-        check info "$exports profile(s) stored on the server $S_ARROW delete them after download (menu 6)"
+        check info "$exports profile(s) kept on the server; each is deleted when its time is up or its client connects $S_ARROW menu 6"
+        # Without the timer, a file whose time is up waits for the five-minute check.
+        if [[ -e $UNIT_DIR/darban-expire.service ]] && compgen -G "$OUT_DIR/*.share" >/dev/null \
+            && ! systemctl is-active --quiet darban-expire.timer 2>/dev/null; then
+            check warn "The timer that deletes a kept file at its time is not set, so the five-minute check deletes it, up to five minutes late $S_ARROW sudo systemctl start darban-sweep.service"
+        fi
     else
         check ok 'No profiles left on the server'
     fi
@@ -4270,12 +4546,12 @@ draw_settings() {
     port=$(server_port 2>/dev/null || printf '?')
     clear_screen
     title_bar Settings
-    printf ' %sWhat clients connect to, and how temporary links work. Choose one to see what it does before anything changes.%s\n' "$C_DIM" "$C_RESET" || true
+    printf ' %sWhat clients connect to, and how profiles are shared. Choose one to see what it does before anything changes.%s\n' "$C_DIM" "$C_RESET" || true
     menu_group SERVER
     menu_item 1 "$(printf '%-24s %s' 'Server address' "${host:-not set}")"
     menu_item 2 "$(printf '%-24s %s' 'OpenVPN UDP port *' "$port")"
-    menu_group LINKS
-    menu_item 3 "$(printf '%-24s %s' 'Link lifetime' "$(hours_label "$(link_hours)")")"
+    menu_group SHARING
+    menu_item 3 "$(printf '%-24s %s' 'Shares expire after' "$(hours_label "$(link_hours)")")"
     menu_item 4 "$(printf '%-24s %s' 'Link port' "$(link_port_summary)")"
     menu_item 5 "$(printf '%-24s %s' 'Link certificate' "$(link_cert_summary)")"
     menu_group MORE
@@ -4341,7 +4617,7 @@ settings_menu() {
         case $REPLY in
             1) menu_action 'Change server address' set_domain ;;
             2) menu_action 'Change OpenVPN UDP port' change_port ;;
-            3) menu_action 'Link lifetime' set_link_hours ;;
+            3) menu_action 'Shares expire after' set_link_hours ;;
             4) menu_action 'Link port' set_link_port ;;
             5) menu_action 'Link certificate' change_link_cert ;;
             6) advanced_menu ;;
@@ -4567,6 +4843,8 @@ main() {
             # For systemd only: the jobs of connection events, which need nothing of the menu.
             events|sweep|events-setup)
                 darban_require_root || exit 1
+                # The hours of Settings and the SSH user, for the files kept on the server.
+                load_config
                 case $1 in events) run_action events_run ;; sweep) run_action sweep ;; *) run_action events_setup ;; esac
                 exit "$ACTION_RC" ;;
             list|status|repair-crl|connected|update|uninstall|remove-all|welcome|enable-events) [[ -z $cmd ]] || { usage >&2; exit 2; }; cmd=$1 ;;

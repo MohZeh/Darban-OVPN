@@ -108,10 +108,19 @@ shift
 exec "$@"
 STUB
 # The queue of connection events counts as its own tmpfs while its folder exists; FAKE_NO_TMPFS: it is not mounted.
+# findmnt -T <file> gives the mount options of that file: relatime, or FAKE_ATIME, such as noatime.
 cat > "$E/bin/findmnt" <<STUB
 #!/usr/bin/env bash
+for arg; do if [[ \$arg == -T ]]; then echo "rw,\${FAKE_ATIME:-relatime}"; exit 0; fi; done
 [[ -z \${FAKE_NO_TMPFS:-} && \${*: -1} == "$E/events" && -d "$E/events" ]] || exit 1
 echo tmpfs
+STUB
+# systemd-run only records what it was asked; FAIL_SYSTEMD_RUN: it fails.
+cat > "$E/bin/systemd-run" <<'STUB'
+#!/usr/bin/env bash
+echo "systemd-run $*" >> "$STUB_LOG"
+if [[ -n ${FAIL_SYSTEMD_RUN:-} ]]; then exit 1; fi
+exit 0
 STUB
 printf '#!/usr/bin/env bash\nif [[ ${1:-} == -n ]]; then echo 1; fi\n' > "$E/bin/sysctl"
 printf '#!/usr/bin/env bash\necho "logger $*" >> "$STUB_LOG"\n' > "$E/bin/logger"

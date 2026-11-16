@@ -385,6 +385,25 @@ def share_esc_means_later(m):
     check('terminal echo restored', m.echo_on())
 
 
+def settings_and_menu_six_name_the_share_time(m):
+    assert m.wait_for('Choose [0-9]')
+    # A file kept on the server, made by a second manager without a terminal while this one waits.
+    subprocess.run(['bash', m.env_dir + '/manager.sh'], input='1\nbob\n0\n', env=m.env, text=True,
+                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=120)
+    m.press('7', ENTER)
+    check('Settings opens', m.wait_for('Choose [0-6'), m.seen)
+    screen = plain(m.seen)
+    check('the time is in the sharing group, named for every share',
+          re.search(r'SHARING\s+3\s+Shares expire after\s+24 hours', screen), screen)
+    m.drain()
+    m.press(ENTER)
+    assert m.wait_for('Choose [0-9]')
+    m.drain()
+    m.press('6', ENTER)
+    check('menu 6 shows the time a kept file has left', m.wait_for('24 h left'), m.seen)
+    check('and that it was not read yet', m.wait_for('not read yet'), m.seen)
+
+
 def ctrl_c_at_main_menu_exits(m):
     assert m.wait_for('Choose [0-9]')
     m.drain()
@@ -400,7 +419,8 @@ for function, options in [
     (hint_says_what_enter_does, {}), (rows_redraw_in_place, {}), (restart_needs_two_key_presses, {'colors': True}), (list_offers_revoked_history, {}),
     (name_reuse_asks_when_server_settings_exist, {}),
     (diagnostics_start_with_a_summary, {}),
-    (share_chooser_moves_with_keys, {}), (share_esc_means_later, {}), (ctrl_c_at_main_menu_exits, {}),
+    (share_chooser_moves_with_keys, {}), (share_esc_means_later, {}), (settings_and_menu_six_name_the_share_time, {}),
+    (ctrl_c_at_main_menu_exits, {}),
 ]:
     scenario(function.__name__, function, **options)
 

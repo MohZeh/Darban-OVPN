@@ -146,6 +146,13 @@ done
 grep -q '^last_connect=' "$LEDGER/accept1"
 grep -qx 'last_address=127.0.0.1' "$LEDGER/accept1"
 echo "PASS: the real connection reached the client record in about $attempt s: $(tr '\n' ' ' <"$LEDGER/accept1")"
+# E3 and E10': the same connection deletes the file kept on the server, with its record.
+for attempt in $(seq 1 10); do
+    if [[ ! -e /root/openvpn-clients/accept1.ovpn ]]; then break; fi
+    sleep 1
+done
+[[ ! -e /root/openvpn-clients/accept1.ovpn && ! -e /root/openvpn-clients/accept1.share ]]
+echo "PASS: the connection deleted the file kept on the server in about $attempt s."
 for attempt in $(seq 1 10); do
     if darban connected | grep accept1 >/dev/null; then break; fi
     sleep 1
@@ -185,7 +192,9 @@ journalctl -u "$UNIT" --since '-120s' --no-pager | grep -i 'certificate revoked'
 echo 'PASS: the revoked profile was refused.'
 
 printf '1\naccept1\n0\n' | darban
-connect /root/openvpn-clients/accept1.ovpn "$LOG/c.log"
+# A copy: the first connection deletes the file kept on the server, and sharing it by a link takes it off too.
+cp /root/openvpn-clients/accept1.ovpn "$LOG/accept1.ovpn"
+connect "$LOG/accept1.ovpn" "$LOG/c.log"
 echo 'PASS: a new certificate under the same name connects.'
 disconnect
 if connect "$LOG/old.ovpn" "$LOG/d.log"; then echo 'FAIL: the old profile connects after the name was reused.'; exit 1; fi
@@ -198,18 +207,16 @@ CRL_FILE=/etc/openvpn/server/crl.pem
 chmod 600 "$CRL_FILE"; touch "$CRL_FILE"
 if darban status >"$LOG/crl-600.log"; then echo 'FAIL: a CRL OpenVPN cannot read passed the diagnostics.'; exit 1; fi
 grep 'OpenVPN runs as nobody and cannot read the CRL' "$LOG/crl-600.log" >/dev/null
-if connect /root/openvpn-clients/accept1.ovpn "$LOG/crl-600-client.log"; then echo 'FAIL: a client connected with a CRL OpenVPN cannot read.'; exit 1; fi
+if connect "$LOG/accept1.ovpn" "$LOG/crl-600-client.log"; then echo 'FAIL: a client connected with a CRL OpenVPN cannot read.'; exit 1; fi
 disconnect
 chmod 644 "$CRL_FILE"; touch "$CRL_FILE"
-connect /root/openvpn-clients/accept1.ovpn "$LOG/crl-644-client.log"
+connect "$LOG/accept1.ovpn" "$LOG/crl-644-client.log"
 disconnect
 darban status >/dev/null
 echo 'PASS: a CRL OpenVPN cannot read is named, refuses every client, and works again once readable.'
 
 # T67 and C.15.1: when the server records the end of a session. It runs client-disconnect when it closes the
 # session, which may be well after the device went away; a kill -9 must still be recorded within 130 seconds.
-# A copy: sharing it by a link later takes the file off the server.
-cp /root/openvpn-clients/accept1.ovpn "$LOG/accept1.ovpn"
 PROFILE=$LOG/accept1.ovpn
 session_end() { awk -F= '$1=="session_end" {print $2}' "$LEDGER/accept1" 2>/dev/null || true; }
 wait_session_end() {
@@ -367,7 +374,7 @@ printf '7\n6\n3\n10.99.0.0\n2\n0\n0\n0\n' | darban
 grep -q '^server 10.99.0.0 255.255.255.0' /etc/openvpn/server/server.conf
 grep -q '10.99.0.0/24' /etc/darban/nat.nft
 nft list table ip darban | grep '10.99.0.0/24' >/dev/null
-connect /root/openvpn-clients/accept1.ovpn "$LOG/e.log"
+connect "$LOG/accept1.ovpn" "$LOG/e.log"
 echo 'PASS: a client connects after the VPN network changed.'
 disconnect
 
@@ -388,7 +395,7 @@ ip netns exec "$NS" ip link set dt1 up
 ip netns exec "$NS" ip route add default via 198.18.0.1
 mkdir -p "/etc/netns/$NS"
 printf 'nameserver 9.9.9.9\n' > "/etc/netns/$NS/resolv.conf"
-sed 's/^remote .*/remote 198.18.0.1 1194/' /root/openvpn-clients/accept1.ovpn > "$LOG/ns.ovpn"
+sed 's/^remote .*/remote 198.18.0.1 1194/' "$LOG/accept1.ovpn" > "$LOG/ns.ovpn"
 ip netns exec "$NS" openvpn --config "$LOG/ns.ovpn" --daemon --writepid "$LOG/ns.pid" --log "$LOG/f.log" --verb 3
 for attempt in $(seq 1 20); do
     if grep -q 'Initialization Sequence Completed' "$LOG/f.log"; then break; fi
@@ -529,6 +536,81 @@ disconnect
 journalctl -t darban --no-pager | grep 'temporary link ended: accept1 connected' >/dev/null
 if journalctl -u darban-links.service --no-pager | grep '[0-9a-f]\{64\}' >/dev/null; then echo 'FAIL: a token reached the log.'; exit 1; fi
 echo 'PASS: the temporary link works until the first connection, which its event ends, and keeps tokens out of the log.'
+
+# D3 for a file kept on the server: T50 and T63. Its time is kept by the real timer, within seconds; a timer left
+# from a file shared again only runs the check, which leaves the newer file.
+KEPT=/root/openvpn-clients
+gone_within() { local i; for i in $(seq 1 "$2"); do if [[ ! -e $1 ]]; then return 0; fi; sleep 1; done; return 1; }
+printf '1\nkept1\n0\n' | darban >"$LOG/kept1.log"
+[[ -s $KEPT/kept1.share ]]
+systemctl is-active --quiet darban-expire.timer
+if grep -q UV_DARBAN_SHARE "$KEPT/kept1.ovpn"; then echo 'FAIL: a profile names its share while the flag is off.'; exit 1; fi
+due=$(( $(date +%s) + 8 ))
+sed -i "s/^expires=.*/expires=$due/" "$KEPT/kept1.share"
+systemctl start darban-sweep.service
+systemctl list-timers darban-expire.timer --all --no-pager | tee "$LOG/expire-timer.log"
+gone_within "$KEPT/kept1.ovpn" 30 || { echo 'FAIL: the file was still there 30 seconds after the time it was given.'; exit 1; }
+late=$(( $(date +%s) - due ))
+echo "T50: a file kept on the server went ${late} s after its time"
+(( late <= 6 )) || { echo 'FAIL: the file went more than 6 seconds after its time.'; exit 1; }
+[[ ! -e $KEPT/kept1.share ]]
+journalctl -t darban --no-pager | grep 'kept1.ovpn, its time was up' >/dev/null
+printf '1\nkept2\n0\n' | darban >/dev/null
+systemctl stop darban-expire.timer
+systemd-run --quiet --unit=darban-expire --on-calendar="@$(( $(date +%s) + 4 ))" --timer-property=AccuracySec=1s
+since=$(date +%s)
+sleep 10
+journalctl -u darban-expire.service --since "@$since" --no-pager | tee "$LOG/expire-stale.log"
+grep -E 'Finished|Deactivated successfully' "$LOG/expire-stale.log" >/dev/null
+[[ -s $KEPT/kept2.ovpn ]] || { echo 'FAIL: a timer left from an older file deleted a newer one.'; exit 1; }
+systemctl is-active --quiet darban-expire.timer
+echo 'PASS: a kept file goes by the real timer within seconds of its time, and a timer left over deletes nothing newer.'
+
+# T23 and T55: "file read" follows the access time of the copy the SSH user fetches, and is not claimed without
+# access times.
+if [[ -n ${SUDO_USER:-} && $SUDO_USER != root ]]; then
+    home=$(getent passwd "$SUDO_USER" | cut -d: -f6)
+    printf '5\nkept2\n2\n0\n' | darban >/dev/null
+    [[ -s $home/kept2.ovpn ]]
+    printf '6\n\n0\n' | darban >"$LOG/kept-unread.log"
+    grep -E 'kept2 .*left .*not read yet' "$LOG/kept-unread.log" >/dev/null
+    sleep 1.2
+    runuser -u "$SUDO_USER" -- cat "$home/kept2.ovpn" >/dev/null
+    printf '6\n\n0\n' | darban >"$LOG/kept-read.log"
+    grep -E 'kept2 .*left .*file read' "$LOG/kept-read.log" >/dev/null
+    grep 'Darban cannot tell by whom' "$LOG/kept-read.log" >/dev/null
+    mount --bind "$home" "$home"
+    mount -o remount,bind,noatime "$home"
+    printf '6\n\n0\n' | darban >"$LOG/kept-noatime.log"
+    umount "$home"
+    if grep -E 'kept2 .*(file read|not read yet)' "$LOG/kept-noatime.log" >/dev/null; then echo 'FAIL: a read was claimed without access times.'; exit 1; fi
+    echo 'PASS: menu 6 says a kept file was read once its copy was read, and claims nothing without access times.'
+fi
+
+# T56, C.11 and E13 in part: only with the flag does a profile name its share; a real OpenVPN 2.6 client then sends
+# it, and the server gets it: a connection naming another share leaves the file, and one naming its own deletes it.
+echo 'SHARE_ID_IN_PROFILE=yes' >>/etc/darban/config
+printf '1\nkept3\n0\n' | darban >/dev/null
+id=$(sed -n 's/^share_id=//p' "$KEPT/kept3.share")
+grep -qx "setenv UV_DARBAN_SHARE $id" "$KEPT/kept3.ovpn"
+grep -qx 'push-peer-info' "$KEPT/kept3.ovpn"
+cp "$KEPT/kept3.ovpn" "$LOG/kept3.ovpn"
+sed -i 's/^share_id=.*/share_id=0123456789abcdef/' "$KEPT/kept3.share"
+connect "$LOG/kept3.ovpn" "$LOG/kept3-a.log"
+for attempt in $(seq 1 15); do
+    if grep -q '^last_connect=' "$LEDGER/kept3" 2>/dev/null; then break; fi
+    sleep 1
+done
+grep -q '^last_connect=' "$LEDGER/kept3"
+sleep 2
+disconnect
+[[ -s $KEPT/kept3.ovpn ]] || { echo 'FAIL: a connection naming another share deleted the file, so the server did not get the name.'; exit 1; }
+sed -i "s/^share_id=.*/share_id=$id/" "$KEPT/kept3.share"
+connect "$LOG/kept3.ovpn" "$LOG/kept3-b.log"
+gone_within "$KEPT/kept3.ovpn" 15 || { echo 'FAIL: a connection naming its own share left the file.'; exit 1; }
+disconnect
+sed -i '/^SHARE_ID_IN_PROFILE=/d' /etc/darban/config
+echo 'PASS: with the flag, a real OpenVPN 2.6 client sends the share its profile names, and only that share ends.'
 
 # A broken server: diagnostics say so by exit status, and the tool can still be updated.
 mv /root/pki/ca.crt /root/pki/ca.crt.keep
@@ -691,7 +773,8 @@ cmp -s "$OTHER_CONF" "$LOG/other-site.before"
 grep 'certbot still renews it' "$LOG/uninstall.log" >/dev/null
 grep 'sudo certbot delete --cert-name darban-ovpn-links' "$LOG/uninstall.log" >/dev/null
 # Q2 and T20: the units and the queue of connection events go; the script and its lines stay, with no restart.
-[[ ! -e /etc/systemd/system/darban-events.path && ! -e /etc/systemd/system/darban-sweep.timer ]]
+[[ ! -e /etc/systemd/system/darban-events.path && ! -e /etc/systemd/system/darban-sweep.timer && ! -e /etc/systemd/system/darban-expire.service ]]
+if systemctl is-active --quiet darban-expire.timer; then echo 'FAIL: the timer for kept files is still set after an uninstall.'; exit 1; fi
 unmounted
 [[ -x $EVENT_SCRIPT ]]
 grep -qx "client-connect $EVENT_SCRIPT" "$CONF"
@@ -734,8 +817,9 @@ if grep -q '^renew_hook' "$LE_CONF"; then echo "FAIL: this tool's hook stayed af
 cmp -s "$OTHER_CONF" "$LOG/other-site.before"
 echo "PASS: Remove everything keeps the certificate when asked, without this tool's hook."
 if systemctl is-active --quiet "$UNIT"; then echo 'FAIL: OpenVPN still runs after removal.'; exit 1; fi
+if systemctl is-active --quiet darban-expire.timer; then echo 'FAIL: the timer for kept files is still set after removal.'; exit 1; fi
 for path in /root/pki /etc/openvpn/server /root/openvpn-clients /etc/darban /usr/local/sbin/darban /etc/apt/sources.list.d/openvpn-aptrepo.list /var/log/darban-setup.log \
-    "$EVENT_SCRIPT" "$LEDGER" /etc/systemd/system/darban-events.path /etc/systemd/system/darban-sweep.timer '/etc/systemd/system/run-darban\x2devents.mount'; do
+    "$EVENT_SCRIPT" "$LEDGER" /etc/systemd/system/darban-events.path /etc/systemd/system/darban-sweep.timer /etc/systemd/system/darban-expire.service '/etc/systemd/system/run-darban\x2devents.mount'; do
     if [[ -e $path ]]; then echo "FAIL: still present after removal: $path"; exit 1; fi
 done
 if dpkg-query -W -f='${Status}' openvpn 2>/dev/null | grep 'install ok installed' >/dev/null; then echo 'FAIL: the openvpn package is still installed.'; exit 1; fi

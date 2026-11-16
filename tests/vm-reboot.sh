@@ -128,6 +128,12 @@ for attempt in $(seq 1 10); do
     sleep 1
 done
 in_vm 'sudo grep -q ^last_connect= /var/lib/darban/clients/vmclient'
+# The file kept on the server was made in the boot before, so this first connection deletes it.
+for attempt in $(seq 1 10); do
+    if ! in_vm 'sudo test -e /root/openvpn-clients/vmclient.ovpn'; then break; fi
+    sleep 1
+done
+if in_vm 'sudo test -e /root/openvpn-clients/vmclient.ovpn'; then echo 'FAIL: the first connection after the reboot left the kept file.'; exit 1; fi
 ping -c 3 -W 5 -I tun9 10.8.0.1 >/dev/null
 echo 'PASS: a profile made before the reboot connects from outside, and data flows through the tunnel.'
 echo 'All reboot checks passed.'

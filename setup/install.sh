@@ -79,7 +79,7 @@ install -o root -g root -m 644 systemd/darban-links.service /etc/systemd/system/
 # or restore of any version leaves server.conf naming a script that is gone.
 install -d -o root -g root -m 755 /usr/local/libexec
 install -o root -g root -m 755 bin/darban-ovpn-event /usr/local/libexec/darban-ovpn-event
-for unit in darban-events-setup.service darban-events.path darban-events.service darban-sweep.timer darban-sweep.service; do
+for unit in darban-events-setup.service darban-events.path darban-events.service darban-sweep.timer darban-sweep.service darban-expire.service; do
     install -o root -g root -m 644 "systemd/$unit" "/etc/systemd/system/$unit"
 done
 # systemd names the unit of a mount after its path.
