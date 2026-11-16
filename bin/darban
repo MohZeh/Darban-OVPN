@@ -5334,10 +5334,15 @@ restore_commit() {
         [[ -f $file ]] || continue
         name=${file##*/}
         valid_existing_name "$name" || continue
-        [[ ! -e $LEDGER_DIR/$name ]] || continue
         added=$(journal_value added_ledger)
-        journal_write "added_ledger=${added:+$added }$name" || return 1
-        install -D -m 600 "$file" "$LEDGER_DIR/$name" 2>/dev/null || { RESTORE_WHY="the record of when $name was seen could not be put back in $LEDGER_DIR"; return 1; }
+        # One this restore added is its own: written again on every try, since a stop may have left it half written.
+        if [[ " $added " != *" $name "* ]]; then
+            [[ ! -e $LEDGER_DIR/$name ]] || continue
+            journal_write "added_ledger=${added:+$added }$name" || return 1
+            restore_point ledger-noted
+        fi
+        install -D -m 600 "$file" "$LEDGER_DIR/$name" 2>/dev/null && sync -- "$LEDGER_DIR/$name" 2>/dev/null \
+            || { RESTORE_WHY="the record of when $name was seen could not be put back in $LEDGER_DIR"; return 1; }
     done
     if ! restore_nat; then journal_write nat=failed || return 1; fi
     # Connection events, when this server can have them: the lines go into the new server.conf while OpenVPN is off.
@@ -5437,13 +5442,18 @@ restore_rollback() {
     # as it was; "undone" only once each of them is checked. What could not be undone keeps the journal, in the state
     # "undoing", so nothing finishes the restore forward any more and the next rollback goes on. After the commit,
     # nothing to undo. Everything is decided from the journal read under the lock.
-    local id tree live stage pre file name from failed=''
+    local id tree live stage pre file name from failed='' began
     [[ -f $DARBAN_RESTORE_JOURNAL ]] || { info 'No restore is unfinished.'; return 0; }
+    began=$(journal_value id)
     DARBAN_RESTORE_OWNER=1
     ca_lock || return 1
-    # Read again under the lock: another run may have finished, or undone, the restore while this one waited.
+    # Read again under the lock: another run may have finished, or undone, the restore while this one waited, and
+    # another restore may have begun since. Only the restore this was asked for is undone.
     if [[ ! -f $DARBAN_RESTORE_JOURNAL ]]; then
         ca_unlock; fail 'Not undone: the restore was finished, or undone, while this waited. Nothing was changed.'; return 1
+    fi
+    if [[ $(journal_value id) != "$began" ]]; then
+        ca_unlock; fail "Not undone: another restore, of the backup of $(journal_value created), began while this waited. Nothing was changed; run this again to undo that one."; return 1
     fi
     if restore_committed; then
         ca_unlock
@@ -5468,9 +5478,11 @@ restore_rollback() {
             if [[ -e $stage ]]; then urgent "Both $live and $stage are copies of the backup. Look at them, and at $pre, by hand."; critical_end; return 1; fi
             mv -T -- "$live" "$stage" || { critical_end; urgent "Not undone: $live could not be moved back. To try again: sudo darban restore --rollback"; return 1; }
         fi
+        restore_point "undo-moved-$tree"
         if [[ ! -e $live && -e $pre ]]; then mv -T -- "$pre" "$live" || { critical_end; urgent "Not undone: $pre could not be moved back. To try again: sudo darban restore --rollback"; return 1; }; fi
         rm -rf -- "$stage"
         sync -- "${live%/*}" 2>/dev/null || sync
+        restore_point "undo-$tree"
     done
     # Checked, not assumed: no folder of the backup is left in place, and nothing is left aside.
     for tree in server pki; do
@@ -5514,12 +5526,17 @@ restore_resume() {
     # darban restore --resume, and every run of this tool or of the installer while a restore is unfinished: it is
     # finished forward. Before the commit the swaps go on; after it, only the cleanup is left. Everything is decided
     # from the journal read under the lock.
-    local id tree
+    local id tree began
     [[ -f $DARBAN_RESTORE_JOURNAL ]] || { info 'No restore is unfinished.'; return 0; }
+    began=$(journal_value id)
     DARBAN_RESTORE_OWNER=1
     ca_lock || return 1
-    # Read again under the lock: another run may have finished, or undone, the restore while this one waited.
+    # Read again under the lock: another run may have finished, or undone, the restore while this one waited, and
+    # another restore may have begun since. Only the restore this was asked for is finished.
     if [[ ! -f $DARBAN_RESTORE_JOURNAL ]]; then ca_unlock; info 'The restore was finished, or undone, while this waited. Nothing was changed.'; return 0; fi
+    if [[ $(journal_value id) != "$began" ]]; then
+        ca_unlock; fail "Not finished: another restore, of the backup of $(journal_value created), began while this waited. Nothing was changed; run this again to finish that one."; return 1
+    fi
     id=$(journal_value id)
     [[ $id =~ ^[0-9a-zA-Z]+$ ]] || { ca_unlock; urgent "The restore journal $DARBAN_RESTORE_JOURNAL cannot be read. Look at it by hand."; return 1; }
     if [[ $(journal_value state) == undoing ]]; then
