@@ -73,6 +73,19 @@ cat > "$E/bin/systemctl" <<'STUB'
 #!/usr/bin/env bash
 echo "systemctl $*" >> "$STUB_LOG"
 q=0; for a; do [[ $a == --quiet ]] && q=1; done
+# OpenVPN's unit remembers being stopped or disabled, as a restore checks both. FAKE_STOP_FAILS: it never stops.
+unit=${*: -1}
+if [[ $unit == openvpn-server@* ]]; then
+    state=${STUB_LOG%/*}/unit-state; mkdir -p "$state"
+    case " $* " in
+      *" disable "*) if [[ -n ${FAKE_STOP_FAILS:-} ]]; then exit 1; fi; : > "$state/$unit.disabled"; [[ " $* " != *" --now "* ]] || : > "$state/$unit.stopped" ;;
+      *" stop "*) if [[ -n ${FAKE_STOP_FAILS:-} ]]; then exit 1; fi; : > "$state/$unit.stopped" ;;
+      *" enable "*) rm -f "$state/$unit.disabled"; [[ " $* " != *" --now "* ]] || rm -f "$state/$unit.stopped" ;;
+      *" start "*|*" restart "*) [[ -n ${FAIL_RESTART:-} ]] || rm -f "$state/$unit.stopped" ;;
+      *" is-active "*) if [[ -e $state/$unit.stopped ]]; then ((q)) || echo inactive; exit 3; fi ;;
+      *" is-enabled "*) if [[ -e $state/$unit.disabled ]]; then echo disabled; exit 1; fi ;;
+    esac
+fi
 case " $* " in
   *" restart "*) if [[ -n ${FAIL_RESTART:-} ]]; then exit 1; fi ;;
   # FAKE_FAILED names a unit that has failed. FAKE_LIMITNPROC is the process limit of OpenVPN's unit.

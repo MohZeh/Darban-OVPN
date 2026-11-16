@@ -54,15 +54,17 @@ if grep -q 'nat.nft\|backup.conf\|\.ovpn$' "$LOG/members.log"; then echo 'FAIL: 
 python3 -c 'import json, sys; m = json.load(open(sys.argv[1])); assert m["schema"] == 1 and m["clients"] == {"valid": 2, "revoked": 1}, m' "${archive%.tar.age}.manifest.json"
 echo 'PASS: Backup now makes an archive only the owner can open, with the closed list and a manifest.'
 
-# T22 and I13: a client revoked on this server after the backup is never valid again.
+# T22, I13 and C.16.1: a client issued and revoked on this server after the backup is never valid again: the
+# backup is older than the CA in use, so it is refused, and names it.
 printf '1\nc1\n0\n' | darban >/dev/null
 printf '4\nc1\nc1\n0\n' | darban >/dev/null
 before=$(state)
 if printf '2\n' | darban restore "$LOG/backup.tar" --ca-fingerprint "$fp" 2>&1 | tee "$LOG/revoked-since.log"; then echo 'FAIL: the restore would make c1 valid again.'; exit 1; fi
-grep 'this server revoked c1 after the backup was made' "$LOG/revoked-since.log" >/dev/null
+grep 'this backup is older than the CA in use here' "$LOG/revoked-since.log" >/dev/null
+grep 'c1 (serial ' "$LOG/revoked-since.log" >/dev/null
 [[ $(state) == "$before" ]]
 systemctl is-active --quiet "$UNIT"
-echo 'PASS: a restore that would make a client revoked since valid again is refused, and names it.'
+echo 'PASS: a restore older than the CA in use is refused, and names the client issued and revoked since.'
 
 # T64 and C.15.9: the same archive with a line that runs a program is refused before anything changes.
 python3 - "$LOG/backup.tar" "$LOG/up.tar" <<'PY'
@@ -95,7 +97,8 @@ if connect "$LOG/a1.ovpn" "$LOG/before-restore.log"; then echo 'FAIL: a profile 
 disconnect
 host=$(hostname -s | tr -cd 'A-Za-z0-9.-')
 printf '%s\n' "${host:-server}" | darban restore "$LOG/backup.tar" --ca-from "$LOG/a1.ovpn" 2>&1 | tee "$LOG/restore.log"
-grep 'Revocations made after' "$LOG/restore.log" >/dev/null
+grep 'Revocations and certificates issued after' "$LOG/restore.log" >/dev/null
+grep 'then deleted' "$LOG/restore.log" >/dev/null
 grep 'Restored the backup of' "$LOG/restore.log" >/dev/null
 [[ $(fingerprint) == "$fp" ]]
 systemctl is-active --quiet "$UNIT"
@@ -109,10 +112,10 @@ disconnect
 journalctl -u "$UNIT" --since '-60s' --no-pager | grep -i 'certificate revoked' >/dev/null
 echo 'PASS: a client revoked before the backup is still refused.'
 darban status >"$LOG/status.log" || true
-grep 'revocations made after it cannot be known' "$LOG/status.log" >/dev/null
+grep 'revocations and certificates issued after it cannot be known' "$LOG/status.log" >/dev/null
 darban restore --acknowledge | grep 'Acknowledged' >/dev/null
 darban status >"$LOG/status2.log" || true
-if grep 'revocations made after it cannot be known' "$LOG/status2.log" >/dev/null; then echo 'FAIL: the warning stayed after it was acknowledged.'; exit 1; fi
+if grep 'revocations and certificates issued after it cannot be known' "$LOG/status2.log" >/dev/null; then echo 'FAIL: the warning stayed after it was acknowledged.'; exit 1; fi
 printf '1\nd1\n0\n' | darban >/dev/null
 cp "$KEPT/d1.ovpn" "$LOG/d1.ovpn"
 connect "$LOG/d1.ovpn" "$LOG/new-client.log"
