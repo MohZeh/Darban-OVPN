@@ -5133,7 +5133,7 @@ restore_from() {
         crl_state='The backup has no CRL; a new one is made with the restored CA.'; RESTORE_NEW_CRL=1
     elif ! openssl crl -in "$files/pki/crl.pem" -noout 2>/dev/null; then
         crl_state='The CRL in the backup cannot be read; a new one is made with the restored CA.'; RESTORE_NEW_CRL=1
-    elif ! openssl crl -in "$files/pki/crl.pem" -verify -CAfile "$files/pki/ca.crt" -noout >/dev/null 2>&1; then
+    elif ! ( DARBAN_PKI=$files/pki; darban_crl_signature_ok "$files/pki/crl.pem" ); then
         restore_refuse 'the CRL in the backup is not signed by its CA.'; return 1
     else
         next=$(darban_crl_expiry_epoch "$files/pki/crl.pem" 2>/dev/null) || next=0
@@ -5148,7 +5148,7 @@ restore_from() {
     fi
     # I13: a client this server revoked must not come back. A CRL of the same CA shows those revocations; without
     # one, they cannot be known, and the restore says so.
-    if [[ -s $DARBAN_CRL ]] && openssl crl -in "$DARBAN_CRL" -verify -CAfile "$files/pki/ca.crt" -noout >/dev/null 2>&1; then
+    if ( DARBAN_PKI=$files/pki; darban_crl_signature_ok "$DARBAN_CRL" ); then
         rows=$( DARBAN_PKI=$files/pki; darban_index_rows 2>/dev/null ) || rows=""
         while IFS= read -r serial; do
             serial=$(darban_norm_serial "$serial") || continue

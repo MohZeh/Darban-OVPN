@@ -164,6 +164,18 @@ test_expired_revoked_entry_may_leave_the_crl() {
     rc_is 'expired entry left the CRL' 0 "$(crl_count "$CRL")"
 }
 
+test_crl_bad_signature_is_rejected() {
+    # OpenSSL 3.0 may print "verify failure" and exit 0: neither Diagnostics nor the maintainer may accept it.
+    local out
+    openssl crl -in "$CRL" -badsig -out "$E/bad-signature.pem"
+    cp "$E/bad-signature.pem" "$CRL"
+    out=$(lib_verify); rc_is 'a parseable CRL with a bad signature is rejected' 1 "$?"
+    has 'the signature failure is named' 'CRL signature verification failed' "$out"
+    out=$(maintain --check); rc_is 'the maintainer refuses it too' 1 "$?"
+    out=$(mgr status); rc_is 'Diagnostics refuse it too' 1 "$?"
+    has 'Diagnostics name the signature failure' 'CRL signature verification failed' "$out"
+}
+
 test_garbage_published_crl_never_blocks_repair() {
     local out rc
     echo garbage > "$CRL"
@@ -4910,6 +4922,33 @@ test_a_restore_never_brings_back_a_revoked_client() {
     has 'Diagnostics warn' 'revocations made after it cannot be known' "$(mgr status)"
     has 'until it is acknowledged' 'Acknowledged.' "$(restore_run --acknowledge)"
     lacks 'then they do not' 'revocations made after it cannot be known' "$(mgr status)"
+}
+
+test_a_restore_rejects_bad_crl_signatures() {
+    # A parseable but unsigned CRL must neither be repaired silently inside the archive, nor count as evidence
+    # of this server's revocations. Exercise both paths on OpenSSL 3.0 as well as newer versions in CI.
+    local fp out before host
+    backed_up_server
+    fp=$(ca_fp)
+    before=$(sha256sum "$CRL" "$PKI/index.txt" "$SERVER_CONF")
+    openssl crl -in "$CRL" -badsig -out "$E/bad-signature.pem"
+    craft "$E/backup.tar" "$E/bad-crl.tar" crl "$E/bad-signature.pem"
+    : > "$STUB_LOG"
+    out=$(printf '2\n' | bash "$E/manager.sh" restore "$E/bad-crl.tar" --ca-fingerprint "$fp" 2>&1)
+    rc_is 'an archive with a bad CRL signature is refused' 1 "$?"
+    has 'the archive signature failure is named' 'the CRL in the backup is not signed by its CA' "$out"
+    [[ $(sha256sum "$CRL" "$PKI/index.txt" "$SERVER_CONF") == "$before" ]]; rc_is 'the live files stay unchanged' 0 "$?"
+    ok_if 'no restore journal is created' test ! -e "$E/varlib/restore.journal"
+    lacks 'OpenVPN is not touched' 'systemctl disable' "$(cat "$STUB_LOG")"
+    cp "$E/bad-signature.pem" "$CRL"
+    out=$(printf '2\n' | bash "$E/manager.sh" restore "$E/backup.tar" --ca-fingerprint "$fp" 2>&1)
+    has 'a live CRL with a bad signature cannot establish revocations' 'Revocations made after' "$out"
+    ok_if 'a menu choice cannot confirm the unknowable path' test ! -e "$E/varlib/restore-unverified"
+    host=$(hostname -s | tr -cd 'A-Za-z0-9.-'); host=${host:-server}
+    out=$(printf '%s\n' "$host" | bash "$E/manager.sh" restore "$E/backup.tar" --ca-fingerprint "$fp" 2>&1)
+    rc_is 'the server name confirms the unknowable path' 0 "$?"
+    has 'the restore finishes' 'Restored the backup of' "$out"
+    ok_if 'the revocation warning is kept' test -s "$E/varlib/restore-unverified"
 }
 
 test_a_restore_that_stops_finishes_or_goes_back() {

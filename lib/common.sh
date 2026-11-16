@@ -271,7 +271,11 @@ darban_crl_has_serial() {
 }
 darban_crl_signature_ok() {
     # Only a CRL really signed by this CA counts as evidence of what was revoked; its dates may have passed.
-    [[ -s $1 ]] && openssl crl -in "$1" -noout -verify -CAfile "$DARBAN_PKI/ca.crt" >/dev/null 2>&1
+    # Before OpenSSL 3.3, a bad signature can still exit 0. Require the positive verification message too.
+    local verification
+    [[ -s $1 ]] || return 1
+    verification=$(LC_ALL=C openssl crl -in "$1" -noout -verify -CAfile "$DARBAN_PKI/ca.crt" -no-CApath -no-CAstore 2>&1) || return 1
+    [[ $verification == 'verify OK' ]]
 }
 darban_index_rows() {
     # Prints state<TAB>expiry<TAB>serial for each CA record. Fails on an unreadable or malformed database;

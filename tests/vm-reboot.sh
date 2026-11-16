@@ -106,6 +106,14 @@ in_vm 'systemctl is-active --quiet darban-nat.service'
 in_vm 'systemctl is-active --quiet darban-crl.timer'
 in_vm 'sudo nft list table ip darban >/dev/null'
 in_vm 'test "$(sysctl -n net.ipv4.ip_forward)" = 1'
+# The expiry timer is transient. The first sweep (one minute after boot, with 10 s accuracy) rebuilds it from
+# the kept files. SSH and OpenVPN can be ready before that sweep; wait for its result before checking health.
+for attempt in $(seq 1 45); do
+    if in_vm 'systemctl is-active --quiet darban-expire.timer'; then break; fi
+    sleep 2
+done
+in_vm 'systemctl is-active --quiet darban-expire.timer'
+echo 'PASS: the first sweep after the reboot restores the expiry timer for the kept file.'
 in_vm 'sudo darban status' | tee "$WORK/status.log"
 grep -q 'DCO kernel module: ovpn' "$WORK/status.log"
 in_vm 'ip -d link show tun0' | grep -w ovpn >/dev/null
