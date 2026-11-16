@@ -5409,6 +5409,101 @@ test_a_restore_known_by_the_server_ca_only_still_checks_the_crl() {
     ok_if 'and a wrong name changes nothing' test ! -e "$E/varlib/restore.journal"
 }
 
+test_a_waiting_resume_or_rollback_acts_only_on_its_own_restore() {
+    # R26-A01, with the real lock: a --resume or --rollback that waited does nothing when the restore it was asked
+    # for is gone and another one began meanwhile, says so, and leaves that one as it is.
+    local fp kind id snapshot
+    backed_up_server
+    fp=$(ca_fp)
+    real_flock
+    mkdir -p "$E/run"
+    for kind in --rollback --resume; do
+        printf '2\n' | DARBAN_TEST_RESTORE_STOP=2 bash "$E/manager.sh" restore "$E/backup.tar" --ca-fingerprint "$fp" >/dev/null 2>&1
+        id=$(sed -n 's/^id=//p' "$E/varlib/restore.journal")
+        rm -f "$E/held"
+        ( /usr/bin/flock 9; : > "$E/held"; while [[ -e $E/held ]]; do sleep 0.1; done ) 9>>"$E/run/lock" &
+        wait_for '[[ -e $E/held ]]'
+        ( env PATH="$E/realflock:$PATH" bash "$E/manager.sh" restore "$kind" >"$E/second.out" 2>&1; echo "$?" >"$E/second.out.rc" ) &
+        wait_for 'grep -q "waiting up to" "$E/second.out" 2>/dev/null'; rc_is "$kind: it waits for the lock" 0 "$?"
+        # Meanwhile the restore it was asked for is gone, and another one began.
+        cp "$E/varlib/restore.journal" "$E/journal.first"
+        sed -i "s/^id=.*/id=${id}x/" "$E/varlib/restore.journal"
+        snapshot=$(cat "$E/varlib/restore.journal")
+        rm -f "$E/held"
+        wait
+        rc_is "$kind: it is refused" 1 "$(cat "$E/second.out.rc")"
+        has "$kind: it says another restore began" 'another restore' "$(cat "$E/second.out")"
+        [[ $(cat "$E/varlib/restore.journal") == "$snapshot" ]]; rc_is "$kind: and leaves that one as it is" 0 "$?"
+        cp "$E/journal.first" "$E/varlib/restore.journal"
+        has "$kind: the first restore is then undone" 'The restore was undone' "$(restore_run --rollback)"
+    done
+}
+
+test_a_client_record_a_stopped_restore_left_half_written_is_written_whole() {
+    # R26-A02 and C.16.8: a client record this restore adds is written whole on every try, so one left half written
+    # by a stop is not taken as done.
+    local fp
+    backed_up_server
+    fp=$(ca_fp)
+    mkdir -p "$E/varlib/clients"; printf 'first_seen=5\nlast_connect=7\n' > "$E/varlib/clients/carol"
+    mgr backup-auto test >/dev/null
+    (cd "$E" && opened_backup "$E/backup.tar")
+    rm -f "$E/varlib/clients/carol"
+    printf '2\n' | DARBAN_TEST_RESTORE_STOP=after:ledger-noted bash "$E/manager.sh" restore "$E/backup.tar" --ca-fingerprint "$fp" >/dev/null 2>&1
+    rc_is 'stopped once the record was noted' 99 "$?"
+    # What a stop half way through writing it leaves.
+    : > "$E/varlib/clients/carol"
+    has 'the resume finishes the restore' 'The restore is finished.' "$(restore_run --resume)"
+    grep -qx 'first_seen=5' "$E/varlib/clients/carol"; rc_is 'and the record is written whole' 0 "$?"
+}
+
+test_a_rollback_stopped_half_way_is_finished_by_the_next() {
+    # R26-A03 and C.16.9: a rollback stopped between its moves leaves the journal "undoing": nothing finishes the
+    # restore forward from there, and the next rollback finishes, after being stopped again too.
+    local fp out
+    backed_up_server
+    fp=$(ca_fp)
+    : > "$PKI/old-pki"; : > "$E/server/old-server"
+    printf '2\n' | DARBAN_TEST_RESTORE_STOP=after:started bash "$E/manager.sh" restore "$E/backup.tar" --ca-fingerprint "$fp" >/dev/null 2>&1
+    rc_is 'a restore stopped once OpenVPN was started' 99 "$?"
+    out=$(DARBAN_TEST_RESTORE_STOP=after:undo-moved-server restore_run --rollback); rc_is 'its rollback stops between two moves' 99 "$?"
+    grep -qx 'state=undoing' "$E/varlib/restore.journal"; rc_is 'the journal says undoing' 0 "$?"
+    has 'Diagnostics say a rollback is unfinished' 'A rollback of a restore is unfinished' "$(mgr status)"
+    out=$(restore_run --resume); rc_is 'a resume does not finish it forward' 1 "$?"
+    out=$(DARBAN_TEST_RESTORE_STOP=after:undo-pki restore_run --rollback); rc_is 'the next rollback stops later' 99 "$?"
+    out=$(restore_run --rollback); rc_is 'and the one after finishes' 0 "$?"
+    has 'it says so' 'The restore was undone' "$out"
+    ok_if 'the CA and the server files are as they were' test -e "$PKI/old-pki" -a -e "$E/server/old-server"
+    ok_if 'and OpenVPN runs, enabled at boot' unit_on
+}
+
+test_a_rollback_that_cannot_put_settings_or_records_back_keeps_its_journal() {
+    # R26-A03 (A-L3): a rollback that cannot put the settings, or a client record, back names it, keeps the journal
+    # and says nothing is undone; once that is fixed, the next rollback finishes.
+    local fp out
+    if (( EUID == 0 )); then result 1 'skipped: root writes into a folder whatever its mode'; return 0; fi
+    backed_up_server
+    fp=$(ca_fp)
+    mkdir -p "$E/varlib/clients"; printf 'first_seen=5\n' > "$E/varlib/clients/carol"
+    mgr backup-auto test >/dev/null
+    (cd "$E" && opened_backup "$E/backup.tar")
+    rm -f "$E/varlib/clients/carol"
+    printf '2\n' | DARBAN_TEST_RESTORE_STOP=after:started bash "$E/manager.sh" restore "$E/backup.tar" --ca-fingerprint "$fp" >/dev/null 2>&1
+    # The settings cannot be moved back, and the client record cannot be taken away.
+    printf '#!/usr/bin/env bash\nif [[ " $* " == *"config.pre-restore "* ]]; then exit 1; fi\nexec /usr/bin/mv "$@"\n' > "$E/bin/mv"; chmod +x "$E/bin/mv"
+    chmod 555 "$E/varlib/clients"
+    out=$(restore_run --rollback); rc_is 'settings and a client record that cannot be put back' 1 "$?"
+    rm -f "$E/bin/mv"
+    chmod 755 "$E/varlib/clients"
+    has 'the settings are named' "$E/cfg/config" "$out"
+    has 'and the client record' "$E/varlib/clients/carol" "$out"
+    lacks 'and nothing is called undone' 'The restore was undone' "$out"
+    ok_if 'the journal stays' test -s "$E/varlib/restore.journal"
+    out=$(restore_run --rollback); rc_is 'once both are fixed, the rollback finishes' 0 "$?"
+    has 'and says so' 'The restore was undone' "$out"
+    ok_if 'the record it added is gone' test ! -e "$E/varlib/clients/carol"
+}
+
 two_homes() {
     # Two SSH users with homes of their own, ali and bea; root has none here.
     mkdir -p "$E/home/ali" "$E/home/bea"
