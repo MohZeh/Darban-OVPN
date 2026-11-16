@@ -5045,7 +5045,7 @@ restore_resume() {
     ca_lock || return 1
     info "A restore of the backup of $(journal_value created) is unfinished; it is finished now."
     critical_begin
-    if [[ $(journal_value state) != done ]]; then
+    if [[ $(journal_value state) != "done" ]]; then
         systemctl disable --now "$DARBAN_UNIT" >/dev/null 2>&1 || true
         for tree in pki server; do
             restore_swap_tree "$tree" "$id" || { critical_end; urgent "The restore cannot go on: $RESTORE_WHY"; return 1; }
@@ -5069,7 +5069,7 @@ restore_acknowledge() {
 restore_from() {
     # darban restore <tar> --ca-fingerprint <sha256> | --ca-from <profile.ovpn>
     local file='' want='' from='' stage id facts got created host version valid revoked crl_state='' unverified=no rows serial state
-    local now next names='' line tree
+    local now next undone="" line tree
     local -a stale=()
     while (( $# )); do
         case $1 in
@@ -5142,11 +5142,11 @@ restore_from() {
             serial=$(darban_norm_serial "$serial") || continue
             state=$(awk -F '\t' -v s="$serial" '{v=toupper($3); gsub(/:/, "", v); sub(/^0+/, "", v); if (v == "") v = "0"; if (v == s) {print $1; exit}}' <<<"$rows")
             if [[ $state == V ]]; then
-                names+="${names:+, }$(awk -F '\t' -v s="$serial" '{v=toupper($4); gsub(/:/, "", v); sub(/^0+/, "", v); if (v == s) {cn=$6; sub(/^.*\/CN=/, "", cn); sub(/\/.*/, "", cn); print cn; exit}}' "$files/pki/index.txt")"
+                undone+="${undone:+, }$(awk -F '\t' -v s="$serial" '{v=toupper($4); gsub(/:/, "", v); sub(/^0+/, "", v); if (v == s) {cn=$6; sub(/^.*\/CN=/, "", cn); sub(/\/.*/, "", cn); print cn; exit}}' "$files/pki/index.txt")"
             fi
         done < <(darban_crl_serials "$DARBAN_CRL" 2>/dev/null)
-        if [[ -n $names ]]; then
-            restore_refuse "this server revoked $(safe_text "$names") after the backup was made, and the backup would make them valid again."; return 1
+        if [[ -n $undone ]]; then
+            restore_refuse "this server revoked $(safe_text "$undone") after the backup was made, and the backup would make them valid again."; return 1
         fi
     else
         unverified=yes
