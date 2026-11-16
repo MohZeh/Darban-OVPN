@@ -11,6 +11,8 @@ DARBAN_CRL=$DARBAN_SERVER_DIR/crl.pem
 DARBAN_UNIT=openvpn-server@server.service
 # Root-owned /run, not the world-writable /run/lock, so other users cannot pre-create or redirect it.
 DARBAN_LOCK=/run/darban.lock
+# A restore of the CA that has not finished; while it is there, nothing starts OpenVPN.
+DARBAN_RESTORE_JOURNAL=/var/lib/darban/restore.journal
 DARBAN_TMP_FILES=()
 # Only 'darban-crl-maintain --renew --allow-crl-shrink' sets this; it is never read from the environment.
 DARBAN_ALLOW_CRL_SHRINK=0

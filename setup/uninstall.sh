@@ -52,7 +52,7 @@ else
 fi
 systemctl disable --now darban-crl.timer >/dev/null 2>&1 || true
 systemctl stop darban-links.service >/dev/null 2>&1 || true
-rm -f -- "$UNITS/darban-crl.timer" "$UNITS/darban-crl.service" "$UNITS/darban-links.service"
+rm -f -- "$UNITS/darban-crl.timer" "$UNITS/darban-crl.service" "$UNITS/darban-links.service" "$UNITS/darban-backup.service"
 # Links hold copies of profiles with private keys.
 rm -rf -- "$LINKS"
 systemctl daemon-reload >/dev/null 2>&1 || true
@@ -67,6 +67,7 @@ Kept, delete these yourself if unwanted:
   /root/openvpn-clients                (profiles that contain private keys)
   /etc/darban             (hostname and download settings)
   /var/backups/darban     (older copies of the tool)
+  /var/backups/darban-pki (encrypted backups of the CA)
 EOF
 for name in "${kept_certs[@]}"; do
     printf '  %s/live/%s   (the links'"'"' Let'"'"'s Encrypt certificate; certbot still renews it)\n' "$LE_DIR" "$name"

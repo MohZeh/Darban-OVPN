@@ -53,7 +53,7 @@ if [[ -e /usr/local/sbin/darban && -e $LIB/common.sh ]]; then
         if [[ -e $file ]]; then cp -a -- "$file" "$backup_dir/sbin/"; fi
     done
     cp -a -- "$LIB/." "$backup_dir/lib/"
-    for file in /etc/systemd/system/darban-crl.service /etc/systemd/system/darban-crl.timer /etc/systemd/system/darban-links.service; do
+    for file in /etc/systemd/system/darban-crl.service /etc/systemd/system/darban-crl.timer /etc/systemd/system/darban-links.service /etc/systemd/system/darban-backup.service; do
         if [[ -e $file ]]; then cp -a -- "$file" "$backup_dir/units/"; fi
     done
     # The units of connection events, when the version replaced had them: going back to it keeps them.
@@ -67,6 +67,7 @@ fi
 install -o root -g root -m 600 lib/common.sh "$LIB/common.sh"
 install -o root -g root -m 600 lib/ui.sh "$LIB/ui.sh"
 install -o root -g root -m 600 lib/linkd.py "$LIB/linkd.py"
+install -o root -g root -m 600 lib/backup.py "$LIB/backup.py"
 install -o root -g root -m 700 setup/get.sh "$LIB/get.sh"
 install -o root -g root -m 700 setup/uninstall.sh "$LIB/uninstall.sh"
 install -o root -g root -m 700 setup/remove-server.sh "$LIB/remove-server.sh"
@@ -75,6 +76,7 @@ install -o root -g root -m 700 bin/darban /usr/local/sbin/darban
 install -o root -g root -m 644 systemd/darban-crl.service /etc/systemd/system/darban-crl.service
 install -o root -g root -m 644 systemd/darban-crl.timer /etc/systemd/system/darban-crl.timer
 install -o root -g root -m 644 systemd/darban-links.service /etc/systemd/system/darban-links.service
+install -o root -g root -m 644 systemd/darban-backup.service /etc/systemd/system/darban-backup.service
 # Connection events. The script OpenVPN runs lives outside $LIB, where OpenVPN's user can run it, so no uninstall
 # or restore of any version leaves server.conf naming a script that is gone.
 install -d -o root -g root -m 755 /usr/local/libexec
@@ -85,6 +87,11 @@ done
 # systemd names the unit of a mount after its path.
 install -o root -g root -m 644 systemd/darban-events.mount '/etc/systemd/system/run-darban\x2devents.mount'
 systemctl daemon-reload
+
+# A restore of the CA that stopped half way is finished before anything below touches OpenVPN or the CRL.
+if [[ -e $DARBAN_RESTORE_JOURNAL ]]; then
+    /usr/local/sbin/darban restore --resume </dev/null || { echo 'INSTALL INCOMPLETE: a restore of the CA is unfinished. See: sudo darban status' >&2; exit 1; }
+fi
 
 # What the install writes in /etc/darban and the NAT file, it writes under the lock every writer of the server's
 # configuration takes, so a CRL renewal or a change in the menu never meets half of it.

@@ -265,7 +265,7 @@ def rows_redraw_in_place(m):
 def restart_needs_two_key_presses(m):
     assert m.wait_for('Choose [0-9]')
     m.press('8', ENTER)
-    assert m.wait_for('Choose [0-3')
+    assert m.wait_for('Choose [0-4')
     m.press('3', ENTER)
     assert m.wait_for('Esc: Cancel')
     check('the option is yellow', '\x1b[33mRestart OpenVPN' in m.seen, repr(m.seen[-400:]))
@@ -275,7 +275,7 @@ def restart_needs_two_key_presses(m):
     with open(m.env_dir + '/stub.log') as handle:
         check('no restart was issued', 'systemctl restart' not in handle.read())
     m.press(ENTER)
-    assert m.wait_for('Choose [0-3')
+    assert m.wait_for('Choose [0-4')
     m.press('3', ENTER)
     assert m.wait_for('Esc: Cancel')
     m.drain()
@@ -334,7 +334,7 @@ def name_reuse_asks_when_server_settings_exist(m):
 def diagnostics_start_with_a_summary(m):
     assert m.wait_for('Choose [0-9]')
     m.press('8', ENTER)
-    assert m.wait_for('Choose [0-3')
+    assert m.wait_for('Choose [0-4')
     start = len(m.seen)
     m.press('1', ENTER)
     check('it asks before the whole list', m.wait_for('See every check?'), m.seen)
@@ -404,6 +404,31 @@ def settings_and_menu_six_name_the_share_time(m):
     check('and that it was not read yet', m.wait_for('not read yet'), m.seen)
 
 
+def backup_now_asks_for_a_key_and_shows_the_fingerprint(m):
+    # The server folder as this tool's setup writes it, so the backup has everything it needs.
+    env = m.env_dir
+    shutil.copy(env + '/pki/ca.crt', env + '/server/ca.crt')
+    shutil.copy(env + '/pki/private/server_abc123.key', env + '/server/server.key')
+    with open(env + '/server/server.conf', 'w') as conf:
+        conf.write('# Created by Darban OVPN server-setup.\nport 1194\nproto udp4\ndev tun\ntopology subnet\n'
+                   'server 10.8.0.0 255.255.255.0\nca ca.crt\ncert server.crt\nkey server.key\ntls-crypt tls-crypt.key\n'
+                   'crl-verify %s/server/crl.pem\nverb 3\n' % env)
+    assert m.wait_for('Choose [0-9]')
+    m.press('8', ENTER)
+    assert m.wait_for('Choose [0-4')
+    m.press('4', ENTER)
+    check('it asks how the backup is locked', m.wait_for('How is the backup locked?'), m.seen)
+    assert m.wait_for('Esc: Cancel')
+    m.drain()
+    m.press(ENTER)
+    check('the key comes first, with how to make one', m.wait_for('age-keygen -o darban-backup.key'), m.seen)
+    assert m.wait_for('Your age public key')
+    m.press('age1' + 'q' * 58, ENTER)
+    check('the backup is made', m.wait_for('Backup made:'), m.seen)
+    check('with the CA fingerprint', m.wait_for('CA fingerprint'), m.seen)
+    check('and where the copy is', m.wait_for('This copy is on this server.'), m.seen)
+
+
 def ctrl_c_at_main_menu_exits(m):
     assert m.wait_for('Choose [0-9]')
     m.drain()
@@ -420,6 +445,7 @@ for function, options in [
     (name_reuse_asks_when_server_settings_exist, {}),
     (diagnostics_start_with_a_summary, {}),
     (share_chooser_moves_with_keys, {}), (share_esc_means_later, {}), (settings_and_menu_six_name_the_share_time, {}),
+    (backup_now_asks_for_a_key_and_shows_the_fingerprint, {}),
     (ctrl_c_at_main_menu_exits, {}),
 ]:
     scenario(function.__name__, function, **options)
