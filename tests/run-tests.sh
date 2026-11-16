@@ -4765,7 +4765,8 @@ if not keep:
     manifest['members'] = {m.name: {'sha256': hashlib.sha256(d).hexdigest(), 'size': len(d)} for m, d in result if m.isreg()}
 with tarfile.open(out, 'w', format=tarfile.PAX_FORMAT) as tar:
     data = json.dumps(manifest).encode()
-    info = tarfile.TarInfo('manifest.json'); info.size = len(data); tar.addfile(info, io.BytesIO(data))
+    if case != 'noschema':
+        info = tarfile.TarInfo('manifest.json'); info.size = len(data); tar.addfile(info, io.BytesIO(data))
     for m, d in result:
         if m.isreg():
             m.size = len(d); tar.addfile(m, io.BytesIO(d))
@@ -4850,45 +4851,58 @@ test_backups_follow_changes_of_the_ca() {
 }
 
 test_restore_puts_the_ca_back() {
-    # D5, C.8, C.12.10 and C.13.6: a restore puts the CA, the clients and the server files of the backup back, with
-    # server.conf written again from the template. OpenVPN is off from the first rename to the end. What it replaced is
-    # kept, and the restored CA issues clients again.
-    local out fp before
+    # D5, C.8, C.12.10, C.13.6 and C.16.5: a restore puts the CA, the clients and the server files of the backup back,
+    # with server.conf written again from the template. OpenVPN is off from the first rename to the end. What it
+    # replaced is kept for 30 days, and the restored CA issues clients again. C.16.1: once a client was issued after
+    # the backup, the backup is older than the CA in use, and it is refused without any change.
+    local out fp before until
     backed_up_server
     fp=$(ca_fp)
     before=$(cat "$PKI/index.txt")
-    menu '1\ndave\n0\n' >/dev/null
     echo 'custom 1' >> "$SERVER_CONF"
     : > "$STUB_LOG"
     out=$(printf '2\n' | bash "$E/manager.sh" restore "$E/backup.tar" --ca-fingerprint "$fp" 2>&1); rc_is 'the restore succeeds' 0 "$?"
     has 'it says what it restores' 'Clients' "$out"
     has 'and that OpenVPN stays off' 'OpenVPN stays off from the first change until the end' "$out"
     has 'it is done' 'Restored the backup of' "$out"
+    until=$(date -u -d '+30 days' +%Y-%m-%d)
+    has 'it says until when what it replaced is kept' "until $until, then deleted" "$out"
     [[ $(cat "$PKI/index.txt") == "$before" ]]; rc_is 'the CA index is the one of the backup' 0 "$?"
     lacks 'server.conf comes from the template' 'custom 1' "$(cat "$SERVER_CONF")"
     has 'with the routing of the backup' 'push "redirect-gateway def1 bypass-dhcp"' "$(cat "$SERVER_CONF")"
     ok_if 'no journal is left' test ! -e "$E/varlib/restore.journal"
     ok_if 'what it replaced is kept' test -n "$(find "$E/pki-backups" -maxdepth 2 -path '*pre-restore-*/pki' -type d)"
+    ok_if 'with the time it is kept from' test -s "$(find "$E/pki-backups" -maxdepth 2 -path '*pre-restore-*/.restored' | head -n1)"
     [[ $(grep -n 'systemctl disable --now openvpn-server@server.service' "$STUB_LOG" | cut -d: -f1 | head -n1) -lt $(grep -n 'systemctl enable --now openvpn-server@server.service' "$STUB_LOG" | cut -d: -f1 | tail -n1) ]]
     rc_is 'OpenVPN is turned off first and on at the end' 0 "$?"
+    out=$(bash "$E/manager.sh" restore "$E/backup.tar" 2>&1 </dev/null); rc_is 'without an anchor it refuses' 2 "$?"
+    has 'and says what to give' '--ca-fingerprint' "$out"
+    out=$(printf '2\n' | bash "$E/manager.sh" restore "$E/backup.tar" --ca-from "$E/clients/bob.ovpn" 2>&1); rc_is 'a profile from a device is an anchor too' 0 "$?"
     menu '1\nfrank\n0\n' >/dev/null
     ok_if 'the restored CA issues a client' test -s "$E/clients/frank.ovpn"
     maintain --check >/dev/null; rc_is 'and its CRL passes its checks' 0 "$?"
-    out=$(bash "$E/manager.sh" restore "$E/backup.tar" 2>&1 </dev/null); rc_is 'without an anchor it refuses' 2 "$?"
-    has 'and says what to give' '--ca-fingerprint' "$out"
-    out=$(printf '2\n' | bash "$E/manager.sh" restore "$E/backup.tar" --ca-from "$E/clients/frank.ovpn" 2>&1); rc_is 'a profile from a device is an anchor too' 0 "$?"
+    before=$(cat "$PKI/index.txt" "$SERVER_CONF" "$CRL")
+    : > "$STUB_LOG"
+    out=$(printf '2\n' | bash "$E/manager.sh" restore "$E/backup.tar" --ca-fingerprint "$fp" 2>&1); rc_is 'a backup older than the CA in use is refused' 1 "$?"
+    has 'it says so' 'this backup is older than the CA in use here' "$out"
+    has 'and names the client issued since, with its serial' 'frank (serial ' "$out"
+    has 'and what to do' 'Use a newer backup, or keep the CA in use.' "$out"
+    has 'and that nothing changed' 'Nothing on this server was changed.' "$out"
+    [[ $(cat "$PKI/index.txt" "$SERVER_CONF" "$CRL") == "$before" && ! -e $E/varlib/restore.journal ]]; rc_is 'and nothing did' 0 "$?"
+    lacks 'OpenVPN was not touched' 'systemctl disable' "$(cat "$STUB_LOG")"
 }
 
 test_a_restore_refuses_before_changing_anything() {
-    # T51, T64, C.13.6, C.14.5, C.15.9 and C.15.10: an archive with any member outside the closed list, a link, a
+    # T51, T64, C.13.6, C.14.5, C.15.10 and C.16.4: an archive with any member outside the closed list, a link, a
     # member twice, one too large, a path out of place, a server.conf with another directive, a member that does not
-    # match its checksum, or another CA, is refused before anything changes.
+    # match its checksum, no manifest and so no schema, or another CA, is refused before anything changes.
     local fp kind out snapshot
     backed_up_server
     fp=$(ca_fp)
     snapshot=$(cat "$PKI/index.txt" "$SERVER_CONF")
     for kind in extra:'not one a backup holds' symlink:'not a regular file' hardlink:'not a regular file' duplicate:'appears twice' \
-        big:'larger than' absolute:'not allowed' dotdot:'not allowed' up:'line 25, up' tamper:'does not match its checksum'; do
+        big:'larger than' absolute:'not allowed' dotdot:'not allowed' up:'line 25, up' tamper:'does not match its checksum' \
+        noschema:'has no manifest.json'; do
         craft "$E/backup.tar" "$E/bad.tar" "${kind%%:*}"
         : > "$STUB_LOG"
         out=$(printf '2\n' | bash "$E/manager.sh" restore "$E/bad.tar" --ca-fingerprint "$fp" 2>&1); rc_is "${kind%%:*}: refused" 1 "$?"
@@ -4903,31 +4917,46 @@ test_a_restore_refuses_before_changing_anything() {
 }
 
 test_a_restore_never_brings_back_a_revoked_client() {
-    # I13, T22, T33 and C.8: a client this server revoked after the backup is never valid again: the restore is
-    # refused and names it. Without a CRL of the same CA, the restore says the revocations cannot be known, asks
-    # for the server name, and Diagnostics warn until the owner acknowledges it.
-    local fp out host
+    # I13, T22, T33, C.8, C.16.1 and C.16.2: a client this server revoked after the backup is never valid again. The
+    # CA index names it, and the CRL of the same CA when the index cannot be read. Only when neither can tell, the
+    # restore says what cannot be known, asks for the server name, and Diagnostics warn until the owner acknowledges.
+    local fp out host snapshot
     backed_up_server
     fp=$(ca_fp)
     revoke_menu bob >/dev/null
+    snapshot=$(cat "$PKI/index.txt" "$CRL" "$SERVER_CONF")
     out=$(printf '2\n' | bash "$E/manager.sh" restore "$E/backup.tar" --ca-fingerprint "$fp" 2>&1); rc_is 'refused' 1 "$?"
-    has 'it names the client revoked since' 'this server revoked bob after the backup was made' "$out"
-    host=$(hostname -s | tr -cd 'A-Za-z0-9.-'); host=${host:-server}
+    has 'as a backup older than the CA in use' 'this backup is older than the CA in use here' "$out"
+    has 'it names the client revoked since, with its serial' 'bob (serial ' "$out"
+    [[ $(cat "$PKI/index.txt" "$CRL" "$SERVER_CONF") == "$snapshot" && ! -e $E/varlib/restore.journal ]]; rc_is 'and nothing changed' 0 "$?"
+    cp "$CRL" "$E/crl.saved"
     rm -f "$CRL"
+    out=$(printf '2\n' | bash "$E/manager.sh" restore "$E/backup.tar" --ca-fingerprint "$fp" 2>&1); rc_is 'without a CRL the index still tells' 1 "$?"
+    has 'and names it' 'bob (serial ' "$out"
+    cp "$E/crl.saved" "$CRL"
+    tail -n 1 "$PKI/index.txt" >> "$PKI/index.txt"
+    out=$(printf '2\n' | bash "$E/manager.sh" restore "$E/backup.tar" --ca-fingerprint "$fp" 2>&1); rc_is 'an index with a serial twice: the CRL still tells' 1 "$?"
+    has 'and names it' 'bob (serial ' "$out"
+    lacks 'without asking for the server name' 'cannot be known' "$out"
+    printf 'not a record\n' >> "$PKI/index.txt"
+    rm -f "$CRL"
+    host=$(hostname -s | tr -cd 'A-Za-z0-9.-'); host=${host:-server}
     out=$(printf 'wrong\n' | bash "$E/manager.sh" restore "$E/backup.tar" --ca-fingerprint "$fp" 2>&1)
-    has 'without a CRL it cannot know' 'Revocations made after' "$out"
+    has 'with neither, it cannot know' 'Revocations and certificates issued after' "$out"
+    has 'and says why' 'its index cannot be read' "$out"
     ok_if 'a wrong name restores nothing' test ! -e "$E/varlib/restore-unverified"
     out=$(printf '%s\n' "$host" | bash "$E/manager.sh" restore "$E/backup.tar" --ca-fingerprint "$fp" 2>&1); rc_is 'the server name restores it' 0 "$?"
     ok_if 'and leaves the warning' test -s "$E/varlib/restore-unverified"
-    has 'Diagnostics warn' 'revocations made after it cannot be known' "$(mgr status)"
+    has 'Diagnostics warn' 'revocations and certificates issued after it cannot be known' "$(mgr status)"
     has 'until it is acknowledged' 'Acknowledged.' "$(restore_run --acknowledge)"
-    lacks 'then they do not' 'revocations made after it cannot be known' "$(mgr status)"
+    lacks 'then they do not' 'revocations and certificates issued after it cannot be known' "$(mgr status)"
 }
 
 test_a_restore_rejects_bad_crl_signatures() {
     # A parseable but unsigned CRL must neither be repaired silently inside the archive, nor count as evidence
-    # of this server's revocations. Exercise both paths on OpenSSL 3.0 as well as newer versions in CI.
-    local fp out before host
+    # of this server's revocations. Exercise both paths on OpenSSL 3.0 as well as newer versions in CI. C.16.2: with
+    # a readable index of the same CA, a bad live CRL needs no unknowable path, and a revocation since is still refused.
+    local fp out before
     backed_up_server
     fp=$(ca_fp)
     before=$(sha256sum "$CRL" "$PKI/index.txt" "$SERVER_CONF")
@@ -4942,26 +4971,35 @@ test_a_restore_rejects_bad_crl_signatures() {
     lacks 'OpenVPN is not touched' 'systemctl disable' "$(cat "$STUB_LOG")"
     cp "$E/bad-signature.pem" "$CRL"
     out=$(printf '2\n' | bash "$E/manager.sh" restore "$E/backup.tar" --ca-fingerprint "$fp" 2>&1)
-    has 'a live CRL with a bad signature cannot establish revocations' 'Revocations made after' "$out"
-    ok_if 'a menu choice cannot confirm the unknowable path' test ! -e "$E/varlib/restore-unverified"
-    host=$(hostname -s | tr -cd 'A-Za-z0-9.-'); host=${host:-server}
-    out=$(printf '%s\n' "$host" | bash "$E/manager.sh" restore "$E/backup.tar" --ca-fingerprint "$fp" 2>&1)
-    rc_is 'the server name confirms the unknowable path' 0 "$?"
+    rc_is 'a bad live CRL with a readable index restores on the usual question' 0 "$?"
+    lacks 'the index tells what happened since' 'cannot be known' "$out"
     has 'the restore finishes' 'Restored the backup of' "$out"
-    ok_if 'the revocation warning is kept' test -s "$E/varlib/restore-unverified"
+    ok_if 'and leaves no warning' test ! -e "$E/varlib/restore-unverified"
+    revoke_menu bob >/dev/null
+    openssl crl -in "$CRL" -badsig -out "$E/bad-again.pem"
+    cp "$E/bad-again.pem" "$CRL"
+    before=$(sha256sum "$CRL" "$PKI/index.txt" "$SERVER_CONF")
+    out=$(printf '2\n' | bash "$E/manager.sh" restore "$E/backup.tar" --ca-fingerprint "$fp" 2>&1)
+    rc_is 'a revocation since is refused, though the live CRL is bad' 1 "$?"
+    has 'and named' 'bob (serial ' "$out"
+    [[ $(sha256sum "$CRL" "$PKI/index.txt" "$SERVER_CONF") == "$before" ]]; rc_is 'with nothing changed' 0 "$?"
 }
 
 test_a_restore_that_stops_finishes_or_goes_back() {
-    # T65, C.12.10, C.13.7 and C.15.8: a restore stopped after any rename leaves OpenVPN off; Diagnostics say so, the
-    # CRL timer leaves the CRL alone, and the next run of this tool finishes it. --rollback puts back what was there.
-    # A state no step explains stops the resume, with OpenVPN still off.
-    local fp step before after out id
+    # T65, C.12.10, C.13.7, C.15.8 and C.16.9: a restore stopped after any rename leaves OpenVPN off; Diagnostics say
+    # so, the CRL timer leaves the CRL alone, and the next run of this tool finishes it. Before the commit, --rollback
+    # puts back what was there, the settings and client records it added included. After the commit it is not
+    # undone; a cleanup that stopped is finished, each step once, and keeps what the restore replaced whole.
+    local fp step out id kept
     backed_up_server
     fp=$(ca_fp)
-    before=$(cat "$PKI/index.txt")
-    menu '1\ndave\n0\n' >/dev/null
-    after=$(cat "$PKI/index.txt")
+    # A client record only the backup has: the restore adds it, and a rollback takes it away again.
+    mkdir -p "$E/varlib/clients"; printf 'first_seen=5\n' > "$E/varlib/clients/carol"
+    mgr backup-auto test >/dev/null
+    (cd "$E" && opened_backup "$E/backup.tar")
+    rm -f "$E/varlib/clients/carol"
     for step in 1 2 3 4; do
+        : > "$PKI/old-pki"; : > "$E/server/old-server"
         : > "$STUB_LOG"
         printf '2\n' | DARBAN_TEST_RESTORE_STOP=$step bash "$E/manager.sh" restore "$E/backup.tar" --ca-fingerprint "$fp" >/dev/null 2>&1; rc_is "stopped after rename $step" 99 "$?"
         ok_if "after rename $step a journal is left" test -s "$E/varlib/restore.journal"
@@ -4970,14 +5008,22 @@ test_a_restore_that_stops_finishes_or_goes_back() {
         out=$(maintain --check 2>&1); rc_is "after rename $step the CRL timer leaves it alone" 1 "$?"
         mgr list >/dev/null
         ok_if "after rename $step the next run finishes it" test ! -e "$E/varlib/restore.journal"
-        [[ $(cat "$PKI/index.txt") == "$before" ]]; rc_is "after rename $step the backup is in place" 0 "$?"
+        ok_if "after rename $step the backup is in place" test ! -e "$PKI/old-pki" -a ! -e "$E/server/old-server"
         grep -q 'systemctl enable --now openvpn-server@server.service' "$STUB_LOG"; rc_is "after rename $step OpenVPN is on again" 0 "$?"
     done
-    menu '1\nerin\n0\n' >/dev/null
-    after=$(cat "$PKI/index.txt")
+    # A step before the commit fails: everything the restore did is undone, and checked.
+    rm -f "$E/varlib/clients/carol" "$E/cfg/domain"
+    : > "$PKI/old-pki"; : > "$E/server/old-server"
+    out=$(printf '2\n' | DARBAN_TEST_RESTORE_FAIL=commit bash "$E/manager.sh" restore "$E/backup.tar" --ca-fingerprint "$fp" 2>&1); rc_is 'a restore that fails before the commit' 1 "$?"
+    has 'is undone' 'The restore was undone' "$out"
+    ok_if 'the CA and the server files are as they were' test -e "$PKI/old-pki" -a -e "$E/server/old-server"
+    ok_if 'a client record it added is taken away again' test ! -e "$E/varlib/clients/carol"
+    ok_if 'and a setting that was not there before' test ! -e "$E/cfg/domain"
+    ok_if 'and no journal is left' test ! -e "$E/varlib/restore.journal"
+    echo vpn.example.com > "$E/cfg/domain"
     printf '2\n' | DARBAN_TEST_RESTORE_STOP=3 bash "$E/manager.sh" restore "$E/backup.tar" --ca-fingerprint "$fp" >/dev/null 2>&1
     has 'a stopped restore can be undone' 'The restore was undone' "$(restore_run --rollback)"
-    [[ $(cat "$PKI/index.txt") == "$after" && ! -e $E/varlib/restore.journal ]]; rc_is 'and the CA is as it was' 0 "$?"
+    ok_if 'and the CA is as it was' test -e "$PKI/old-pki" -a -e "$E/server/old-server" -a ! -e "$E/varlib/restore.journal"
     printf '2\n' | DARBAN_TEST_RESTORE_STOP=1 bash "$E/manager.sh" restore "$E/backup.tar" --ca-fingerprint "$fp" >/dev/null 2>&1
     id=$(sed -n 's/^id=//p' "$E/varlib/restore.journal")
     rm -rf "$PKI.restore-$id"
@@ -4986,7 +5032,22 @@ test_a_restore_that_stops_finishes_or_goes_back() {
     has 'and says what to look at' 'cannot go on' "$out"
     lacks 'with OpenVPN still off' 'systemctl enable' "$(cat "$STUB_LOG")"
     has 'it can still be undone' 'The restore was undone' "$(restore_run --rollback)"
-    [[ $(cat "$PKI/index.txt") == "$after" ]]; rc_is 'back to what was there' 0 "$?"
+    ok_if 'back to what was there' test -e "$PKI/old-pki" -a -e "$E/server/old-server"
+    # The cleanup after the commit fails, twice: the restore is done and stays done.
+    : > "$STUB_LOG"
+    out=$(printf '2\n' | DARBAN_TEST_RESTORE_FAIL=keep-server bash "$E/manager.sh" restore "$E/backup.tar" --ca-fingerprint "$fp" 2>&1); rc_is 'a cleanup that fails after the commit' 1 "$?"
+    has 'says the restore is done and the cleanup is not' 'but the cleanup is unfinished' "$out"
+    grep -q 'systemctl enable --now openvpn-server@server.service' "$STUB_LOG"; rc_is 'and OpenVPN runs' 0 "$?"
+    has 'Diagnostics say only the cleanup is left' 'its cleanup is unfinished' "$(mgr status)"
+    out=$(restore_run --rollback); rc_is 'after the commit it is not undone' 1 "$?"
+    has 'and says so' 'so it is not undone' "$out"
+    ok_if 'the restored CA stays' test ! -e "$PKI/old-pki"
+    out=$(DARBAN_TEST_RESTORE_FAIL=keep-server restore_run --resume); rc_is 'a cleanup that fails again' 1 "$?"
+    out=$(restore_run --resume); rc_is 'then finishes' 0 "$?"
+    has 'and says so' 'The restore is finished.' "$out"
+    kept=$(find "$E/pki-backups" -path '*pre-restore-*/server/old-server' | head -n1)
+    ok_if 'what it replaced is kept whole' test -n "$kept" -a -e "${kept%/server/old-server}/pki/old-pki" -a -s "${kept%/server/old-server}/.restored"
+    ok_if 'and nothing is left beside the live folders' test ! -e "$PKI.pre-restore" -a ! -e "$E/server.pre-restore" -a ! -e "$E/varlib/restore.journal"
 }
 
 test_a_restore_with_a_crl_missing_unreadable_or_expired() {
@@ -5008,6 +5069,143 @@ test_a_restore_with_a_crl_missing_unreadable_or_expired() {
         maintain --check >/dev/null; rc_is "${kind%%:*}: a new CRL is in place" 0 "$?"
         [[ $(stat -c %a "$CRL") == 644 ]]; rc_is "${kind%%:*}: readable by OpenVPN" 0 "$?"
     done
+}
+
+test_a_restore_checks_again_under_the_lock() {
+    # C.16.1 and C.16.9: what was checked before the question is checked again under the CA lock. A client revoked in
+    # another session while the question is open refuses the restore; a restore that waited while another one
+    # stopped half way is refused. Neither changes anything.
+    local fp out snapshot i
+    backed_up_server
+    fp=$(ca_fp)
+    mkfifo "$E/answer"
+    ( bash "$E/manager.sh" restore "$E/backup.tar" --ca-fingerprint "$fp" <"$E/answer" >"$E/race.out" 2>&1; echo "$?" > "$E/race.rc" ) &
+    exec 7>"$E/answer"
+    for i in $(seq 1 100); do grep -q 'Restore the backup of' "$E/race.out" 2>/dev/null && break; sleep 0.1; done
+    revoke_menu bob >/dev/null
+    snapshot=$(cat "$PKI/index.txt" "$SERVER_CONF")
+    printf '2\n' >&7; exec 7>&-
+    wait
+    rc_is 'a revocation while the question was open refuses it' 1 "$(cat "$E/race.rc")"
+    has 'it says what changed' 'this server changed while the question was open' "$(cat "$E/race.out")"
+    has 'and names it' 'bob (serial ' "$(cat "$E/race.out")"
+    [[ $(cat "$PKI/index.txt" "$SERVER_CONF") == "$snapshot" && ! -e $E/varlib/restore.journal ]]; rc_is 'and nothing changed' 0 "$?"
+    # The newest backup knows that revocation. One restore waits at its question while another stops half way.
+    (cd "$E" && opened_backup "$E/backup2.tar")
+    rm -f "$E/answer" "$E/race.rc"; mkfifo "$E/answer"
+    ( bash "$E/manager.sh" restore "$E/backup2.tar" --ca-fingerprint "$fp" <"$E/answer" >"$E/race2.out" 2>&1; echo "$?" > "$E/race.rc" ) &
+    exec 7>"$E/answer"
+    for i in $(seq 1 100); do grep -q 'Restore the backup of' "$E/race2.out" 2>/dev/null && break; sleep 0.1; done
+    printf '2\n' | DARBAN_TEST_RESTORE_STOP=2 bash "$E/manager.sh" restore "$E/backup2.tar" --ca-fingerprint "$fp" >/dev/null 2>&1; rc_is 'the other restore stops half way' 99 "$?"
+    printf '2\n' >&7; exec 7>&-
+    wait
+    rc_is 'the one that waited is refused' 1 "$(cat "$E/race.rc")"
+    has 'it says why' 'A restore is unfinished' "$(cat "$E/race2.out")"
+    has 'and that it changed nothing' 'Nothing on this server was changed.' "$(cat "$E/race2.out")"
+    has 'the first one is the one finished' 'The restore is finished.' "$(restore_run --resume)"
+}
+
+test_a_restore_moves_no_folder_while_openvpn_runs() {
+    # C.16.9: OpenVPN off now and at boot is proven before the first rename. When it does not stop, nothing is moved,
+    # and what was prepared is taken away.
+    local fp out snapshot
+    backed_up_server
+    fp=$(ca_fp)
+    snapshot=$(cat "$PKI/index.txt" "$SERVER_CONF" "$CRL")
+    out=$(printf '2\n' | FAKE_STOP_FAILS=1 bash "$E/manager.sh" restore "$E/backup.tar" --ca-fingerprint "$fp" 2>&1); rc_is 'refused' 1 "$?"
+    has 'it says OpenVPN did not stop' 'OpenVPN did not stop' "$out"
+    has 'and that no folder was moved' 'No folder was moved' "$out"
+    [[ $(cat "$PKI/index.txt" "$SERVER_CONF" "$CRL") == "$snapshot" ]]; rc_is 'nothing changed' 0 "$?"
+    ok_if 'no journal and nothing prepared is left' test ! -e "$E/varlib/restore.journal" -a -z "$(compgen -G "$PKI.restore-*")" -a -z "$(compgen -G "$E/server.restore-*")"
+    ok_if 'nothing was set aside' test ! -e "$PKI.pre-restore" -a ! -e "$E/server.pre-restore"
+}
+
+test_a_job_that_waited_for_a_killed_restore_changes_nothing() {
+    # C.16.9: the CRL job and the daily backup check the journal once they hold the CA lock, so one that waited while
+    # a restore was killed changes nothing.
+    local fp out before count
+    backed_up_server
+    fp=$(ca_fp)
+    printf '2\n' | DARBAN_TEST_RESTORE_STOP=2 bash "$E/manager.sh" restore "$E/backup.tar" --ca-fingerprint "$fp" >/dev/null 2>&1
+    # As if the restore had not begun when the job started: its journal appears while the job waits for the lock.
+    mv "$E/varlib/restore.journal" "$E/journal.saved"
+    before=$(sha256sum "$CRL" "$PKI/crl.pem" 2>/dev/null)
+    out=$(FLOCK_HOOK="cp '$E/journal.saved' '$E/varlib/restore.journal'" maintain --renew); rc_is 'the CRL job that waited is refused' 1 "$?"
+    has 'it says why' 'A restore is unfinished, so nothing is changed' "$out"
+    [[ $(sha256sum "$CRL" "$PKI/crl.pem" 2>/dev/null) == "$before" ]]; rc_is 'and the CRL is untouched' 0 "$?"
+    rm -f "$E/varlib/restore.journal"
+    count=$(backups)
+    # Something changed, so the daily backup would make one.
+    mkdir -p "$E/varlib/clients"; printf 'first_seen=9\n' > "$E/varlib/clients/zz-new"
+    out=$(FLOCK_HOOK="cp '$E/journal.saved' '$E/varlib/restore.journal'" mgr backup-auto daily)
+    [[ $(backups) == "$count" ]]; rc_is 'the daily backup that waited makes none' 0 "$?"
+    mv "$E/journal.saved" "$E/varlib/restore.journal"
+    has 'the restore is then finished' 'The restore is finished.' "$(restore_run --resume)"
+}
+
+test_a_backup_hook_that_ignores_its_time_is_killed() {
+    # R18-10: a hook that ignores the end of its time is killed soon after, and named as failed.
+    local start took
+    template_server
+    backup_key_set
+    sed -i 's/^BACKUP_HOOK_SECONDS=.*/BACKUP_HOOK_SECONDS=1/' "$E/manager.sh"
+    mkdir -m 700 "$E/cfg/backup-hooks"
+    printf '#!/bin/bash\ntrap "" TERM\nsleep 60\n' > "$E/cfg/backup-hooks/stubborn"; chmod 700 "$E/cfg/backup-hooks/stubborn"
+    start=$(date +%s)
+    mgr backup-auto daily >/dev/null
+    took=$(( $(date +%s) - start ))
+    (( took < 40 )); rc_is "the hook is killed soon after its time (took ${took}s)" 0 "$?"
+    has 'and named as failed' 'A backup hook failed: stubborn' "$(mgr status)"
+}
+
+test_a_restore_says_when_nat_did_not_come_back() {
+    # R18-12: a restore whose NAT rules did not load says so, and does not end as if all were well.
+    local fp out
+    backed_up_server
+    fp=$(ca_fp)
+    printf 'table ip darban {\n    chain postrouting {\n        ip saddr 10.8.0.0/24 oifname "eth0" masquerade\n    }\n    chain forward {\n        ip saddr 10.8.0.0/24 ip daddr 10.8.0.0/24 drop\n    }\n}\n' > "$E/cfg/nat.nft"
+    printf '#!/usr/bin/env bash\necho "nft $*" >> "$STUB_LOG"\nif [[ $1 == -f ]]; then exit 1; fi\n' > "$E/bin/nft"; chmod +x "$E/bin/nft"
+    out=$(printf '2\n' | bash "$E/manager.sh" restore "$E/backup.tar" --ca-fingerprint "$fp" 2>&1); rc_is 'it ends with a failure' 1 "$?"
+    has 'the CA is restored' 'Restored the backup of' "$out"
+    has 'and it says NAT is not loaded' 'The NAT rules are not loaded' "$out"
+    ok_if 'the restore itself is finished' test ! -e "$E/varlib/restore.journal"
+}
+
+test_what_a_restore_replaced_is_deleted_after_30_days() {
+    # C.16.5: kept 30 days after its restore, with a warning in Diagnostics from 7 days before. Never deleted while a
+    # restore is unfinished, without a readable time, with a time in the future, or with a link in it.
+    local fp dir now
+    backed_up_server
+    fp=$(ca_fp)
+    printf '2\n' | bash "$E/manager.sh" restore "$E/backup.tar" --ca-fingerprint "$fp" >/dev/null 2>&1
+    dir=$(find "$E/pki-backups" -maxdepth 1 -name 'pre-restore-*' -type d | head -n1)
+    ok_if 'what it replaced is kept' test -d "$dir/pki"
+    has 'Diagnostics say when it goes' 'it is deleted in 30 days' "$(mgr status)"
+    mgr sweep >/dev/null
+    ok_if 'a sweep keeps it within its time' test -d "$dir"
+    now=$(date -u +%s)
+    echo $(( now - 25 * 86400 )) > "$dir/.restored"
+    has 'Diagnostics warn 7 days before' 'is deleted in 5 day(s)' "$(mgr status)"
+    echo $(( now + 86400 )) > "$dir/.restored"
+    mgr sweep >/dev/null
+    ok_if 'a time in the future keeps it' test -d "$dir"
+    has 'and Diagnostics say why' 'a restore time in the future' "$(mgr status)"
+    echo $(( now - 31 * 86400 )) > "$dir/.restored"
+    ln -s /etc "$dir/pki/link"
+    mgr sweep >/dev/null
+    ok_if 'a link in it keeps it' test -d "$dir"
+    rm -f "$dir/pki/link"
+    rm -f "$dir/.restored"
+    mgr sweep >/dev/null
+    ok_if 'no time keeps it' test -d "$dir"
+    has 'and Diagnostics say why' 'did not finish its cleanup' "$(mgr status)"
+    echo $(( now - 31 * 86400 )) > "$dir/.restored"
+    printf 'id=x\n' > "$E/varlib/restore.journal"
+    mgr sweep >/dev/null
+    ok_if 'an unfinished restore keeps it' test -d "$dir"
+    rm -f "$E/varlib/restore.journal"
+    mgr sweep >/dev/null
+    ok_if 'after 30 days it is deleted' test ! -e "$dir"
 }
 
 mapfile -t TESTS < <(declare -F | awk '$3 ~ /^test_/ {print $3}' | sort)

@@ -208,6 +208,9 @@ def check(args):
         tar.extractall(stage, members=regular, filter='data')
     schema = 0
     created = host = version = ''
+    # C.16.4: an archive whose schema is not known is never restored.
+    if 'manifest.json' not in seen:
+        raise Refused('the archive has no manifest.json, so its schema is not known')
     if 'manifest.json' in seen:
         with open(os.path.join(stage, 'manifest.json'), 'r', encoding='utf-8') as handle:
             try:

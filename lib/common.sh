@@ -13,6 +13,8 @@ DARBAN_UNIT=openvpn-server@server.service
 DARBAN_LOCK=/run/darban.lock
 # A restore of the CA that has not finished; while it is there, nothing starts OpenVPN.
 DARBAN_RESTORE_JOURNAL=/var/lib/darban/restore.journal
+# Set only by the restore itself, which may hold the lock while its journal is there.
+DARBAN_RESTORE_OWNER=0
 DARBAN_TMP_FILES=()
 # Only 'darban-crl-maintain --renew --allow-crl-shrink' sets this; it is never read from the environment.
 DARBAN_ALLOW_CRL_SHRINK=0
@@ -40,9 +42,18 @@ darban_require_root() { (( EUID == 0 )) || { darban_error 'Run with sudo/root.';
 darban_lock() {
     local wait=${1:-15}
     exec 9>>"$DARBAN_LOCK"
-    flock -n 9 && return 0
-    printf 'Another Darban OpenVPN operation (e.g. the CRL timer) is running; waiting up to %ss...\n' "$wait" >&2 || true
-    flock -w "$wait" 9 || { darban_error 'Another Darban OpenVPN operation is still running. Retry in a minute.'; return 1; }
+    if ! flock -n 9; then
+        printf 'Another Darban OpenVPN operation (e.g. the CRL timer) is running; waiting up to %ss...\n' "$wait" >&2 || true
+        flock -w "$wait" 9 || { darban_error 'Another Darban OpenVPN operation is still running. Retry in a minute.'; return 1; }
+    fi
+    # Checked once the lock is held: a restore killed while this waited leaves its journal, and owns the CA and
+    # OpenVPN until it is finished. Only the restore itself goes on (C.16.9).
+    if [[ -e $DARBAN_RESTORE_JOURNAL ]] && (( DARBAN_RESTORE_OWNER != 1 )); then
+        flock -u 9 2>/dev/null || true
+        exec 9>&-
+        darban_error 'A restore is unfinished, so nothing is changed. Finish it: sudo darban restore --resume'
+        return 1
+    fi
 }
 # Temp files registered here are removed by an EXIT trap even after Ctrl+C or an aborted step.
 darban_tmp_register() { DARBAN_TMP_FILES+=("$1"); }

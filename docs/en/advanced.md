@@ -203,7 +203,7 @@ Only the CRL renews automatically. The menu warns 30 days before the CA or serve
 age-keygen -o darban-backup.key
 ```
 
-It prints a public key that starts with `age1`. Give the tool only that public key; keep the file on your computer. The server can then make backups at any time, and can never open one. With a key set, a backup is also made after each change to the CA, such as a new client or a revocation, and once a day when something changed. Without a key, **Back up the CA now** can use a passphrase instead, for that one backup.
+It prints a public key that starts with `age1`. Give the tool only that public key; keep the file on your computer. The server can then make backups at any time, and can never open one. With a key set, a backup is also made after each change to the CA, such as a new client or a revocation, and once a day when something changed. The daily backup runs right after the daily blocklist (CRL) check, and only when that check succeeds; when it fails, **Diagnostics** show the failed check. Without a key, **Back up the CA now** can use a passphrase instead, for that one backup.
 
 The tool offers to install the small `age` package the first time.
 
@@ -211,7 +211,7 @@ The tool offers to install the small `age` package the first time.
 
 **Write the CA fingerprint down.** **Back up the CA now** and **Diagnostics** show it. A restore asks for it, or for a profile from one of your devices, because it must know the right CA from something outside the backup.
 
-**Hooks.** After each backup, every program in `/etc/darban/backup-hooks/` gets the paths of the archive and its manifest, and nothing else. Only root's own files with mode 700 run, in a folder with mode 700, two minutes at most each. A hook that fails never fails the backup; **Diagnostics** name it. Ready-made hooks for Telegram, email or cloud storage come in v1.1.
+**Hooks.** After each backup, every program in `/etc/darban/backup-hooks/` gets the paths of the archive and its manifest, and nothing else. Only root's own files with mode 700 run, in a folder with mode 700, two minutes at most each; one that does not stop then is killed. A hook that fails never fails the backup; **Diagnostics** name it. Ready-made hooks for Telegram, email or cloud storage come in v1.1.
 
 ### Restore
 
@@ -227,15 +227,19 @@ sudo darban restore darban-pki.tar --ca-fingerprint <the SHA-256 fingerprint you
 
 Instead of the fingerprint, `--ca-from client.ovpn` takes the CA from a profile of one of your devices. On a new server, set the server up first as usual; the restore then replaces its new CA.
 
-Nothing changes until every check has passed: the archive may hold only the files above, as regular files of a limited size; each must match its checksum; the CA must be the one you named, with its private key; the server certificate must come from that CA. `server.conf` is written again from the template of this tool, with only its port, network, routing, DNS, ciphers, keepalive and log detail taken from the backup; any other line, such as `up`, refuses the whole restore. A CRL that is missing, cannot be read or has expired is said so, and a new one is made with the restored CA.
+Nothing changes until every check has passed: the archive must have the manifest of a backup of this tool, and may hold only the files above, as regular files of a limited size; each must match its checksum; the CA must be the one you named, with its private key; the server certificate must come from that CA. `server.conf` is written again from the template of this tool, with only its port, network, routing, DNS, ciphers, keepalive and log detail taken from the backup; any other line, such as `up`, refuses the whole restore. A CRL that is missing, cannot be read or has expired is said so, and a new one is made with the restored CA.
 
-**Revocations after the backup.** On the same server, a client revoked after the backup was made would be valid again, so the restore is refused, and the tool names those clients. On a new server, or one without a blocklist of the same CA, the tool cannot know them. It says "Revocations made after <time> cannot be known." and asks you to type the server name. After the restore, **Diagnostics** warn until you revoke, and issue again, any client you are not sure of, and then run:
+**Changes after the backup.** When the server still has the same CA, the tool compares the backup with that CA's index and blocklist. A backup that does not know a certificate issued, or a revocation made, after it was made is older than the CA in use: the restore is refused, nothing changes, and the tool names each such client with its serial. Use a newer backup, or keep the CA in use. A certificate that only expired since, or one the backup has revoked, is fine.
+
+On a new server, with another CA, or where the index of the same CA cannot be read, the tool cannot know them. It still checks what the blocklist of the same CA lists, if there is one. Then it says "Revocations and certificates issued after <time> cannot be known" and asks you to type the server name. A certificate issued after the backup would connect after the restore, and this tool could not list or revoke it. After the restore, **Diagnostics** warn until you revoke, and issue again, any client you are not sure of, and then run:
 
 ```bash
 sudo darban restore --acknowledge
 ```
 
-**If a restore stops half way,** for example at a power cut, OpenVPN stays off, even after a reboot, until it is done. The next run of this tool, or of the installer, finishes it. To finish it or undo it yourself:
+**What the end of a restore checks:** that OpenVPN is really running, its port is open, and the blocklist and **Diagnostics** are healthy. It does not connect a client.
+
+**If a restore stops half way,** for example at a power cut, OpenVPN stays off, even after a reboot, until it is done. The next run of this tool, or of the installer, finishes it. Before OpenVPN runs with the restored CA, `--rollback` undoes it: the CA, the server files, the settings and the client records it added are as they were. Once OpenVPN runs with the restored CA, the restore is done and is not undone; only its cleanup can be left, and `--resume` finishes it. To finish it or undo it yourself:
 
 ```bash
 sudo darban restore --resume
@@ -245,7 +249,7 @@ sudo darban restore --resume
 sudo darban restore --rollback
 ```
 
-What the restore replaced is kept, readable only by root, in `/var/backups/darban-pki/pre-restore-<id>`.
+What the restore replaced is kept, readable only by root and **not encrypted**, in `/var/backups/darban-pki/pre-restore-<id>` for 30 days, then deleted. The last message of the restore gives the date, and **Diagnostics** warn from 7 days before. To keep it longer, copy it elsewhere first. A copy whose restore did not finish its cleanup, or whose time cannot be read, is never deleted; **Diagnostics** name it.
 
 ### The copy Remove everything offers
 
