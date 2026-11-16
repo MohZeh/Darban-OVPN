@@ -58,7 +58,7 @@ echo 'PASS: Backup now makes an archive only the owner can open, with the closed
 printf '1\nc1\n0\n' | darban >/dev/null
 printf '4\nc1\nc1\n0\n' | darban >/dev/null
 before=$(state)
-if printf '2\n' | darban restore "$LOG/backup.tar" --ca-fingerprint "$fp" | tee "$LOG/revoked-since.log"; then echo 'FAIL: the restore would make c1 valid again.'; exit 1; fi
+if printf '2\n' | darban restore "$LOG/backup.tar" --ca-fingerprint "$fp" 2>&1 | tee "$LOG/revoked-since.log"; then echo 'FAIL: the restore would make c1 valid again.'; exit 1; fi
 grep 'this server revoked c1 after the backup was made' "$LOG/revoked-since.log" >/dev/null
 [[ $(state) == "$before" ]]
 systemctl is-active --quiet "$UNIT"
@@ -77,7 +77,7 @@ with tarfile.open(sys.argv[2], 'w') as tar:
         info = tarfile.TarInfo(name); info.size = len(data); info.mode = 0o600
         tar.addfile(info, io.BytesIO(data))
 PY
-if printf '2\n' | darban restore "$LOG/up.tar" --ca-fingerprint "$fp" | tee "$LOG/up.log"; then echo 'FAIL: an archive with "up /bin/sh" was restored.'; exit 1; fi
+if printf '2\n' | darban restore "$LOG/up.tar" --ca-fingerprint "$fp" 2>&1 | tee "$LOG/up.log"; then echo 'FAIL: an archive with "up /bin/sh" was restored.'; exit 1; fi
 grep 'lines this tool does not restore' "$LOG/up.log" >/dev/null
 grep 'Nothing on this server was changed' "$LOG/up.log" >/dev/null
 [[ $(state) == "$before" && ! -e /var/lib/darban/restore.journal ]]
@@ -94,7 +94,7 @@ bash setup/install.sh >"$LOG/install2.log" 2>&1
 if connect "$LOG/a1.ovpn" "$LOG/before-restore.log"; then echo 'FAIL: a profile of the old CA connected to the new one.'; exit 1; fi
 disconnect
 host=$(hostname -s | tr -cd 'A-Za-z0-9.-')
-printf '%s\n' "${host:-server}" | darban restore "$LOG/backup.tar" --ca-from "$LOG/a1.ovpn" | tee "$LOG/restore.log"
+printf '%s\n' "${host:-server}" | darban restore "$LOG/backup.tar" --ca-from "$LOG/a1.ovpn" 2>&1 | tee "$LOG/restore.log"
 grep 'Revocations made after' "$LOG/restore.log" >/dev/null
 grep 'Restored the backup of' "$LOG/restore.log" >/dev/null
 [[ $(fingerprint) == "$fp" ]]
