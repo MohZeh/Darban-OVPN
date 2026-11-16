@@ -5542,6 +5542,73 @@ test_a_copy_never_writes_over_or_deletes_what_is_not_its_own() {
     grep -qx foreign "$E/home/ali/bob.ovpn"; rc_is 'at a revocation too, a file that is not the certificate stays' 0 "$?"
 }
 
+test_a_changed_copy_stays_known_until_it_is_gone() {
+    # R24-B01 and R24-B03: a copy that changed after it was made is kept, and so is its record. Diagnostics name it;
+    # a revocation with another SSH user set still deletes it when it holds the revoked certificate, and a file that
+    # holds nothing of this CA stays, named, never blocking a revocation. Once it is deleted, it is forgotten.
+    local copy out
+    two_homes
+    ssh_user ali
+    keep_file alice >/dev/null
+    copy=$E/home/ali/alice.ovpn
+    echo '# my note' >> "$copy"
+    sed -i 's/^expires=.*/expires=1/' "$E/clients/alice.share"
+    mgr sweep >/dev/null
+    ok_if 'at expiry the changed copy stays' test -s "$copy"
+    [[ $(copies) == 1 ]]; rc_is 'and so does its record' 0 "$?"
+    has 'Diagnostics name it' 'changed after it was made, so it was kept' "$(mgr status)"
+    ssh_user bea
+    revoke_menu alice >/dev/null
+    ok_if 'a revocation, with bea as the user now, deletes it: it holds the revoked certificate' test ! -e "$copy"
+    [[ $(copies) == 0 ]]; rc_is 'and its record goes' 0 "$?"
+    lacks 'Diagnostics no longer name it' 'changed after it was made' "$(mgr status)"
+    menu '1\nbob\n0\n' >/dev/null
+    ssh_user ali
+    keep_file bob >/dev/null
+    echo 'not a profile any more' > "$E/home/ali/bob.ovpn"
+    sed -i 's/^expires=.*/expires=1/' "$E/clients/bob.share"
+    mgr sweep >/dev/null
+    ssh_user bea
+    out=$(revoke_menu bob)
+    grep -qx 'not a profile any more' "$E/home/ali/bob.ovpn"; rc_is 'a file that holds nothing of this CA stays' 0 "$?"
+    lacks 'and leaves no revocation unfinished' 'Revocation unfinished' "$(menu '0\n')"
+    has 'it is still named' 'changed after it was made, so it was kept' "$(mgr status)"
+    rm -f "$E/home/ali/bob.ovpn"
+    mgr sweep >/dev/null
+    [[ $(copies) == 0 ]]; rc_is 'once deleted, it is forgotten' 0 "$?"
+}
+
+test_a_copy_that_could_not_be_written_leaves_nothing() {
+    # R24-B02: a copy whose writing fails half way is removed, so nothing half written stays in that home, and the
+    # next share makes it under its own name.
+    local out
+    two_homes
+    ssh_user ali
+    out=$(DARBAN_TEST_COPY_FAIL=write keep_file alice)
+    has 'it says so' 'Could not make a copy for ali' "$out"
+    ok_if 'and nothing half written stays' test -z "$(compgen -G "$E/home/ali/alice*.ovpn")"
+    [[ $(copies) == 0 ]]; rc_is 'nor a record' 0 "$?"
+    keep_file alice >/dev/null
+    ok_if 'the next share makes the copy under its own name' test -s "$E/home/ali/alice.ovpn"
+}
+
+test_a_copy_recorded_by_the_version_before_is_adopted() {
+    # R24-B-gap-5: a copy named in the record of its share, as the version before this one recorded it, is recorded
+    # by the next check, and ends with its share.
+    local copy
+    two_homes
+    keep_file alice >/dev/null
+    copy=$E/home/ali/alice.ovpn
+    cp "$E/clients/alice.ovpn" "$copy"
+    printf 'home=%s\nhome_file=%s\n' "$copy" "$(stat -c '%i:%Y:%s' "$copy")" >> "$E/clients/alice.share"
+    ssh_user ali
+    mgr sweep >/dev/null
+    [[ $(copies) == 1 ]]; rc_is 'the copy is recorded' 0 "$?"
+    sed -i 's/^expires=.*/expires=1/' "$E/clients/alice.share"
+    mgr sweep >/dev/null
+    ok_if 'and ends with its share' test ! -e "$copy"
+}
+
 test_the_download_panel_never_reads_a_file_without_a_record() {
     # R18-06: the download commands come from the record; without one, the kept file is not read, so its access
     # time still tells whether it was fetched.

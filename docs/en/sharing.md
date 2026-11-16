@@ -59,7 +59,7 @@ If you log in with a user other than `root`, that user gets a private copy of th
 
 **The copy for that user.** The tool records each copy it makes, in any home and for any user, and deletes it when its share ends: when the client connects, when its time is up, when it becomes a link, or when it is shared again. Sharing a file again always makes a new share. A revocation deletes every recorded copy that holds the revoked certificate, and the file of that name in the home of the user set now when it holds it too. It does not look in other homes, nor on devices.
 
-Nothing in that home is written over or deleted unless it is, at that moment, the copy the tool made. A file of the same name that the tool did not make stays as it is, and the copy gets a name of its own, which the command shows. A copy changed after it was made is kept, and the tool names it. That user receives private keys, so you trust it like yourself with these files; the tool cannot guard against that user racing it in its own home.
+Nothing in that home is written over or deleted unless it is, at that moment, the copy the tool made. A file of the same name that the tool did not make stays as it is, and the copy gets a name of its own, which the command shows. A copy changed after it was made is kept, and stays known: **Diagnostics** name it until you delete it, and a revocation still deletes it when it holds the revoked certificate. A copy whose writing fails is removed at once. That user receives private keys, so you trust it like yourself with these files; the tool cannot guard against that user racing it in its own home.
 
 ## A password on the key
 
