@@ -241,10 +241,14 @@ setup() {
 }
 server_problem() {
     # Prints why this server cannot be managed; nothing when it can.
-    local out
     if [[ -f $DARBAN_RESTORE_JOURNAL ]]; then
         printf 'A restore is unfinished, so OpenVPN stays off. Finish it: sudo darban restore --resume, or undo it: sudo darban restore --rollback\n'; return 0
     fi
+    server_files_problem
+}
+server_files_problem() {
+    # Prints what in the CA or the server files keeps OpenVPN from running; nothing when they are whole.
+    local out
     out=$(C_RED='' C_RESET='' darban_preflight 2>&1) || { printf '%s\n' "${out##*ERROR: }"; return 0; }
     if [[ ! -s $TLS_KEY ]]; then printf 'OpenVPN tls-crypt.key is missing.\n'; return 0; fi
     if ! darban_server_serial >/dev/null 2>&1; then
@@ -4692,7 +4696,7 @@ backup_make() {
     BACKUP_MADE='' BACKUP_WHY=''
     if [[ $secret != passphrase ]]; then recipient=$(backup_recipient) || { BACKUP_WHY='no backup key is set'; return 1; }; fi
     command -v age >/dev/null || { BACKUP_WHY='age is not installed'; return 1; }
-    install -d -o root -g root -m 700 "$PKI_BACKUP_DIR" 2>/dev/null || install -d -m 700 "$PKI_BACKUP_DIR" || { BACKUP_WHY="$PKI_BACKUP_DIR cannot be made"; return 1; }
+    { install -d -o root -g root -m 700 "$PKI_BACKUP_DIR" 2>/dev/null || install -d -m 700 "$PKI_BACKUP_DIR"; } && chmod 700 "$PKI_BACKUP_DIR" || { BACKUP_WHY="$PKI_BACKUP_DIR cannot be made"; return 1; }
     tmp=$(mktemp -d "$PKI_BACKUP_DIR/.new.XXXXXXXX") || { BACKUP_WHY='no room for a new backup'; return 1; }
     if ! facts=$(python3 -I "$BACKUP_PY" pack --out "$tmp/archive.tar" --inner "$tmp/inner.json" --pki "$DARBAN_PKI" \
         --server "$DARBAN_SERVER_DIR" --config "$CONFIG_DIR" --ledger "$LEDGER_DIR" --host "$(backup_host)" --version "$DARBAN_VERSION" 2>&1); then
@@ -4981,7 +4985,7 @@ restore_finish() {
         printf 'script-security 2\nclient-connect %s\nclient-disconnect %s\n' "$EVENT_SCRIPT" "$EVENT_SCRIPT" >>"$DARBAN_SERVER_CONF" || return 1
     fi
     chmod 644 "$DARBAN_CRL" 2>/dev/null || true
-    if [[ -n $(server_problem) ]]; then RESTORE_WHY="the restored server cannot run: $(server_problem)"; return 1; fi
+    if [[ -n $(server_files_problem) ]]; then RESTORE_WHY="the restored server cannot run: $(server_files_problem)"; return 1; fi
     darban_verify_crl "$DARBAN_CRL" >/dev/null 2>&1 || { RESTORE_WHY='the restored CRL does not pass its checks'; return 1; }
     journal_write state=starting || return 1
     if [[ $(journal_value unit_enabled) == yes ]]; then systemctl enable --now "$DARBAN_UNIT" >/dev/null 2>&1 || true; else systemctl start "$DARBAN_UNIT" >/dev/null 2>&1 || true; fi
@@ -5066,10 +5070,14 @@ restore_acknowledge() {
     audit 'restore acknowledged: revocations after the backup were checked by the owner'
     ok 'Acknowledged. Diagnostics no longer warn about revocations made after the backup.'
 }
+restore_serial_name() {
+    # restore_serial_name <normalized serial> <index>: the client name of that serial in a CA index.
+    awk -F '\t' -v s="$1" '{v=toupper($4); gsub(/:/, "", v); sub(/^0+/, "", v); if (v == "") v = "0"; if (v == s) {cn=$6; sub(/^.*\/CN=/, "", cn); sub(/\/.*/, "", cn); print cn; exit}}' "$2" 2>/dev/null
+}
 restore_from() {
     # darban restore <tar> --ca-fingerprint <sha256> | --ca-from <profile.ovpn>
     local file='' want='' from='' stage id facts got created host version valid revoked crl_state='' unverified=no rows serial state
-    local now next undone="" line tree
+    local now next undone="" line tree name
     local -a stale=()
     while (( $# )); do
         case $1 in
@@ -5141,8 +5149,12 @@ restore_from() {
         while IFS= read -r serial; do
             serial=$(darban_norm_serial "$serial") || continue
             state=$(awk -F '\t' -v s="$serial" '{v=toupper($3); gsub(/:/, "", v); sub(/^0+/, "", v); if (v == "") v = "0"; if (v == s) {print $1; exit}}' <<<"$rows")
-            if [[ $state == V ]]; then
-                undone+="${undone:+, }$(awk -F '\t' -v s="$serial" '{v=toupper($4); gsub(/:/, "", v); sub(/^0+/, "", v); if (v == s) {cn=$6; sub(/^.*\/CN=/, "", cn); sub(/\/.*/, "", cn); print cn; exit}}' "$files/pki/index.txt")"
+            # Revoked here, so it must be revoked in the backup too. One the backup does not know at all, issued after
+            # it, would connect again just the same: its certificate is of this CA, and the restored CRL omits it.
+            if [[ $state != R ]]; then
+                name=$(restore_serial_name "$serial" "$files/pki/index.txt")
+                [[ -n $name ]] || name=$(restore_serial_name "$serial" "$DARBAN_PKI/index.txt")
+                undone+="${undone:+, }${name:-serial $serial}"
             fi
         done < <(darban_crl_serials "$DARBAN_CRL" 2>/dev/null)
         if [[ -n $undone ]]; then

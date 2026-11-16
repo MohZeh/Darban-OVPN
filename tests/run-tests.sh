@@ -4786,7 +4786,8 @@ test_backup_now_makes_an_encrypted_archive_and_its_manifest() {
     grep -q -- "age -r $AGE_KEY -o " "$STUB_LOG"; rc_is 'the archive is encrypted for that key' 0 "$?"
     [[ $(backups) == 1 ]]; rc_is 'one backup is there' 0 "$?"
     dir=$E/pki-backups
-    [[ $(stat -c %a "$dir") == 700 && $(stat -c %a "$(readlink -f "$dir/latest.tar.age")") == 600 ]]; rc_is 'readable by root only' 0 "$?"
+    has 'the folder is readable by root only' 'folder 700' "folder $(stat -c %a "$dir")"
+    has 'and so is the archive' 'archive 600' "archive $(stat -c %a "$(readlink -f "$dir/latest.tar.age")")"
     [[ $(manifest_value schema) == 1 && $(manifest_value encryption) == recipient ]]; rc_is 'the manifest has its schema and how it is locked' 0 "$?"
     [[ $(manifest_value ca_fingerprint) == "$(ca_fp | tr -d : | tr 'A-F' 'a-f')" ]]; rc_is 'and the CA fingerprint' 0 "$?"
     [[ $(manifest_value archive_sha256) == "$(sha256sum "$(readlink -f "$dir/latest.tar.age")" | cut -d' ' -f1)" ]]; rc_is 'and the checksum of the archive' 0 "$?"
@@ -4816,8 +4817,9 @@ test_backups_follow_changes_of_the_ca() {
     [[ $(backups) == 1 ]]; rc_is 'the daily one makes none when nothing changed' 0 "$?"
     revoke_menu carol >/dev/null
     [[ $(backups) == 2 ]]; rc_is 'a revocation makes one' 0 "$?"
+    mkdir -p "$E/varlib/clients"
     for i in $(seq 1 15); do printf 'first_seen=%s\n' "$i" > "$E/varlib/clients/zz$i"; mgr backup-auto daily >/dev/null; done
-    [[ $(backups) == 14 ]]; rc_is 'the newest 14 are kept' 0 "$?"
+    has 'the newest 14 are kept' 'kept 14' "kept $(backups): $(ls "$E/pki-backups")"
     ok_if 'and the latest is one of them' test -e "$(readlink -f "$E/pki-backups/latest.tar.age")"
     out=$(FAIL_AGE=1 menu '1\ndave\n0\n')
     has 'a failed backup is said' 'The automatic backup of the CA failed' "$out"

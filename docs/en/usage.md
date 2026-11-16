@@ -89,7 +89,7 @@ sudo darban status
 
 The exit status is `1` when a check found a problem, and `0` otherwise, so scripts can use it too. Warnings do not change it. When the output is cut short, as with `| head`, the checks stop there and the status is `141`, as with any command; it is then neither a pass nor a fail. The checks run on the server, so they cannot see your provider's firewall. If something is wrong, see [Troubleshooting](troubleshooting.md).
 
-`4` **Back up the CA now** in the same menu makes an encrypted backup of the CA, and sets the key for automatic ones; see [Backup](advanced.md#backup).
+**Back up the CA now**, item `4` of the same menu, makes an encrypted backup of the CA, and sets the key for automatic ones; see [Backup](advanced.md#backup).
 
 ## Remove the tool
 
