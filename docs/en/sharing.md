@@ -57,6 +57,10 @@ This way asks for no password: the file comes to you over SSH, which already che
 
 If you log in with a user other than `root`, that user gets a private copy of the file in its home folder. The address, port and user come from **Settings › Advanced › Download access**.
 
+**The copy for that user.** The tool records each copy it makes, in any home and for any user, and deletes it when its share ends: when the client connects, when its time is up, when it becomes a link, or when it is shared again. Sharing a file again always makes a new share. A revocation deletes every recorded copy that holds the revoked certificate, and the file of that name in the home of the user set now when it holds it too. It does not look in other homes, nor on devices.
+
+Nothing in that home is written over or deleted unless it is, at that moment, the copy the tool made. A file of the same name that the tool did not make stays as it is, and the copy gets a name of its own, which the command shows. A copy changed after it was made is kept, and the tool names it. That user receives private keys, so you trust it like yourself with these files; the tool cannot guard against that user racing it in its own home.
+
 ## A password on the key
 
 Usually no password is needed, and Enter means **No password**. A password helps most when the link has no trusted certificate: the browser then cannot tell the real server from one placed in between. A password sent by another route keeps the file useless to anyone who only has the link.
