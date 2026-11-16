@@ -5208,6 +5208,154 @@ test_what_a_restore_replaced_is_deleted_after_30_days() {
     ok_if 'after 30 days it is deleted' test ! -e "$dir"
 }
 
+two_homes() {
+    # Two SSH users with homes of their own, ali and bea; root has none here.
+    mkdir -p "$E/home/ali" "$E/home/bea"
+    cat > "$E/bin/getent" <<STUB
+#!/usr/bin/env bash
+if [[ \${1:-} == passwd ]]; then
+    case \${2:-} in
+        ali) echo "ali:x:1000:1000::$E/home/ali:/bin/bash" ;;
+        bea) echo "bea:x:1001:1001::$E/home/bea:/bin/bash" ;;
+        *) exit 2 ;;
+    esac
+    exit 0
+fi
+exec /usr/bin/getent "\$@"
+STUB
+    chmod +x "$E/bin/getent"
+}
+ssh_user() { sed -i "s/^DOWNLOAD_SSH_USER=.*/DOWNLOAD_SSH_USER=$1/" "$E/cfg/config"; }
+keep_file() { printf '5\n%s\n2\n\n0\n' "$1" | bash "$E/manager.sh" 2>&1; }
+copies() { find "$E/clients" -maxdepth 1 -name '.homecopy.*' | wc -l; }
+
+test_each_copy_for_the_ssh_user_goes_with_its_share() {
+    # R22-06 and C.16: every copy made for an SSH user is recorded until it goes, in any home and for any user, and
+    # it ends with its share: when its time is up, when it is shared again, or when it becomes a link.
+    two_homes
+    ssh_user ali
+    keep_file alice >/dev/null
+    ok_if 'ali gets a copy' test -s "$E/home/ali/alice.ovpn"
+    ssh_user bea
+    menu '6\n1\n1\n0\n' >/dev/null
+    ok_if 'with bea as the user now, bea gets a copy of the same share' test -s "$E/home/bea/alice.ovpn"
+    ok_if 'and the copy of ali stays known' test -s "$E/home/ali/alice.ovpn"
+    [[ $(copies) == 2 ]]; rc_is 'two copies are recorded' 0 "$?"
+    ssh_user root
+    sed -i 's/^expires=.*/expires=1/' "$E/clients/alice.share"
+    mgr sweep >/dev/null
+    ok_if 'when its time is up, both copies go, whoever the user is now' test ! -e "$E/home/ali/alice.ovpn" -a ! -e "$E/home/bea/alice.ovpn"
+    [[ $(copies) == 0 ]]; rc_is 'and so do their records' 0 "$?"
+    ssh_user ali
+    keep_file alice >/dev/null
+    ok_if 'a new share gets a new copy' test -s "$E/home/ali/alice.ovpn"
+    ssh_user bea
+    keep_file alice >/dev/null
+    ok_if 'sharing again ends the copy of the share before' test ! -e "$E/home/ali/alice.ovpn"
+    ok_if 'and the new share has its copy' test -s "$E/home/bea/alice.ovpn"
+    start_links_stub
+    menu '5\nalice\n1\n1\n0\n' >/dev/null
+    stop_links_stub
+    ok_if 'a share that becomes a link ends its copy' test ! -e "$E/home/bea/alice.ovpn"
+    [[ $(copies) == 0 ]]; rc_is 'and its record' 0 "$?"
+}
+
+test_a_revocation_ends_every_copy_of_its_certificate() {
+    # R18-03 and C.16: a revocation deletes every recorded copy of the certificate, in any home, and the file of that
+    # name in the home of the user set now when it holds that certificate. At expiry, such a file of another user,
+    # which this tool did not make, stays.
+    two_homes
+    ssh_user ali
+    keep_file alice >/dev/null
+    cp "$E/home/ali/alice.ovpn" "$E/home/bea/alice.ovpn"
+    ssh_user bea
+    sed -i 's/^expires=.*/expires=1/' "$E/clients/alice.share"
+    mgr sweep >/dev/null
+    ok_if 'at expiry the copy this tool made goes' test ! -e "$E/home/ali/alice.ovpn"
+    ok_if 'and a file bea made with the same certificate stays' test -s "$E/home/bea/alice.ovpn"
+    revoke_menu alice >/dev/null
+    ok_if 'a revocation deletes it, since it holds the revoked certificate' test ! -e "$E/home/bea/alice.ovpn"
+    menu '1\nbob\n0\n' >/dev/null
+    ssh_user ali
+    keep_file bob >/dev/null
+    ok_if 'ali gets a copy of bob' test -s "$E/home/ali/bob.ovpn"
+    ssh_user bea
+    revoke_menu bob >/dev/null
+    ok_if 'a revocation deletes the copy made for ali, with bea as the user now' test ! -e "$E/home/ali/bob.ovpn"
+    [[ $(copies) == 0 ]]; rc_is 'and its record' 0 "$?"
+}
+
+test_a_copy_never_writes_over_or_deletes_what_is_not_its_own() {
+    # R20-02, R22-07 and R22-08: a file already there, a link, a second name of another file, or a home that is a
+    # link is never written over; a copy changed after it was made, even with its time of modification set back, or
+    # replaced just before it is deleted, is kept and named.
+    local out other copy mtime
+    two_homes
+    ssh_user ali
+    echo 'mine' > "$E/home/ali/alice.ovpn"
+    out=$(keep_file alice)
+    has 'a file of the same name stays, and says so' 'is not a copy this tool made for this share, so it was left as it is' "$out"
+    grep -qx mine "$E/home/ali/alice.ovpn"; rc_is 'and it is unchanged' 0 "$?"
+    copy=$(compgen -G "$E/home/ali/alice-*.ovpn" | head -n1)
+    ok_if 'the copy gets a name of its own' test -s "$copy"
+    has 'and the command fetches it' "$copy" "$out"
+    menu '6\n1\n2\n2\n0\n' >/dev/null
+    ok_if 'deleting the share deletes that copy' test ! -e "$copy"
+    grep -qx mine "$E/home/ali/alice.ovpn"; rc_is 'and not the file that was there' 0 "$?"
+    rm -f "$E/home/ali/alice.ovpn"
+    echo 'other' > "$E/other"
+    ln -s "$E/other" "$E/home/ali/alice.ovpn"
+    keep_file alice >/dev/null
+    grep -qx other "$E/other"; rc_is 'a link of that name is not followed' 0 "$?"
+    ok_if 'and stays a link' test -L "$E/home/ali/alice.ovpn"
+    rm -f "$E/home/ali/alice.ovpn" "$E/home/ali"/alice-*.ovpn
+    ln "$E/other" "$E/home/ali/alice.ovpn"
+    keep_file alice >/dev/null
+    grep -qx other "$E/other"; rc_is 'a second name of another file is not written over' 0 "$?"
+    rm -f "$E/home/ali"/alice*.ovpn
+    mv "$E/home/ali" "$E/home/ali-real"; ln -s "$E/home/ali-real" "$E/home/ali"
+    out=$(keep_file alice)
+    has 'a home that is a link gets no copy' 'has no home directory of its own here' "$out"
+    ok_if 'and nothing is written where it points' test -z "$(compgen -G "$E/home/ali-real/alice*.ovpn")"
+    rm -f "$E/home/ali"; mv "$E/home/ali-real" "$E/home/ali"
+    # A copy changed in place, with its size kept and its time of modification set back.
+    keep_file alice >/dev/null
+    copy=$E/home/ali/alice.ovpn
+    mtime=$(stat -c %Y "$copy")
+    sleep 1.1
+    printf '#' | dd of="$copy" bs=1 seek=0 conv=notrunc 2>/dev/null
+    touch -m -d "@$mtime" "$copy"
+    sed -i 's/^expires=.*/expires=1/' "$E/clients/alice.share"
+    mgr sweep >/dev/null
+    ok_if 'a copy changed after it was made stays' test -s "$copy"
+    rm -f "$copy"
+    # Replaced between the question and the deletion.
+    keep_file alice >/dev/null
+    out=$(DARBAN_TEST_HOME_COPY_HOOK='rm -f "$1"; echo foreign > "$1"' menu '6\n1\n2\n2\n0\n')
+    grep -qx foreign "$copy"; rc_is 'a file put there just before the deletion stays' 0 "$?"
+    has 'and is named' 'changed since this tool made it, so it was kept' "$out"
+    rm -f "$copy"
+    menu '1\nbob\n0\n' >/dev/null
+    keep_file bob >/dev/null
+    DARBAN_TEST_HOME_COPY_HOOK='rm -f "$1"; echo foreign > "$1"' revoke_menu bob >/dev/null
+    grep -qx foreign "$E/home/ali/bob.ovpn"; rc_is 'at a revocation too, a file that is not the certificate stays' 0 "$?"
+}
+
+test_the_download_panel_never_reads_a_file_without_a_record() {
+    # R18-06: the download commands come from the record; without one, the kept file is not read, so its access
+    # time still tells whether it was fetched.
+    local before out
+    keep_file alice >/dev/null
+    rm -f "$E/clients/alice.share"
+    touch -a -d '2000-01-01 00:00:00' "$E/clients/alice.ovpn"
+    before=$(stat -c %X "$E/clients/alice.ovpn")
+    sed '$ s/^main "\$@"$/:/' "$E/manager.sh" > "$E/manager-lib.sh"
+    out=$(bash -c 'source "$1"; download_panel "$2" Profile all' _ "$E/manager-lib.sh" "$E/clients/alice.ovpn" 2>&1)
+    has 'the panel is shown' 'Server' "$out"
+    has 'where it points is not known without a record' 'unknown' "$out"
+    [[ $(stat -c %X "$E/clients/alice.ovpn") == "$before" ]]; rc_is 'the file is not read' 0 "$?"
+}
+
 mapfile -t TESTS < <(declare -F | awk '$3 ~ /^test_/ {print $3}' | sort)
 for t in "${TESTS[@]}"; do
     [[ -z $FILTER || $t == *"$FILTER"* ]] || continue

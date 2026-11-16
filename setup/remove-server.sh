@@ -209,7 +209,7 @@ fi
 for name in "${client_names[@]}"; do
     if [[ $name =~ ^[A-Za-z0-9][A-Za-z0-9._@+-]*$ ]]; then try rm -f -- "$OUT_DIR/$name.ovpn" "$OUT_DIR/$name.share"; fi
 done
-try rm -f -- "$OUT_DIR"/.profile.* "$OUT_DIR"/.share.*
+try rm -f -- "$OUT_DIR"/.profile.* "$OUT_DIR"/.share.* "$OUT_DIR"/.homecopy.* "$OUT_DIR"/.homecopy-new.*
 if [[ -d $OUT_DIR ]] && ! rmdir -- "$OUT_DIR" 2>/dev/null; then
     KEPT_FILES+="${KEPT_FILES:+ and in }$OUT_DIR"
 fi
