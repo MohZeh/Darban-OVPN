@@ -114,6 +114,13 @@ for attempt in $(seq 1 45); do
 done
 in_vm 'systemctl is-active --quiet darban-expire.timer'
 echo 'PASS: the first sweep after the reboot restores the expiry timer for the kept file.'
+# The order of the units at boot has no cycle: systemd breaks one by dropping a job, so a unit could stay off.
+if in_vm 'sudo journalctl -b --no-pager' | grep -i 'ordering cycle' >"$WORK/cycles.log"; then
+    cat "$WORK/cycles.log"
+    echo 'FAIL: systemd found an ordering cycle at boot.'
+    exit 1
+fi
+echo 'PASS: systemd found no ordering cycle at boot.'
 in_vm 'sudo darban status' | tee "$WORK/status.log"
 grep -q 'DCO kernel module: ovpn' "$WORK/status.log"
 in_vm 'ip -d link show tun0' | grep -w ovpn >/dev/null
