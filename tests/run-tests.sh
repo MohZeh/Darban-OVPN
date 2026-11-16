@@ -4471,10 +4471,10 @@ test_a_kept_file_has_a_record_and_a_time() {
     # goes, which certificate it holds and where it points, so the tool never reads the file again.
     local out now expires
     expire_unit
-    out=$(menu '1\nbob\n0\n')
-    # The line wraps at the width of the screen, so it is read as one.
-    has 'keeping it says when it goes' 'It is deleted in 24 h, or when bob connects.' "$(tr '\n' ' ' <<<"$out" | tr -s ' ')"
+    menu '1\nbob\n0\n' >/dev/null
     ok_if 'the file has a record beside it' test -s "$E/clients/bob.share"
+    # Without a terminal, creating a client stops at its download panel; sharing it again says when it goes.
+    has 'keeping it says when it goes' 'It is deleted in 24 h, or when bob connects.' "$(menu '5\nbob\n2\n0\n')"
     now=$(date -u +%s); expires=$(record_of bob expires)
     (( expires > now + 86400 - 120 && expires <= now + 86400 )); rc_is 'which expires after the hours of Settings' 0 "$?"
     [[ $(record_of bob serial) == "$(serial_of "$PKI/issued/bob.crt" | sed 's/^0*//')" ]]; rc_is 'it names the certificate in the file' 0 "$?"
