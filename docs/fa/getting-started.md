@@ -81,7 +81,7 @@ sudo bash -c 'curl -fsSL https://github.com/MohZeh/Darban-OVPN/releases/download
 5. **Lock the private key with a password?** برای بدون رمز Enter بزنید. اینکه رمز چه زمانی مفید است، در بخش [رمز کلید خصوصی](sharing.md#a-password-on-the-key) آمده است.
 6. **Copy it to your clipboard?** Enter بزنید تا لینک، و اگر باشد، رمز و متن گیرنده کپی شود.
 
-**نتیجهٔ مورد انتظار:** زیر `Send this to the person` لینکی که با `https://` شروع می‌شود، و بالای آن پورت TCP لینک. لینک حداکثر ۲۴ ساعت کار می‌کند و معمولاً زودتر تمام می‌شود: وقتی سرور اتصالی با این پروفایل ببیند، که معمولاً ظرف چند ثانیه است. این ۲۴ ساعت از **Settings › Link lifetime** تغییر می‌کند.
+**نتیجهٔ مورد انتظار:** زیر `Send this to the person` لینکی که با `https://` شروع می‌شود، و بالای آن پورت TCP لینک. لینک حداکثر ۲۴ ساعت کار می‌کند و معمولاً زودتر تمام می‌شود: وقتی سرور اتصالی با این پروفایل ببیند، که معمولاً ظرف چند ثانیه است. این ۲۴ ساعت از **Settings › Shares expire after** تغییر می‌کند.
 
 **اگر لینک ساخته نشد:** بخش [لینک باز نمی‌شود](troubleshooting.md#link-fails) را ببینید.
 

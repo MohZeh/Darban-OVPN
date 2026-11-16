@@ -132,6 +132,8 @@ certbot_venv=$(awk '$1=="certbot_venv" {print $2}' "$MARKER")
 mapfile -t client_names < <(awk -F '\t' 'NF>=6 && $6 ~ /\/CN=/ {cn=$6; sub(/^.*\/CN=/,"",cn); sub(/\/.*/,"",cn); print cn}' "$PKI/index.txt" 2>/dev/null | sort -u)
 
 echo 'Stopping OpenVPN and NAT...'
+# The timer for the next kept file first: it would start a check of files that are about to go.
+systemctl stop darban-expire.timer >/dev/null 2>&1 || true
 systemctl disable --now "$UNIT" >/dev/null 2>&1 || true
 systemctl disable --now darban-nat.service >/dev/null 2>&1 || true
 modprobe -r ovpn >/dev/null 2>&1 || true
@@ -205,9 +207,9 @@ if [[ -d $SERVER_DIR ]] && ! rmdir -- "$SERVER_DIR" 2>/dev/null; then
 fi
 # Never the whole folder: a file someone else put there, before or after the setup, stays.
 for name in "${client_names[@]}"; do
-    if [[ $name =~ ^[A-Za-z0-9][A-Za-z0-9._@+-]*$ ]]; then try rm -f -- "$OUT_DIR/$name.ovpn"; fi
+    if [[ $name =~ ^[A-Za-z0-9][A-Za-z0-9._@+-]*$ ]]; then try rm -f -- "$OUT_DIR/$name.ovpn" "$OUT_DIR/$name.share"; fi
 done
-try rm -f -- "$OUT_DIR"/.profile.*
+try rm -f -- "$OUT_DIR"/.profile.* "$OUT_DIR"/.share.*
 if [[ -d $OUT_DIR ]] && ! rmdir -- "$OUT_DIR" 2>/dev/null; then
     KEPT_FILES+="${KEPT_FILES:+ and in }$OUT_DIR"
 fi

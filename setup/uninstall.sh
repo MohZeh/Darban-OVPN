@@ -19,6 +19,8 @@ EVENT_SCRIPT=/usr/local/libexec/darban-ovpn-event
 here=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 # shellcheck source=lib/common.sh
 if [[ -r $here/common.sh ]]; then source "$here/common.sh"; fi
+# The timer for the next file kept on the server, before anything else: it would start a tool that is going.
+systemctl stop darban-expire.timer >/dev/null 2>&1 || true
 
 # The links' Let's Encrypt certificate stays, and certbot goes on renewing it. Only this tool's hook in its
 # renewal file goes, since the program it runs is removed: the certificate of this tool's own name, and any the
@@ -42,7 +44,8 @@ if grep -q "^client-connect $EVENT_SCRIPT\$" "$server_conf" 2>/dev/null; then ev
 if declare -F darban_events_units_remove >/dev/null; then
     darban_events_units_remove "$UNITS"
 else
-    for unit in darban-events.path darban-sweep.timer darban-events.service darban-sweep.service darban-events-setup.service 'run-darban\x2devents.mount'; do
+    systemctl stop darban-expire.timer >/dev/null 2>&1 || true
+    for unit in darban-events.path darban-sweep.timer darban-events.service darban-sweep.service darban-expire.service darban-events-setup.service 'run-darban\x2devents.mount'; do
         systemctl disable --now "$unit" >/dev/null 2>&1 || true
         rm -f -- "$UNITS/$unit"
     done

@@ -450,7 +450,7 @@ test_menu_groups_profile_files_together() {
     has 'links and files are one item, with what it does' '6  Links and files (show, cancel, delete)' "$out"
     out=$(menu '7\n0\n0\n')
     has 'settings holds the address' 'Server address' "$out"
-    has 'settings groups the links' $'LINKS\n    3  Link lifetime' "$out"
+    has 'settings groups what sharing needs' $'SHARING\n    3  Shares expire after' "$out"
     has 'the link port is there' '4  Link port' "$out"
     has 'advanced comes last' '6  Advanced' "$out"
     lacks 'settings no longer holds maintenance' 'Restart OpenVPN' "$out"
@@ -1244,7 +1244,7 @@ test_advanced_settings_are_applied_and_rolled_back() {
     has 'items that restart OpenVPN are marked' 'DNS for clients *' "$out"
     has 'and the mark is explained' '* restarts OpenVPN' "$out"
     out=$(menu '7\n0\n0\n')
-    has 'Settings says what it holds' 'What clients connect to, and how temporary links work' "$out"
+    has 'Settings says what it holds' 'What clients connect to, and how profiles are shared' "$out"
     has 'the port is marked as a restart' 'OpenVPN UDP port *' "$out"
 
     before=$(cat "$SERVER_CONF")
@@ -1510,12 +1510,12 @@ test_link_lifetime_setting() {
     # The time a link works is a setting, in whole hours from 1 to 72, and sharing no longer asks for it.
     local out expires now
     start_links_stub
-    has 'Settings shows the default' 'Link lifetime            24 hours' "$(menu '7\n0\n0\n')"
+    has 'Settings shows the default' 'Shares expire after      24 hours' "$(menu '7\n0\n0\n')"
     out=$(menu '7\n3\n73\nabc\n\n0\n0\n')
     has 'more than three days is refused' 'from 1 to 72' "$out"
     if grep -q '^LINK_HOURS=' "$E/cfg/config"; then result 0 'nothing is saved then'; else result 1 'nothing is saved then'; fi
     out=$(menu '7\n3\n6\n0\n0\n')
-    has 'a lifetime is saved' 'Saved: links work for at most 6 hours.' "$out"
+    has 'a lifetime is saved' 'Saved: shares expire after 6 hours.' "$out"
     grep -q '^LINK_HOURS=6$' "$E/cfg/config"; rc_is 'it is in the file' 0 "$?"
     out=$(menu '5\nalice\n1\n1\n0\n')
     lacks 'sharing does not ask how long' 'At most, how long' "$out"
@@ -1804,7 +1804,7 @@ test_settings_apply_in_the_same_session() {
     local out
     start_links_stub
     out=$(menu '7\n3\n5\n0\n5\nalice\n1\n1\n0\n')
-    has 'Settings shows the new lifetime at once' 'Link lifetime            5 hours' "$out"
+    has 'Settings shows the new lifetime at once' 'Shares expire after      5 hours' "$out"
     has 'and the next link takes it' 'Valid     5 hours' "$out"
     menu '6\n1\n2\n0\n' >/dev/null
     out=$(menu '7\n6\n7\n30\n0\n0\n0\n')
@@ -4290,12 +4290,13 @@ test_uninstall_keeps_the_event_script_and_its_lines() {
     install_removal_scripts
     events_here
     printf 'script-security 2\n' > "$E/cfg/.event-lines"
-    for unit in darban-events.path darban-sweep.timer darban-events.service darban-sweep.service darban-events-setup.service 'run-darban\x2devents.mount'; do : > "$units/$unit"; done
+    for unit in darban-events.path darban-sweep.timer darban-events.service darban-sweep.service darban-expire.service darban-events-setup.service 'run-darban\x2devents.mount'; do : > "$units/$unit"; done
     before=$(cat "$SERVER_CONF")
     : > "$STUB_LOG"
     out=$(bash "$E/lib/uninstall.sh" --yes 2>&1 </dev/null); rc_is 'uninstall succeeds' 0 "$?"
-    ok_if 'the units of connection events are gone' test -z "$(find "$units" -name 'darban-events*' -o -name 'darban-sweep*' -o -name 'run-darban*')"
+    ok_if 'the units of connection events are gone' test -z "$(find "$units" -name 'darban-events*' -o -name 'darban-sweep*' -o -name 'darban-expire*' -o -name 'run-darban*')"
     grep -q 'systemctl disable --now darban-events.path' "$STUB_LOG"; rc_is 'the watcher is stopped' 0 "$?"
+    [[ $(grep -n 'systemctl' "$STUB_LOG" | head -n 1) == *'systemctl stop darban-expire.timer' ]]; rc_is 'the timer for kept files is stopped first' 0 "$?"
     ok_if 'the script stays' test -x "$E/libexec/darban-ovpn-event"
     [[ $(cat "$SERVER_CONF") == "$before" ]]; rc_is 'server.conf is untouched' 0 "$?"
     lacks 'OpenVPN is not restarted' 'restart openvpn' "$(cat "$STUB_LOG")"
@@ -4313,14 +4314,14 @@ test_restore_previous_turns_events_off_for_an_older_version() {
     printf '#!/usr/bin/env bash\nDARBAN_VERSION=1.0.0-rc.10\n' > "$backup/sbin/darban"
     echo 'old unit' > "$backup/units/darban-crl.timer"
     events_here
-    for unit in darban-sweep.timer darban-events.service darban-sweep.service darban-events-setup.service 'run-darban\x2devents.mount'; do : > "$E/units/$unit"; done
+    for unit in darban-sweep.timer darban-events.service darban-sweep.service darban-expire.service darban-events-setup.service 'run-darban\x2devents.mount'; do : > "$E/units/$unit"; done
     out=$(menu '9\n4\n1\n0\n0\n')
     has 'it says the older version does not use them' 'v1.0.0-rc.10 does not use connection events' "$out"
     has 'and what stays' "These stay, so connections keep working: $E/libexec/darban-ovpn-event" "$out"
     ok_if 'nothing is removed on No' test -e "$E/units/darban-events.path"
     out=$(menu '9\n4\n2\n')
     has 'it restores' 'Restored v1.0.0-rc.10' "$out"
-    ok_if 'the units of connection events are gone' test -z "$(find "$E/units" -name 'darban-events*' -o -name 'darban-sweep*' -o -name 'run-darban*')"
+    ok_if 'the units of connection events are gone' test -z "$(find "$E/units" -name 'darban-events*' -o -name 'darban-sweep*' -o -name 'darban-expire*' -o -name 'run-darban*')"
     ok_if 'the script stays' test -x "$E/libexec/darban-ovpn-event"
     grep -q 'client-connect' "$SERVER_CONF"; rc_is 'and its lines' 0 "$?"
 }
@@ -4454,6 +4455,215 @@ test_a_forged_event_reaches_no_further_than_its_client() {
     ok_if 'a name that is a path is set aside' test -n "$(grep -l 'not an event line' "$E"/events/bad/*.why)"
     ok_if 'and writes nothing outside the record folder' test ! -e "$E/outside"
     stop_links_stub
+}
+
+# ---------- files kept on the server ----------
+record_of() { sed -n "s/^$2=//p" "$E/clients/$1.share"; }
+kept_cs() { echo $(( $(record_of "$1" created_cs) + 1 )); }
+expire_unit() { mkdir -p "$E/units"; : > "$E/units/darban-expire.service"; }
+share_event() {
+    # share_event <file> <name> <cs> <share>: a connection as the script writes it when the profile names its share.
+    printf 'darban-event 1 connect %s %s %s %s 198.51.100.7 - - - - - %s\n' "$2" "$(this_boot)" "$3" "${EPOCHREALTIME//[!0-9]/}" "$4" > "$E/events/new/$1"
+}
+
+test_a_kept_file_has_a_record_and_a_time() {
+    # D3, C.10, C.12.13, C.13.5 and I14: a file kept on the server is a share like a link. Its record says when it
+    # goes, which certificate it holds and where it points, so the tool never reads the file again.
+    local out now expires
+    expire_unit
+    menu '1\nbob\n0\n' >/dev/null
+    ok_if 'the file has a record beside it' test -s "$E/clients/bob.share"
+    # Without a terminal, creating a client stops at its download panel; sharing it again says when it goes.
+    has 'keeping it says when it goes' 'It is deleted in 24 h, or when bob connects.' "$(menu '5\nbob\n2\n0\n')"
+    now=$(date -u +%s); expires=$(record_of bob expires)
+    (( expires > now + 86400 - 120 && expires <= now + 86400 )); rc_is 'which expires after the hours of Settings' 0 "$?"
+    [[ $(record_of bob serial) == "$(serial_of "$PKI/issued/bob.crt" | sed 's/^0*//')" ]]; rc_is 'it names the certificate in the file' 0 "$?"
+    has 'and where the file points' 'remote=remote vpn.example.com 1194' "$(cat "$E/clients/bob.share")"
+    [[ $(record_of bob share_id) =~ ^[0-9a-f]{16}$ ]]; rc_is 'and has an identity of its own' 0 "$?"
+    grep -q -- "systemd-run --quiet --unit=darban-expire --on-calendar=@$expires --timer-property=AccuracySec=1s" "$STUB_LOG"
+    rc_is 'one timer is set for its time' 0 "$?"
+    lacks 'no profile names its share while the flag is off' 'UV_DARBAN_SHARE' "$(cat "$E/clients/bob.ovpn")"
+    # A read of the file would move its access time: menu 6, its commands, Diagnostics and a name check leave it.
+    touch -a -d '@1000000000' "$E/clients/bob.ovpn"
+    out=$(menu '6\n\n0\n')
+    has 'menu 6 shows the time a file has left' '24 h left' "$(grep -A2 'FILES ON THE SERVER' <<<"$out")"
+    has 'and that it was not read yet' 'not read yet' "$out"
+    has 'it says when a file goes' 'A file on the server goes the same way.' "$out"
+    out=$(menu '6\n1\n1\n0\n')
+    has 'the commands come again' 'USERPROFILE' "$out"
+    has 'with the address from the record' 'vpn.example.com:1194/UDP' "$out"
+    mgr status >/dev/null
+    menu '1\nbob\n0\n' >/dev/null
+    [[ $(stat -c %X "$E/clients/bob.ovpn") == 1000000000 ]]; rc_is 'and none of them read the file' 0 "$?"
+    touch -a -d "@$(( $(date -u +%s) + 5 ))" "$E/clients/bob.ovpn"
+    out=$(menu '6\n\n0\n')
+    has 'a file read after it was made says so' 'file read' "$out"
+    has 'with what that means' 'file read: the file was read after it was made; Darban cannot tell by whom.' "$out"
+    out=$(FAKE_ATIME=noatime menu '6\n\n0\n')
+    lacks 'without access times nothing is claimed' 'file read' "$out"
+    lacks 'either way' 'not read yet' "$out"
+    has 'Settings says what the time is for' 'A link or a file kept on the server is removed after this time' "$(menu '7\n3\n\n0\n0\n')"
+}
+
+test_a_connection_deletes_the_kept_file_made_before_it() {
+    # E3, E4, T29, T38 and T61: a connection after the file was made deletes it, with its record; one at the same
+    # hundredth, one before it, one holding another certificate, or another client's leaves it. The timer then
+    # waits for the next file.
+    local cs
+    events_here; expire_unit
+    menu '1\nbob\n0\n' >/dev/null
+    menu '1\ncarol\n0\n' >/dev/null
+    cs=$(record_of bob created_cs)
+    raw_event same connect bob "$cs"
+    raw_event before connect bob $(( cs - 1 ))
+    raw_event serial connect bob $(( cs + 1 )) 0BADC0DE
+    raw_event other connect dave $(( cs + 1 ))
+    mgr events >/dev/null
+    ok_if 'a connection at the same hundredth, before it, or with another certificate leaves it' test -s "$E/clients/bob.ovpn"
+    : > "$STUB_LOG"
+    raw_event after connect bob $(( cs + 1 )) "$(serial_of "$PKI/issued/bob.crt")"
+    mgr events >/dev/null
+    ok_if 'a connection after it deletes the file' test ! -e "$E/clients/bob.ovpn"
+    ok_if 'with its record' test ! -e "$E/clients/bob.share"
+    ok_if "another client's file stays" test -s "$E/clients/carol.ovpn"
+    grep -q 'profile deleted from server: .*/bob.ovpn, bob connected' "$STUB_LOG"; rc_is 'the journal says why' 0 "$?"
+    grep -q "systemd-run .*--on-calendar=@$(record_of carol expires) " "$STUB_LOG"; rc_is 'the timer now waits for the next file' 0 "$?"
+    has 'and the client record has the connection' 'last_connect=' "$(cat "$E/varlib/clients/bob")"
+    # A file of an earlier boot is older than any event in the queue.
+    sed -i 's/^created_boot=.*/created_boot=00000000-0000-0000-0000-000000000000/' "$E/clients/carol.share"
+    raw_event boot connect carol 5
+    mgr events >/dev/null
+    ok_if 'a file of an earlier boot goes at any connection' test ! -e "$E/clients/carol.ovpn"
+}
+
+test_the_share_a_profile_names_only_narrows() {
+    # E7, C.11 and C.12.4 bullet 5: a connection that names another share leaves the file or link; one that names
+    # this share, or none, ends it. The script passes the name on from a connection only, and it never reaches past
+    # its own client.
+    local id cs url meta
+    events_here
+    menu '1\nbob\n0\n' >/dev/null
+    id=$(record_of bob share_id); cs=$(kept_cs bob)
+    share_event other bob "$cs" 0123456789abcdef
+    mgr events >/dev/null
+    ok_if 'a connection naming another share leaves the file' test -s "$E/clients/bob.ovpn"
+    share_event this bob "$cs" "$id"
+    mgr events >/dev/null
+    ok_if 'one naming its own share deletes it' test ! -e "$E/clients/bob.ovpn"
+    rm -f "$E/events/new/"*
+    event connect alice UV_DARBAN_SHARE=0123456789abcdef
+    [[ $(cat "$E/events/new/"*) == *' - - - - 0123456789abcdef' ]]; rc_is 'the script writes the share a connection names' 0 "$?"
+    rm -f "$E/events/new/"*
+    event connect alice 'UV_DARBAN_SHARE=../x'
+    [[ $(cat "$E/events/new/"*) == *' - - - -' ]]; rc_is 'and leaves out one that is not a share' 0 "$?"
+    rm -f "$E/events/new/"*
+    event disconnect alice UV_DARBAN_SHARE=0123456789abcdef
+    lacks 'the end of a session names none' '0123456789abcdef' "$(cat "$E/events/new/"*)"
+    rm -f "$E/events/new/"*
+    # With the flag, a profile names its share, and a link made from it keeps the name.
+    echo 'SHARE_ID_IN_PROFILE=yes' >> "$E/cfg/config"
+    menu '1\ncarol\n0\n' >/dev/null
+    id=$(record_of carol share_id)
+    has 'with the flag a profile names its share' $'setenv UV_DARBAN_SHARE '"$id"$'\npush-peer-info' "$(cat "$E/clients/carol.ovpn")"
+    start_links_stub
+    url=$(new_link carol)
+    meta=$(ls "$E"/links/*.meta)
+    id=$(sed -n 's/^share_id=//p' "$meta")
+    has 'the link holds the same name as its profile' "setenv UV_DARBAN_SHARE $id" "$(cat "${meta%.meta}.ovpn")"
+    share_event other carol "$(link_cs "$meta")" 0123456789abcdef
+    share_event alien alice "$(link_cs "$meta")" "$id"
+    mgr events >/dev/null
+    [[ $(link_code "$url") == 200 ]]; rc_is "another share, or carol's share named by another client, leaves the link" 0 "$?"
+    share_event this carol "$(link_cs "$meta")" "$id"
+    mgr events >/dev/null
+    [[ $(link_code "$url") == 410 ]]; rc_is 'its own share ends it' 0 "$?"
+    stop_links_stub
+}
+
+test_the_timer_for_kept_files() {
+    # C.13.5, T50 and T63: the check deletes a file whose time is up; a timer left from a file shared again never
+    # deletes the newer one, because the check reads every time from the records. A timer that cannot be set leaves
+    # the file to the five-minute check, with a warning and a yellow line in Diagnostics.
+    local out
+    expire_unit
+    menu '1\nbob\n0\n' >/dev/null
+    sed -i "s/^expires=.*/expires=$(( $(date -u +%s) - 1 ))/" "$E/clients/bob.share"
+    : > "$STUB_LOG"
+    mgr sweep >/dev/null; rc_is 'the check succeeds' 0 "$?"
+    ok_if 'a file whose time is up goes' test ! -e "$E/clients/bob.ovpn"
+    ok_if 'with its record' test ! -e "$E/clients/bob.share"
+    grep -q 'profile deleted from server: .*/bob.ovpn, its time was up' "$STUB_LOG"; rc_is 'the journal says why' 0 "$?"
+    menu '5\nbob\n2\n0\n' >/dev/null
+    ok_if 'shared again, the file is back' test -s "$E/clients/bob.ovpn"
+    mgr sweep >/dev/null
+    ok_if 'and the check of the old timer leaves it' test -s "$E/clients/bob.ovpn"
+    grep -q 'systemctl stop darban-expire.timer' "$STUB_LOG"; rc_is 'the old timer is stopped before a new one is set' 0 "$?"
+    out=$(FAIL_SYSTEMD_RUN=1 menu '1\ncarol\n0\n')
+    has 'a timer that cannot be set is said' 'the five-minute check deletes it once its time is up' "$out"
+    ok_if 'and the file is still made' test -s "$E/clients/carol.share"
+    out=$(FAKE_FAILED=darban-expire.timer mgr status)
+    has 'Diagnostics then warn' 'The timer that deletes a kept file at its time is not set' "$out"
+    lacks 'only then' 'The timer that deletes a kept file at its time is not set' "$(mgr status)"
+}
+
+test_a_file_from_before_gets_its_whole_time() {
+    # L1, L7 and E6: a file kept by an earlier version has no record. The first check gives it one, with the whole
+    # time of Settings, once in the journal. So does a file something else rewrote. A file of a name the CA does
+    # not know, a symbolic link and any other file stay untouched, and a record without its file goes.
+    local now expires
+    menu '1\nbob\n0\n' >/dev/null
+    rm -f "$E/clients/bob.share"
+    echo keep > "$E/clients/stranger.ovpn"
+    echo mine > "$E/outside"; ln -s "$E/outside" "$E/clients/carol.ovpn"
+    echo orphan > "$E/clients/ghost.share"
+    : > "$STUB_LOG"
+    mgr sweep >/dev/null
+    ok_if 'a file from before gets a record' test -s "$E/clients/bob.share"
+    now=$(date -u +%s); expires=$(record_of bob expires)
+    (( expires > now + 86400 - 120 && expires <= now + 86400 )); rc_is 'with the whole time from now' 0 "$?"
+    [[ -n $(record_of bob serial) ]]; rc_is 'and the certificate it holds' 0 "$?"
+    [[ $(grep -c 'profile kept on the server from before' "$STUB_LOG") == 1 ]]; rc_is 'said once in the journal' 0 "$?"
+    mgr sweep >/dev/null
+    [[ $(grep -c 'profile kept on the server from before' "$STUB_LOG") == 1 ]]; rc_is 'and not again' 0 "$?"
+    ok_if 'a file of a name the CA does not know gets none' test ! -e "$E/clients/stranger.share"
+    [[ $(cat "$E/clients/stranger.ovpn") == keep ]]; rc_is 'and is untouched' 0 "$?"
+    ok_if 'a symbolic link gets none' test ! -e "$E/clients/carol.share"
+    [[ $(cat "$E/outside") == mine ]]; rc_is 'and its target is untouched' 0 "$?"
+    ok_if 'a record without its file goes' test ! -e "$E/clients/ghost.share"
+    sed -i 's/^expires=.*/expires=1/' "$E/clients/bob.share"
+    echo '# changed elsewhere' >> "$E/clients/bob.ovpn"
+    mgr sweep >/dev/null
+    ok_if 'a file rewritten by something else is not deleted by a record of the old one' test -s "$E/clients/bob.ovpn"
+    (( $(record_of bob expires) > now )); rc_is 'it gets its whole time again' 0 "$?"
+}
+
+test_a_thousand_kept_files() {
+    # T50 and T63 at scale: a thousand files kept on the server, in one check, then all due at once.
+    local i serial start took
+    mkdir -p "$E/units"; : > "$E/units/darban-expire.service"
+    start=$(( $(date -u +%s) + 7200 ))
+    for i in $(seq 1 1000); do
+        serial=$(printf '%X' $(( 70000 + i )))
+        printf 'V\t351231235959Z\t\t%s\tunknown\t/CN=k%s\n' "$serial" "$i" >> "$PKI/index.txt"
+        echo "profile $i" > "$E/clients/k$i.ovpn"
+        printf 'share_id=%016x\nname=k%s\nserial=%s\ncreated=%s\nexpires=%s\nremote=remote vpn.example.com 1194\nfile=%s\n' \
+            "$i" "$i" "$serial" "$(date -u +%s)" "$(( start + i ))" "$(stat -c '%i:%Y:%s' "$E/clients/k$i.ovpn")" > "$E/clients/k$i.share"
+    done
+    : > "$STUB_LOG"
+    SECONDS=0
+    mgr sweep >/dev/null; rc_is 'the check of a thousand files succeeds' 0 "$?"
+    took=$SECONDS
+    printf '    a thousand files not due: %s s\n' "$took"
+    (( took < 60 )); rc_is 'within a minute' 0 "$?"
+    [[ $(find "$E/clients" -name 'k*.ovpn' | wc -l) == 1000 ]]; rc_is 'and none of them goes before its time' 0 "$?"
+    grep -q -- "--on-calendar=@$(( start + 1 )) " "$STUB_LOG"; rc_is 'the timer is set for the earliest' 0 "$?"
+    sed -i 's/^expires=.*/expires=1/' "$E"/clients/k*.share
+    SECONDS=0
+    mgr sweep >/dev/null
+    took=$SECONDS
+    printf '    a thousand files due at once: %s s\n' "$took"
+    [[ $(find "$E/clients" -name 'k*' | wc -l) == 0 ]]; rc_is 'a thousand files due at once all go' 0 "$?"
+    (( took < 120 )); rc_is 'within two minutes' 0 "$?"
 }
 
 mapfile -t TESTS < <(declare -F | awk '$3 ~ /^test_/ {print $3}' | sort)

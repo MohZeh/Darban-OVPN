@@ -98,12 +98,14 @@ management /run/openvpn-server/darban.sock unix
 
 ## Connection events
 
-With connection events, OpenVPN tells this tool when a client connects and when a session ends. A temporary link then ends within seconds of the first connection, and **List clients** shows when each client was last seen.
+With connection events, OpenVPN tells this tool when a client connects and when a session ends. A temporary link, or a file kept on the server, then ends within seconds of the first connection, and **List clients** shows when each client was last seen.
 
 - **The script.** OpenVPN runs `/usr/local/libexec/darban-ovpn-event` as `nobody` at each connection and at the end of each session. It writes one line into a queue and always exits with 0: it never refuses or holds up a connection, even when the queue is missing or full.
 - **The lines.** The install adds three lines to `server.conf`: `script-security 2`, and `client-connect` and `client-disconnect` with that script. Adding them restarts OpenVPN once, and if OpenVPN does not come back, the previous file is restored.
 - **The queue.** `/run/darban-events` is a tmpfs of its own, of 2 MB, so a full queue never fills `/run`. Its path unit starts `darban events` as root, which checks each line and applies it. A malformed line is set aside in `bad/`, with its reason; one that cannot be applied now waits and is tried again, at the latest by the next five-minute check.
-- **The five-minute check.** `darban-sweep.timer` runs `darban sweep` a minute after boot and every five minutes: it applies what is left, ends expired links, and ends the link of a client that is connected although no event said so.
+- **The five-minute check.** `darban-sweep.timer` runs `darban sweep` a minute after boot and every five minutes: it applies what is left, ends expired links and files kept on the server, and ends the link or file of a client that is connected although no event said so.
+- **The timer for kept files.** `darban-expire.timer` runs the same check when the next file kept on the server is due, so a file goes at its time within a few seconds as a rule. The tool sets it again after each file it makes or deletes. It does not survive a reboot, and if it cannot be set the five-minute check deletes the file, at most five minutes late; **Diagnostics** then warn.
+- **Which share.** When a profile names its share, OpenVPN passes the name to the script, and a connection ends only that share; another copy of the same client leaves it. Profiles do not name it yet: whether every OpenVPN Connect imports such a profile is still being tested. `SHARE_ID_IN_PROFILE=yes` in `/etc/darban/config` turns it on, for that test only. The name can only narrow what a connection ends; it never lets anyone in.
 
 The lines are written only into a `server.conf` this tool's setup made, and only when each check passes: no other `client-connect` or `client-disconnect` script, `script-security` not set to 0 or 1, the script runs as `nobody`, OpenVPN's unit does not limit `LimitNPROC` to 64 or less, and the queue is mounted. Otherwise the install says why, nothing changes, and links end as before: when their time is up, or when the link service sees the connection. After fixing the cause, turn them on with:
 
@@ -115,7 +117,7 @@ sudo darban enable-events
 
 **Trust boundary.** The queue takes what OpenVPN's user, `nobody`, writes. Any other program that runs as `nobody` on this server can write there too. It can end a client's temporary link early, make **List clients** show a wrong `LAST SEEN`, or fill the queue, so that links end only when their time is up. It cannot open a link, let a client in, or touch a file outside the queue. So run no other service as `nobody` on a VPN server.
 
-**Uninstall this tool only** removes the units and the queue, and keeps the script and its lines, so OpenVPN needs no restart and every client still connects; the script then records nothing. The summary shows the command that removes them, in this order: the lines, a restart of OpenVPN, then the script. **Remove everything** removes all of it.
+**Uninstall this tool only** stops the timer for kept files first, then removes the units and the queue, and keeps the script and its lines, so OpenVPN needs no restart and every client still connects; the script then records nothing. The summary shows the command that removes them, in this order: the lines, a restart of OpenVPN, then the script. **Remove everything** removes all of it.
 
 ## Advanced settings
 
@@ -132,7 +134,7 @@ Open **Settings › Advanced**. Items marked `*` (1 to 6, and the OpenVPN port i
 | 7 | New client lifetime | Days for new client certificates, such as `365` or `730`, or `0` for the Easy-RSA default of 825 days. No restart |
 | 8 | Download access | SSH address, port and user shown in `scp` and `sftp` commands. No restart |
 
-The link settings are in **Settings** itself: **Link lifetime**, **Link port** and **Link certificate**. None of them restarts OpenVPN.
+The link settings are in **Settings** itself, under **SHARING**: **Shares expire after**, which holds for files kept on the server too, **Link port** and **Link certificate**. None of them restarts OpenVPN.
 
 **How a change is applied:** you confirm it, `server.conf` is backed up next to itself (the newest five are kept), and OpenVPN restarts. If the UDP port does not return within 5 seconds, the previous file is restored and OpenVPN restarted. If that also fails, an urgent message says so. This check is local: it cannot prove that clients reach the server from the internet.
 

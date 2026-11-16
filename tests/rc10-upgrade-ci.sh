@@ -57,6 +57,9 @@ if grep -q darban-ovpn-event "$CONF"; then echo 'FAIL: rc.10 wrote event lines.'
 printf '1\nup1\n0\n' | darban >/dev/null
 cp /root/openvpn-clients/up1.ovpn "$LOG/up1.ovpn"
 connect "$LOG/up1.ovpn" "$LOG/rc10.log"; disconnect
+# A file rc.10 keeps on the server, which knows nothing of records.
+printf '1\nup2\n0\n' | darban >/dev/null
+cp /root/openvpn-clients/up2.ovpn "$LOG/up2.ovpn"
 echo "PASS: $RC from its release sets up the server, and a client connects."
 
 # E11: updating turns connection events on, with one restart of OpenVPN, and a link then ends by the event.
@@ -75,6 +78,22 @@ disconnect
 grep -q '^last_connect=' "$LEDGER/up1"
 journalctl -t darban --no-pager | grep 'temporary link ended: up1 connected' >/dev/null
 echo 'PASS: the update from rc.10 restarts OpenVPN once, turns connection events on, and the event ends the link.'
+
+# L1 and T31: the file rc.10 kept gets a record at the first check, with the whole time from then, and its first
+# connection after that deletes it.
+systemctl start darban-sweep.service
+[[ -s /root/openvpn-clients/up2.share ]]
+expires=$(sed -n 's/^expires=//p' /root/openvpn-clients/up2.share)
+(( expires > $(date +%s) + 86400 - 600 ))
+journalctl -t darban --no-pager | grep 'profile kept on the server from before: /root/openvpn-clients/up2.ovpn' >/dev/null
+connect "$LOG/up2.ovpn" "$LOG/up2.log"
+for attempt in $(seq 1 15); do
+    if [[ ! -e /root/openvpn-clients/up2.ovpn ]]; then break; fi
+    sleep 1
+done
+disconnect
+[[ ! -e /root/openvpn-clients/up2.ovpn ]] || { echo 'FAIL: the connection left the file kept from rc.10.'; exit 1; }
+echo 'PASS: a file rc.10 kept gets its whole time after the update, and its first connection then deletes it.'
 
 # T34, L11 and C.12.12: Restore previous version goes back to the real rc.10. This code removes the units of
 # connection events first; the script and its lines stay; rc.10's link service ends a link by asking OpenVPN.
