@@ -152,6 +152,25 @@ jobs:
       - name: Real setup on a public address, and its removal
         run: sudo bash tests/public-setup-ci.sh --i-know
 
+  rc10-upgrade:
+    name: From rc.10 and back (Ubuntu ${{ matrix.ubuntu }})
+    needs: lint
+    if: needs.lint.outputs.code == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        ubuntu: ['24.04', '26.04']
+    runs-on: ubuntu-${{ matrix.ubuntu }}
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: The runner must not already have a PKI or server
+        run: sudo test ! -e /root/pki && test ! -e /etc/openvpn/server/server.conf
+      - name: rc.10 from its release, the update to this code, Restore previous version, and back
+        run: sudo bash tests/rc10-upgrade-ci.sh --i-know
+
   # A real virtual machine, so a real reboot. Not on every push: it takes several minutes.
   reboot:
     name: Reboot test (Ubuntu ${{ matrix.ubuntu }})
@@ -196,7 +215,7 @@ jobs:
   result:
     name: CI result
     if: always()
-    needs: [lint, test, acceptance, public-setup, acceptance-arm, reboot]
+    needs: [lint, test, acceptance, public-setup, rc10-upgrade, acceptance-arm, reboot]
     runs-on: ubuntu-24.04
     timeout-minutes: 2
     steps:
@@ -207,10 +226,11 @@ jobs:
           TEST: ${{ needs.test.result }}
           ACCEPTANCE: ${{ needs.acceptance.result }}
           PUBLIC: ${{ needs.public-setup.result }}
+          RC10: ${{ needs.rc10-upgrade.result }}
           ARM: ${{ needs.acceptance-arm.result }}
           REBOOT: ${{ needs.reboot.result }}
         run: |
-          echo "Lint: $LINT, Test: $TEST, Acceptance: $ACCEPTANCE, public address: $PUBLIC, arm64: $ARM, reboot: $REBOOT, code changed: $CODE"
+          echo "Lint: $LINT, Test: $TEST, Acceptance: $ACCEPTANCE, public address: $PUBLIC, from rc.10: $RC10, arm64: $ARM, reboot: $REBOOT, code changed: $CODE"
           test "$LINT" = success
           test "$ARM" = success || test "$ARM" = skipped
           test "$REBOOT" = success || test "$REBOOT" = skipped
@@ -218,8 +238,10 @@ jobs:
             test "$TEST" = success
             test "$ACCEPTANCE" = success
             test "$PUBLIC" = success
+            test "$RC10" = success
           else
             test "$TEST" = skipped
             test "$ACCEPTANCE" = skipped
             test "$PUBLIC" = skipped
+            test "$RC10" = skipped
           fi

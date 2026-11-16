@@ -161,6 +161,8 @@ sed -e "s#^source /usr/local/lib/darban/#source $E/lib/#" -e "s#^OUT_DIR=.*#OUT_
     -e "s#^LE_DIR=.*#LE_DIR=$E/le#" -e "s#^LINK_CERT_LOG=.*#LINK_CERT_LOG=$E/varlib/link-certificates.log#" \
     -e "s#^EVENT_SCRIPT=.*#EVENT_SCRIPT=$E/libexec/darban-ovpn-event#" -e "s#^EVENT_DIR=.*#EVENT_DIR=$E/events#" \
     -e "s#^LEDGER_DIR=.*#LEDGER_DIR=$E/varlib/clients#" \
+    -e 's#^EVENT_MAX=.*#EVENT_MAX=${TEST_EVENT_MAX:-500}#' \
+    -e 's#^event_run_id() {.*#event_run_id() { printf "%s\\n" "${TEST_EVENT_RUN:-$$-0}"; }#' \
     "$SRC/bin/darban" > "$E/manager.sh"
 # The event script as install.sh places it, writing into this fake server's queue.
 mkdir -p "$E/libexec"

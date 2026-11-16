@@ -812,6 +812,8 @@ create_client() {
     critical_end
     if (( rc != 0 )); then fail 'Certificate issuance failed. Inspect the PKI state before trying again.'; return 1; fi
     if (( reused )); then audit "client created again with a used name: $name"; else audit "client created: $name"; fi
+    # When the name was last seen belonged to the certificate it had before: the new one has not been seen yet.
+    rm -f -- "$LEDGER_DIR/$name"
     info "Building the .ovpn profile${S_ELL}"
     if ! write_profile "$name" no; then
         fail 'The certificate was issued but the .ovpn export failed. Use Share (menu 5) instead of creating it again.'; return 1
@@ -2295,6 +2297,8 @@ run_easyrsa() {
     rm -f -- "$log"
     return "$rc"
 }
+# Seconds the management interface may take to answer; the five-minute check waits 3 at most.
+MGMT_TIMEOUT=10
 mgmt_send() {
     # mgmt_send <command> [seconds]: prints the reply of a password-less management interface on a unix
     # socket or localhost TCP. Returns 2 = no usable interface, 1 = failed. OpenVPN drops the reply to a
@@ -2307,10 +2311,10 @@ mgmt_send() {
     if [[ $port == unix ]]; then
         addr=$(darban_conf_path "$addr")
         command -v socat >/dev/null && [[ -S $addr ]] || return 2
-        { printf '%s\n' "$command"; sleep "$wait"; printf 'quit\n'; } | timeout 10 socat -t 2 - "UNIX-CONNECT:$addr" 2>/dev/null || return 1
+        { printf '%s\n' "$command"; sleep "$wait"; printf 'quit\n'; } | timeout "$MGMT_TIMEOUT" socat -t 2 - "UNIX-CONNECT:$addr" 2>/dev/null || return 1
     else
         [[ $addr == 127.0.0.1 || $addr == localhost || $addr == ::1 ]] && [[ $port =~ ^[0-9]+$ ]] || return 2
-        timeout 10 bash -c 'exec 3<>"/dev/tcp/$1/$2" && printf "%s\n" "$3" >&3 && sleep "$4" && printf "quit\n" >&3 && cat <&3' _ "$addr" "$port" "$command" "$wait" 2>/dev/null || return 1
+        timeout "$MGMT_TIMEOUT" bash -c 'exec 3<>"/dev/tcp/$1/$2" && printf "%s\n" "$3" >&3 && sleep "$4" && printf "quit\n" >&3 && cat <&3' _ "$addr" "$port" "$command" "$wait" 2>/dev/null || return 1
     fi
 }
 connected_rows() {
@@ -2424,6 +2428,7 @@ mgmt_available() {
 # that is connected although no event said so.
 EVENT_RE='^darban-event 1 (connect|disconnect) ([A-Za-z0-9][A-Za-z0-9._@+-]{0,127}) ([0-9a-f-]{36}) ([0-9]{1,12}) ([0-9]{16}) ([0-9A-Fa-f.:]{2,45}|-) ([0-9A-Fa-f:]{1,64}|-) ([0-9]{1,20}|-) ([0-9]{1,20}|-) ([0-9]{1,10}|-) ([0-9]{1,12}|-)$'
 EVENT_RUN='' EVENT_SEQ=0 EVENT_TAKEN=0 EVENT_WHY='' EVENT_REJECTED=0 EVENT_REJECT_WHY=''
+EVENT_DONE=0 EVENT_LEFT=0 EVENT_DEADLINE=0
 EVENT_FIELDS=()
 events_user() {
     # The user OpenVPN runs the script as: the one server.conf names, or root without one.
@@ -2480,6 +2485,10 @@ events_blocker() {
     if [[ $limit =~ ^[0-9]+$ ]] && (( limit <= 64 )); then
         printf "OpenVPN's service lets %s run only %s processes (LimitNPROC), so the script could refuse connections\n" "$user" "$limit"; return 0
     fi
+    # Without it, OpenVPN's user could link a file of root's into the queue; the worker refuses such a link anyway.
+    if [[ $(sysctl -n fs.protected_hardlinks 2>/dev/null) != 1 ]]; then
+        printf 'the kernel lets a user link files it does not own (fs.protected_hardlinks is not 1)\n'; return 0
+    fi
     if ! events_mounted; then printf 'the event queue %s is not mounted\n' "$EVENT_DIR"; return 0; fi
     return 1
 }
@@ -2532,6 +2541,10 @@ uptime_cs() {
     up=${up#"${up%%[!0]*}"}
     printf '%s\n' "${up:-0}"
 }
+# The name of this run: its claimed entries are named after it, so no two runs ever pick the same name.
+event_run_id() { local cs; cs=$(uptime_cs) || cs=0; printf '%s-%s\n' "$$" "$cs"; }
+# A mark the worker leaves in new/ when it stopped at its limit with work left: the path unit then starts it again.
+EVENT_RERUN=.darban-rerun
 events_claim() {
     # Moves what is in new/ to work/, each under a new name of this run, so nothing there is ever overwritten. The
     # result is read from the files: what mv returns for a target that exists differs between coreutils versions.
@@ -2539,6 +2552,8 @@ events_claim() {
     restore=$(shopt -p nullglob dotglob || true)
     shopt -s nullglob dotglob
     for entry in "$EVENT_DIR"/new/*; do
+        # The mark of an earlier run of this worker, owned by its own user, which OpenVPN's user cannot be.
+        if [[ ${entry##*/} == "$EVENT_RERUN" && ! -L $entry && -O $entry ]]; then rm -f -- "$entry"; continue; fi
         (( EVENT_TAKEN < EVENT_MAX )) || break
         for attempt in 1 2 3; do
             EVENT_SEQ=$(( EVENT_SEQ + 1 ))
@@ -2579,8 +2594,10 @@ event_reject() {
     EVENT_REJECTED=$(( EVENT_REJECTED + 1 )) EVENT_REJECT_WHY="$name: $2"
 }
 event_later() {
-    # event_later <file> <reason>: a well-formed event that could not be applied now is tried again after 30
-    # seconds, a minute, five minutes, then at each five-minute check. It is never called malformed.
+    # event_later <file> <reason>: a well-formed event that could not be applied now waits at least 30 seconds,
+    # then a minute, then five minutes, then until each next check. Nothing wakes the worker at those times: the
+    # next event or the five-minute check does, so it is tried again by that check at the latest. It is never
+    # called malformed.
     local tries=0 next=0 wait
     if [[ -f $1.next ]]; then read -r tries next _ <"$1.next" || true; fi
     [[ $tries =~ ^[0-9]+$ ]] || tries=0
@@ -2653,16 +2670,17 @@ link_made_before() {
     # link_made_before <meta> <cn> <boot> <cs> <serial>: true when a connection of <cn> at that moment ends the link.
     # A link records the boot and the hundredth of a second it was made at, a clock NTP cannot move. Made in an
     # earlier boot, it is older than any event in the queue, which is a tmpfs. Made at the very same hundredth, it
-    # stays. Without that record, made before an update, only its time ends it. The serial OpenVPN gives, when it
-    # gives one, only narrows this: a link holding another certificate of the same name stays.
+    # stays. Without that record, made before an update, only its time ends it. A link whose certificate this tool
+    # cannot identify is never ended by an event: it stays until its time is up or it is deleted in menu 6, and the
+    # diagnostics name it. The serial OpenVPN gives, when it gives one, only narrows this: a link holding another
+    # certificate of the same name stays.
     local share
     link_meta "$1" || return 1
     [[ $LM_NAME == "$2" ]] || return 1
     [[ $LM_BOOT =~ ^[0-9a-f-]{36}$ && $LM_CS =~ ^[0-9]{1,12}$ ]] || return 1
     if [[ $LM_BOOT == "$3" ]] && (( 10#$4 <= 10#$LM_CS )); then return 1; fi
-    if [[ $5 != - ]] && share=$(share_serial "${1%.meta}.ovpn" "$2") && [[ $(darban_norm_serial "$5" 2>/dev/null) != "$share" ]]; then
-        return 1
-    fi
+    share=$(share_serial "${1%.meta}.ovpn" "$2") || return 1
+    if [[ $5 != - && $(darban_norm_serial "$5" 2>/dev/null) != "$share" ]]; then return 1; fi
     return 0
 }
 events_end_links() {
@@ -2704,8 +2722,11 @@ events_lock() {
 }
 events_apply_claimed() {
     # Applies what work/ holds, oldest first by the clock inside each event, in turns of at most 50 under the CA
-    # lock. An event that is not due yet waits.
-    local file uid boot now rows count=0 cs busy=0 restore tries next
+    # lock. An event that is not due yet waits. Each entry is read once: its checks, its order and what is applied
+    # all come from that one copy, so a change to the file afterwards, through a descriptor its writer kept open,
+    # changes nothing. This run stops at EVENT_MAX entries or its deadline; what is left waits for the next run.
+    local file uid boot now rows count=0 cs busy=0 restore tries next fields
+    local -a event=()
     uid=$(stat -c %u -- "$EVENT_DIR/new" 2>/dev/null) || return 0
     read -r boot </proc/sys/kernel/random/boot_id || return 0
     now=$(date -u +%s)
@@ -2722,21 +2743,22 @@ events_apply_claimed() {
         if ! event_read "$file" "$uid"; then event_reject "$file" "$EVENT_WHY"; continue; fi
         # The queue is a tmpfs, so an event of another boot cannot be real.
         if [[ ${EVENT_FIELDS[2]} != "$boot" ]]; then event_reject "$file" 'from another boot'; continue; fi
-        rows+="${EVENT_FIELDS[3]}"$'\t'"$file"$'\n'
+        # The fields hold no space or tab, so the copy travels in the row itself.
+        rows+="${EVENT_FIELDS[3]}"$'\t'"$file"$'\t'"${EVENT_FIELDS[*]}"$'\n'
     done
     eval "$restore"
     if [[ -n $rows ]]; then
-        while IFS=$'\t' read -r cs file; do
+        while IFS=$'\t' read -r cs file fields; do
             [[ -n $file ]] || continue
+            if (( EVENT_DONE >= EVENT_MAX || SECONDS >= EVENT_DEADLINE )); then EVENT_LEFT=1; break; fi
             if (( busy )); then event_later "$file" 'the CA lock was busy'; continue; fi
             if (( count % 50 == 0 )); then
                 ca_unlock
                 if ! events_lock; then busy=1; event_later "$file" 'the CA lock was busy'; continue; fi
             fi
-            count=$(( count + 1 ))
-            # Read again: only this copy is used, and it is the one checked above.
-            if ! event_read "$file" "$uid"; then event_reject "$file" "$EVENT_WHY"; continue; fi
-            if event_apply "${EVENT_FIELDS[@]}"; then
+            count=$(( count + 1 )) EVENT_DONE=$(( EVENT_DONE + 1 ))
+            read -r -a event <<<"$fields"
+            if event_apply "${event[@]}"; then
                 rm -f -- "$file" "$file.next"
             else
                 event_later "$file" "$EVENT_WHY"
@@ -2751,17 +2773,20 @@ events_apply_claimed() {
 }
 events_run() {
     # darban events (darban-events.service, started by the path unit while new/ holds something): takes what
-    # OpenVPN left and applies it, until new/ is empty, EVENT_MAX entries or EVENT_SECONDS seconds.
-    local deadline before
+    # OpenVPN left and applies it, until new/ is empty, or it has taken or applied EVENT_MAX entries, or
+    # EVENT_SECONDS have passed. What is left then is not lost: entries still in new/ start it again by themselves,
+    # and for those it took but did not apply, it leaves its mark in new/, which does the same.
+    local before
     events_mounted || return 0
-    EVENT_RUN=$$-$(uptime_cs || echo 0) EVENT_SEQ=0 EVENT_TAKEN=0
-    deadline=$(( SECONDS + EVENT_SECONDS ))
+    EVENT_RUN=$(event_run_id) EVENT_SEQ=0 EVENT_TAKEN=0 EVENT_DONE=0 EVENT_LEFT=0
+    EVENT_DEADLINE=$(( SECONDS + EVENT_SECONDS ))
     while :; do
         before=$EVENT_TAKEN
         events_claim
         events_apply_claimed
-        (( EVENT_TAKEN > before && EVENT_TAKEN < EVENT_MAX && SECONDS < deadline )) || break
+        (( ! EVENT_LEFT && EVENT_TAKEN > before && EVENT_TAKEN < EVENT_MAX && SECONDS < EVENT_DEADLINE )) || break
     done
+    if (( EVENT_LEFT )); then : >"$EVENT_DIR/new/$EVENT_RERUN" 2>/dev/null || true; fi
 }
 sweep_links() {
     # Expired links, and the files of a link whose record is gone for a minute, as the link service removes them
@@ -2797,6 +2822,8 @@ sweep_connected_links() {
         (( made >= -200 && made <= 200 )) || continue
         since=$(awk -F '\t' -v n="$LM_NAME" '$1==n && $4 ~ /^[0-9]+$/ && $4 > s {s=$4} END {print s + 0}' <<<"$rows")
         (( since * 1000000 > 10#$LM_US )) || continue
+        # A link with a certificate this tool cannot identify stays, as with an event.
+        share_serial "${meta%.meta}.ovpn" "$LM_NAME" >/dev/null || continue
         rm -f -- "$meta" "${meta%.meta}.ovpn" "${meta%.meta}.url" "${meta%.meta}.tmp" || return 1
         audit "temporary link ended: $LM_NAME connected (seen by the five-minute check, with no event)"
     done
@@ -2823,7 +2850,7 @@ sweep() {
     events_run
     if [[ -d $LINK_DIR ]]; then
         # Asked before any lock is taken: the management interface may be slow, and nothing waits on it.
-        if mgmt_available; then rows=$(connected_rows 2>/dev/null) || rows=''; fi
+        if mgmt_available; then rows=$(MGMT_TIMEOUT=3 connected_rows 2>/dev/null) || rows=''; fi
         if events_lock; then
             links_locked sweep_links 2>/dev/null || true
             links_locked sweep_connected_links "$rows" 2>/dev/null || true
@@ -2875,6 +2902,9 @@ events_health() {
         fi
         count=$(find "$EVENT_DIR/bad" -mindepth 1 -maxdepth 1 ! -name '*.why' 2>/dev/null | wc -l) || count=0
         if (( count > 0 )); then check warn "$count malformed connection event(s) were set aside in $EVENT_DIR/bad $S_ARROW sudo journalctl -t darban"; fi
+    fi
+    if [[ $(sysctl -n fs.protected_hardlinks 2>/dev/null) != 1 ]]; then
+        check warn "The kernel lets a user link files it does not own, so a malformed connection event could point at one; such entries are set aside $S_ARROW sudo sysctl -w fs.protected_hardlinks=1"
     fi
     if ! systemctl is-active --quiet darban-sweep.timer 2>/dev/null; then
         check bad "The five-minute check darban-sweep.timer is not active, so an expired link can stay $S_ARROW sudo systemctl enable --now darban-sweep.timer"

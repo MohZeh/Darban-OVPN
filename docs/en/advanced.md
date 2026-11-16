@@ -102,7 +102,7 @@ With connection events, OpenVPN tells this tool when a client connects and when 
 
 - **The script.** OpenVPN runs `/usr/local/libexec/darban-ovpn-event` as `nobody` at each connection and at the end of each session. It writes one line into a queue and always exits with 0: it never refuses or holds up a connection, even when the queue is missing or full.
 - **The lines.** The install adds three lines to `server.conf`: `script-security 2`, and `client-connect` and `client-disconnect` with that script. Adding them restarts OpenVPN once, and if OpenVPN does not come back, the previous file is restored.
-- **The queue.** `/run/darban-events` is a tmpfs of its own, of 2 MB, so a full queue never fills `/run`. Its path unit starts `darban events` as root, which checks each line and applies it. A malformed line is set aside in `bad/`, with its reason; one that cannot be applied now waits and is tried again.
+- **The queue.** `/run/darban-events` is a tmpfs of its own, of 2 MB, so a full queue never fills `/run`. Its path unit starts `darban events` as root, which checks each line and applies it. A malformed line is set aside in `bad/`, with its reason; one that cannot be applied now waits and is tried again, at the latest by the next five-minute check.
 - **The five-minute check.** `darban-sweep.timer` runs `darban sweep` a minute after boot and every five minutes: it applies what is left, ends expired links, and ends the link of a client that is connected although no event said so.
 
 The lines are written only into a `server.conf` this tool's setup made, and only when each check passes: no other `client-connect` or `client-disconnect` script, `script-security` not set to 0 or 1, the script runs as `nobody`, OpenVPN's unit does not limit `LimitNPROC` to 64 or less, and the queue is mounted. Otherwise the install says why, nothing changes, and links end as before: when their time is up, or when the link service sees the connection. After fixing the cause, turn them on with:
@@ -112,6 +112,8 @@ sudo darban enable-events
 ```
 
 **Diagnostics** show the group **Connection events**: the queue, its path unit and the five-minute check, events waiting more than 10 minutes, lines set aside, and the process limits of OpenVPN. Darban shows the faults it can see. If one connection's event is lost silently, that link stays open until it expires.
+
+**Trust boundary.** The queue takes what OpenVPN's user, `nobody`, writes. Any other program that runs as `nobody` on this server can write there too. It can end a client's temporary link early, make **List clients** show a wrong `LAST SEEN`, or fill the queue, so that links end only when their time is up. It cannot open a link, let a client in, or touch a file outside the queue. So run no other service as `nobody` on a VPN server.
 
 **Uninstall this tool only** removes the units and the queue, and keeps the script and its lines, so OpenVPN needs no restart and every client still connects; the script then records nothing. The summary shows the command that removes them, in this order: the lines, a restart of OpenVPN, then the script. **Remove everything** removes all of it.
 

@@ -1307,7 +1307,7 @@ if [[ " \$* " == *" restart darban-links.service "* ]]; then
     echo "systemctl \$*" >> "\$STUB_LOG"
     if [[ -s "$LINKS_PIDFILE" ]]; then kill "\$(cat "$LINKS_PIDFILE")" 2>/dev/null; sleep 0.3; fi
     source "$E/cfg/links.env"
-    python3 -I "$REPO/lib/linkd.py" --dir "$E/links" --cert "$E/cfg/link-cert.pem" --key "$E/cfg/link-key.pem" --host "\$LINK_HOST" --port "\$LINK_PORT" --server-conf "$SERVER_CONF" --interval 0.2 --idle-exit 1 >>"$E/links.log" 2>&1 </dev/null &
+    python3 -I "$REPO/lib/linkd.py" --dir "$E/links" --cert "$E/cfg/link-cert.pem" --key "$E/cfg/link-key.pem" --host "\$LINK_HOST" --port "\$LINK_PORT" --server-conf "$SERVER_CONF" --event-script "$E/libexec/darban-ovpn-event" --interval 0.2 --idle-exit 1 >>"$E/links.log" 2>&1 </dev/null &
     echo \$! > "$LINKS_PIDFILE"
     exit 0
 fi
@@ -1699,6 +1699,12 @@ test_link_certificate_for_a_hostname() {
     out=$(menu '5\nalice\n1\n1\n0\n')
     lacks 'a usable trusted certificate is not asked about again' "Let's Encrypt" "$out"
     has 'and the link is made with it' "https://vpn.example.com:$LINK_TEST_PORT/l/" "$out"
+    # This failed once on CI with no cause in the last lines: keep all of it, and the state of the certificates.
+    if [[ $out != *"https://vpn.example.com:$LINK_TEST_PORT/l/"* ]]; then
+        printf '%s\n' "$out" | sed 's/^/    > /'
+        ls -l "$E/cfg/" "$E/le/" 2>&1 | sed 's/^/    > /'
+        openssl x509 -in "$E/cfg/link-cert.pem" -noout -subject -issuer -dates 2>&1 | sed 's/^/    > /'
+    fi
     menu '6\n1\n2\n0\n' >/dev/null
     rm -f "$E/cfg/link-cert.pem" "$E/cfg/link-key.pem"
     mv "$E/cfg/link-cert.self" "$E/cfg/link-cert.pem"; mv "$E/cfg/link-key.self" "$E/cfg/link-key.pem"
@@ -4133,31 +4139,44 @@ test_the_link_service_keeps_fields_it_does_not_know() {
     has 'the download is counted' 'downloads=1' "$out"
     has 'and the fields it does not know stay' 'created_cs=42' "$out"
     has 'all of them' 'created_us=1700000000000000' "$out"
-    out=$(python3 -I -c 'import sys; sys.path.insert(0, sys.argv[1]); import linkd; print(linkd.events_on(sys.argv[2]))' "$REPO/lib" "$SERVER_CONF")
-    [[ $out == False ]]; rc_is 'without the lines it reads the management interface' 0 "$?"
+    on() { python3 -I -c 'import sys; sys.path.insert(0, sys.argv[1]); import linkd; print(linkd.events_on(sys.argv[2], sys.argv[3]))' "$REPO/lib" "$SERVER_CONF" "$E/libexec/darban-ovpn-event"; }
+    [[ $(on) == False ]]; rc_is 'without the lines it reads the management interface' 0 "$?"
+    cp "$SERVER_CONF" "$E/conf.plain"
     events_here
-    out=$(python3 -I -c 'import sys; sys.path.insert(0, sys.argv[1]); import linkd; print(linkd.events_on(sys.argv[2]))' "$REPO/lib" "$SERVER_CONF")
-    [[ $out == True ]]; rc_is 'with them it leaves that to the events' 0 "$?"
+    [[ $(on) == True ]]; rc_is 'with them it leaves that to the events' 0 "$?"
+    # P05: the same rule as darban's. Anything else leaves it watching the management interface.
+    cp "$E/conf.plain" "$SERVER_CONF"; printf 'client-connect %s\n' "$E/libexec/darban-ovpn-event" >> "$SERVER_CONF"
+    [[ $(on) == False ]]; rc_is 'the connect line alone is not enough' 0 "$?"
+    cp "$E/conf.plain" "$SERVER_CONF"; printf 'client-connect /other/darban-ovpn-event\nclient-disconnect /other/darban-ovpn-event\n' >> "$SERVER_CONF"
+    [[ $(on) == False ]]; rc_is 'another path with the same name is not it' 0 "$?"
+    cp "$E/conf.plain" "$SERVER_CONF"; events_here; printf 'client-connect %s\n' "$E/libexec/darban-ovpn-event" >> "$SERVER_CONF"
+    [[ $(on) == False ]]; rc_is 'nor a line given twice' 0 "$?"
+    has 'and darban says the same' 'LAST SEEN' "$(mgr list)"
+    lacks 'darban does not call them on either' 'never' "$(mgr list | grep -E '^  alice ')"
 }
 
 test_the_five_minute_check() {
     # C.7, C.12.5 and C.15.5: the check ends expired links and the files a link left, ends the link of a client
     # connected with no event, but only while the clock has not jumped, starts a failed watcher again, and cleans
     # the queue.
-    local key boot cs us since i
+    local key boot cs us since i name
+    # Real profiles, so each link holds a certificate this tool can identify.
+    for name in bob carol dave; do menu "1\n$name\n0\n" >/dev/null; done
     events_here
     mkdir -p "$E/links"
     boot=$(this_boot); cs=$(now_cs); us=${EPOCHREALTIME//[!0-9]/}
     printf 'name=alice\nexpires=1000\ncreated=1\ndownloads=0\n' > "$E/links/expired.meta"; : > "$E/links/expired.ovpn"
     : > "$E/links/left.ovpn"; touch -d '-2 minutes' "$E/links/left.ovpn"
     : > "$E/links/fresh.ovpn"
-    link_record() { printf 'name=%s\nexpires=%s\ncreated=%s\ndownloads=0\ncreated_boot=%s\ncreated_cs=%s\ncreated_us=%s\n' "$2" "$(( $(date -u +%s) + 3600 ))" "$(( us / 1000000 ))" "$boot" "$cs" "$3" > "$E/links/$1.meta"; : > "$E/links/$1.ovpn"; }
-    link_record seen alice "$us"
-    link_record jumped bob $(( us + 10000000 ))
-    link_record later carol "$us"
+    link_record() { printf 'name=%s\nexpires=%s\ncreated=%s\ndownloads=0\ncreated_boot=%s\ncreated_cs=%s\ncreated_us=%s\n' "$2" "$(( $(date -u +%s) + 3600 ))" "$(( us / 1000000 ))" "$boot" "$cs" "$3" > "$E/links/$1.meta"; cp "$E/clients/$2.ovpn" "$E/links/$1.ovpn"; }
+    link_record seen bob "$us"
+    link_record jumped carol $(( us + 10000000 ))
+    link_record later dave "$us"
+    # The same client, with a profile whose certificate cannot be identified: it stays (C.12.4).
+    link_record unknown bob "$us"; echo 'not a profile' > "$E/links/unknown.ovpn"
     mgmt_stub
     since=$(( us / 1000000 + 5 ))
-    printf 'TITLE\tOpenVPN\nCLIENT_LIST\talice\t198.51.100.7:1\t10.8.0.2\t\t1\t1\tnow\t%s\tUNDEF\t0\t0\tAES-256-GCM\nCLIENT_LIST\tbob\t198.51.100.8:1\t10.8.0.3\t\t1\t1\tnow\t%s\tUNDEF\t0\t0\tAES-256-GCM\nCLIENT_LIST\tcarol\t198.51.100.9:1\t10.8.0.4\t\t1\t1\tnow\t%s\tUNDEF\t0\t0\tAES-256-GCM\nEND\n' \
+    printf 'TITLE\tOpenVPN\nCLIENT_LIST\tbob\t198.51.100.7:1\t10.8.0.2\t\t1\t1\tnow\t%s\tUNDEF\t0\t0\tAES-256-GCM\nCLIENT_LIST\tcarol\t198.51.100.8:1\t10.8.0.3\t\t1\t1\tnow\t%s\tUNDEF\t0\t0\tAES-256-GCM\nCLIENT_LIST\tdave\t198.51.100.9:1\t10.8.0.4\t\t1\t1\tnow\t%s\tUNDEF\t0\t0\tAES-256-GCM\nEND\n' \
         "$since" "$(( since + 20 ))" "$(( us / 1000000 - 100 ))" > "$E/mgmt-reply"
     : > "$E/events/tmp/half"; touch -d '-11 minutes' "$E/events/tmp/half"
     : > "$E/events/bad/old"; touch -d '-8 days' "$E/events/bad/old"
@@ -4170,6 +4189,7 @@ test_the_five_minute_check() {
     ok_if 'a client connected after its link was made ends it' test ! -e "$E/links/seen.meta"
     ok_if 'but not while the clock has jumped since' test -e "$E/links/jumped.meta"
     ok_if 'nor with a session from before the link' test -e "$E/links/later.meta"
+    ok_if 'nor a link whose certificate cannot be identified' test -e "$E/links/unknown.meta"
     grep -q 'seen by the five-minute check, with no event' "$STUB_LOG"; rc_is 'the end is in the journal' 0 "$?"
     grep -q 'systemctl reset-failed darban-events.path' "$STUB_LOG"; rc_is 'a failed watcher is reset' 0 "$?"
     grep -q 'systemctl start darban-events.path' "$STUB_LOG"; rc_is 'and started again' 0 "$?"
@@ -4303,6 +4323,137 @@ test_restore_previous_turns_events_off_for_an_older_version() {
     ok_if 'the units of connection events are gone' test -z "$(find "$E/units" -name 'darban-events*' -o -name 'darban-sweep*' -o -name 'run-darban*')"
     ok_if 'the script stays' test -x "$E/libexec/darban-ovpn-event"
     grep -q 'client-connect' "$SERVER_CONF"; rc_is 'and its lines' 0 "$?"
+}
+
+# ---------- connection events: round 17 ----------
+link_cs() { echo $(( $(sed -n 's/^created_cs=//p' "$1") + 1 )); }
+
+test_an_event_is_read_once() {
+    # C.13.1 and P03: its checks, its order and what is applied all come from one read. A change to the file after
+    # it, as a writer that kept the file open could make, changes nothing.
+    events_here
+    raw_event a connect alice 5
+    cat > "$E/mutate.sh" <<'SH'
+for f in "$E"/events/work/*; do
+    [[ $f == *.next ]] || sed -i 's/ alice / mallory /; s/ [0-9a-f-]\{36\} / 00000000-0000-0000-0000-000000000000 /' "$f"
+done
+SH
+    # The stand-in flock runs the hook when the worker takes the CA lock: after it read and sorted, before it applies.
+    FLOCK_HOOK="bash $E/mutate.sh" mgr events >/dev/null
+    ok_if 'what was read is applied' test -s "$E/varlib/clients/alice"
+    ok_if 'what the file says afterwards is not' test ! -e "$E/varlib/clients/mallory"
+}
+
+test_a_run_stops_at_its_limit_and_starts_again() {
+    # C.15.5 and P04: a run applies at most its limit, also of what already waited in work/, and leaves its mark in
+    # new/, so the path unit starts the next run, which applies the rest.
+    local i
+    events_here
+    for i in $(seq 1 12); do raw_event "w$i" connect "bulk$i" $((100 + i)); mv "$E/events/new/w$i" "$E/events/work/old-$i"; done
+    TEST_EVENT_MAX=5 mgr events >/dev/null
+    [[ $(find "$E/varlib/clients" -name 'bulk*' | wc -l) == 5 ]]; rc_is 'one run applies no more than its limit' 0 "$?"
+    ok_if 'and leaves its mark for the next run' test -e "$E/events/new/.darban-rerun"
+    TEST_EVENT_MAX=5 mgr events >/dev/null
+    TEST_EVENT_MAX=5 mgr events >/dev/null
+    [[ $(find "$E/varlib/clients" -name 'bulk*' | wc -l) == 12 ]]; rc_is 'the next runs apply the rest' 0 "$?"
+    ok_if 'the mark is gone once nothing is left' test ! -e "$E/events/new/.darban-rerun"
+    ok_if 'and was never taken for an event' test -z "$(ls -A "$E/events/bad")"
+}
+
+test_a_claim_never_overwrites_an_entry() {
+    # C.15.6, T44, T58 and P17: when the name a run would give is taken, the entry gets the next one; neither is lost.
+    events_here
+    raw_event first connect dave 5; mv "$E/events/new/first" "$E/events/work/fixed-1"
+    raw_event second connect erin 6
+    TEST_EVENT_RUN=fixed mgr events >/dev/null
+    ok_if 'the entry already there is applied, not overwritten' test -s "$E/varlib/clients/dave"
+    ok_if 'and the new one under the next name' test -s "$E/varlib/clients/erin"
+    ok_if 'and nothing is left' test -z "$(queue_left)"
+}
+
+test_workers_take_turns_on_the_real_lock() {
+    # C.6: with the real flock for the CA lock, two workers and the five-minute check at once apply every event.
+    local i
+    events_here
+    mkdir -p "$E/realflock"; ln -s /usr/bin/flock "$E/realflock/flock"
+    for i in $(seq 1 60); do raw_event "l$i" connect "lk$i" $((100 + i)); done
+    ( PATH="$E/realflock:$PATH"; mgr events & mgr events & mgr sweep & wait ) >/dev/null 2>&1
+    [[ $(find "$E/varlib/clients" -name 'lk*' | wc -l) == 60 ]]; rc_is 'every event is applied' 0 "$?"
+    ok_if 'and nothing is left' test -z "$(queue_left)"
+    ok_if 'and none waits for the lock' test -z "$(find "$E/events/work" -name '*.next')"
+}
+
+test_an_event_never_ends_a_link_it_cannot_identify() {
+    # C.12.4 and P08: a link whose certificate this tool cannot identify is not ended by a connection; it stays until
+    # its time is up or it is deleted in menu 6, and the diagnostics name it.
+    local url meta ovpn
+    events_here
+    start_links_stub
+    url=$(new_link alice)
+    meta=$(ls "$E"/links/*.meta); ovpn=${meta%.meta}.ovpn
+    awk '/^<cert>/ {print; print "MIIBbroken"; skip=1; next} /^<\/cert>/ {skip=0} !skip' "$ovpn" > "$E/broken.ovpn"
+    cat "$E/broken.ovpn" > "$ovpn"
+    raw_event go connect alice "$(link_cs "$meta")"
+    mgr events >/dev/null
+    [[ $(link_code "$url") == 200 ]]; rc_is 'the connection does not end it' 0 "$?"
+    has 'the diagnostics name it' 'certificate this tool cannot identify: alice' "$(mgr status)"
+    stop_links_stub
+}
+
+test_a_name_issued_again_starts_unseen() {
+    # P09: LAST SEEN is of the certificate the name has now, so a name issued again has not been seen yet.
+    events_here
+    menu '1\nbob\n0\n' >/dev/null
+    event connect bob
+    mgr events >/dev/null
+    has 'a connection is seen' '1 min ago' "$(mgr list | grep -E '^  bob ')"
+    revoke_menu bob >/dev/null
+    menu '1\nbob\n0\n' >/dev/null
+    has 'issued again, the name is not seen yet' 'never' "$(mgr list | grep -E '^  bob ')"
+}
+
+test_connection_serials_in_the_form_openvpn_gives_them() {
+    # T69, C.15.4 and P16: the serials OpenVPN 2.7.9 gave in PR 0, as it writes them: 16 bytes, lower case, with
+    # colons. The script keeps them as given, another certificate's serial keeps the link, and its own, in the same
+    # form, ends it.
+    local url meta s line own
+    events_here
+    start_links_stub
+    url=$(new_link alice)
+    meta=$(ls "$E"/links/*.meta)
+    for s in 1c:d3:30:8b:d7:80:fa:18:19:46:39:7b:15:e8:3e:f8 77:ca:ad:24:66:a4:ec:65:31:04:76:60:01:6b:5b:a7 7e:4b:6c:9b:a2:27:47:ca:a6:4e:50:9a:cd:9f:39:0e; do
+        rm -f "$E/events/new/"*
+        event connect alice tls_serial_hex_0="$s"
+        line=$(cat "$E/events/new/"*)
+        [[ $line == *" 198.51.100.7 $s - - - -" ]]; rc_is "the script keeps $s as OpenVPN gives it" 0 "$?"
+        mgr events >/dev/null
+    done
+    [[ $(link_code "$url") == 200 ]]; rc_is 'the serial of another certificate keeps the link' 0 "$?"
+    own=$(openssl x509 -in "$PKI/issued/alice.crt" -noout -serial | sed 's/^serial=//' | tr 'A-F' 'a-f' | sed 's/../&:/g; s/:$//')
+    event connect alice tls_serial_hex_0="$own"
+    mgr events >/dev/null
+    [[ $(link_code "$url") == 410 ]]; rc_is 'its own serial, in that form, ends it' 0 "$?"
+    stop_links_stub
+}
+
+test_a_forged_event_reaches_no_further_than_its_client() {
+    # P07, as the owner accepted it: a line another program of OpenVPN's user writes can end that client's link and
+    # change its record; nothing else. A name that is not one goes nowhere.
+    local a b
+    events_here
+    menu '1\nbob\n0\n' >/dev/null
+    start_links_stub
+    a=$(new_link alice)
+    b=$(new_link bob)
+    raw_event forged connect alice 999999999
+    printf 'darban-event 1 connect ../../outside %s 5 %s 198.51.100.7 - - - - -\n' "$(this_boot)" "${EPOCHREALTIME//[!0-9]/}" > "$E/events/new/path"
+    mgr events >/dev/null
+    [[ $(link_code "$a") == 410 ]]; rc_is "the forged line ends that client's link" 0 "$?"
+    [[ $(link_code "$b") == 200 ]]; rc_is "and no other client's" 0 "$?"
+    ok_if 'it changes only that record' test ! -e "$E/varlib/clients/bob"
+    ok_if 'a name that is a path is set aside' test -n "$(grep -l 'not an event line' "$E"/events/bad/*.why)"
+    ok_if 'and writes nothing outside the record folder' test ! -e "$E/outside"
+    stop_links_stub
 }
 
 mapfile -t TESTS < <(declare -F | awk '$3 ~ /^test_/ {print $3}' | sort)
