@@ -19,6 +19,10 @@ PrivateDevices=true
 ProtectSystem=strict
 ProtectHome=true
 ReadWritePaths=/run/darban-links
+# What this service does not need is not there for it: OpenVPN's keys and server.conf, other certificates, the CA
+# backups, the journal of this tool, the connection events, password hashes, and OpenVPN's management interface,
+# which takes commands. Without server.conf it never asks that interface; the five-minute check does, as root.
+InaccessiblePaths=-/etc/openvpn -/etc/letsencrypt -/var/backups/darban-pki -/var/lib/darban -/run/darban-events -/run/openvpn-server -/etc/shadow -/etc/gshadow
 CapabilityBoundingSet=CAP_NET_BIND_SERVICE
 ProtectKernelTunables=true
 ProtectKernelModules=true
@@ -26,7 +30,8 @@ ProtectKernelLogs=true
 ProtectControlGroups=true
 ProtectClock=true
 ProtectHostname=true
-RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+# No unix sockets, so no management interface either, wherever it is.
+RestrictAddressFamilies=AF_INET AF_INET6
 RestrictNamespaces=true
 RestrictRealtime=true
 RestrictSUIDSGID=true
