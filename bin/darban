@@ -4951,7 +4951,8 @@ backup_latest_value() {
     archive=$(readlink "$PKI_BACKUP_DIR/latest.tar.age" 2>/dev/null) || return 1
     [[ $archive == darban-pki-*.tar.age ]] || return 1
     manifest=$PKI_BACKUP_DIR/${archive%.tar.age}.manifest.json
-    [[ -f $manifest ]] || return 1
+    # Only a backup that is there: a manifest left beside an archive deleted by hand describes nothing.
+    [[ -f $PKI_BACKUP_DIR/$archive && -f $manifest ]] || return 1
     python3 -I -c 'import json, sys
 value = json.load(open(sys.argv[1])).get(sys.argv[2], "")
 print(value if isinstance(value, (str, int)) else "")' "$manifest" "$1" 2>/dev/null
@@ -5142,6 +5143,9 @@ backup_health() {
     if created=$(backup_latest_value created) && [[ -n $created ]]; then
         check ok "Newest backup of the CA: $created, in $PKI_BACKUP_DIR"
         check info 'This copy is on this server. To recover from a lost server you need a copy elsewhere and your private key.'
+    elif [[ -L $PKI_BACKUP_DIR/latest.tar.age ]]; then
+        # "latest" names a backup that is not there, or not whole: the next automatic one makes a new one.
+        check warn "The newest backup of the CA is missing from $PKI_BACKUP_DIR $S_ARROW Maintenance $S_CRUMB 4"
     elif backup_recipient >/dev/null; then
         check warn "No backup of the CA has been made yet $S_ARROW Maintenance $S_CRUMB 4"
     fi
