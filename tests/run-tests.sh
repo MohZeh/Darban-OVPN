@@ -4451,6 +4451,29 @@ SH
     ok_if 'what the file says afterwards is not' test ! -e "$E/varlib/clients/mallory"
 }
 
+test_a_full_queue_is_worked_through_in_time() {
+    # R18-14 and T70: 500 events already waiting in work/, the most one run takes, and five rounds of one client in
+    # new/. The first look through work/ has no deadline of its own, so the first run is timed: it must end soon
+    # after its deadline of EVENT_SECONDS, and the runs after it apply the rest, with none set aside.
+    local i start took runs=0
+    events_here
+    for i in $(seq 1 500); do raw_event "s$i" connect "stress$i" $((100 + i)); mv "$E/events/new/s$i" "$E/events/work/old-$i"; done
+    for i in 1 2 3 4 5; do
+        raw_event "r$i-c" connect alice $((2000 + 2 * i))
+        raw_event "r$i-d" disconnect alice $((2001 + 2 * i))
+    done
+    start=$SECONDS
+    mgr events >/dev/null
+    took=$(( SECONDS - start ))
+    printf '  the first run took %s s\n' "$took"
+    (( took <= 90 )); rc_is "the first run ends soon after its 60 s deadline (took ${took}s)" 0 "$?"
+    while [[ -n $(queue_left) ]] && (( runs < 5 )); do mgr events >/dev/null; runs=$((runs + 1)); done
+    ok_if 'the runs after it apply the rest' test -z "$(queue_left)"
+    [[ $(find "$E/varlib/clients" -name 'stress*' | wc -l) == 500 ]]; rc_is 'every waiting event is applied' 0 "$?"
+    ok_if 'the client of the five rounds is recorded' test -s "$E/varlib/clients/alice"
+    ok_if 'none is set aside' test -z "$(ls -A "$E/events/bad")"
+}
+
 test_a_run_stops_at_its_limit_and_starts_again() {
     # C.15.5 and P04: a run applies at most its limit, also of what already waited in work/, and leaves its mark in
     # new/, so the path unit starts the next run, which applies the rest.
@@ -5949,6 +5972,52 @@ test_a_changed_copy_stays_known_until_it_is_gone() {
     rm -f "$E/home/ali/bob.ovpn"
     mgr sweep >/dev/null
     [[ $(copies) == 0 ]]; rc_is 'once deleted, it is forgotten' 0 "$?"
+}
+
+test_a_kept_mark_cut_short_still_deletes_nothing_foreign() {
+    # B2-gap-2: "kept=" is added to a record with >>, so a stop can leave it cut short. Such a record is read again
+    # by what its copy is now: a copy still as this tool made it goes at its time, and one that changed stays, named.
+    local copy entry
+    two_homes
+    ssh_user ali
+    keep_file alice >/dev/null
+    copy=$E/home/ali/alice.ovpn
+    entry=$(compgen -G "$E/clients/.homecopy.*" | head -n1)
+    printf 'kept=' >> "$entry"
+    sed -i 's/^expires=.*/expires=1/' "$E/clients/alice.share"
+    mgr sweep >/dev/null
+    ok_if 'a copy as it was made goes at its time, though its record says kept= cut short' test ! -e "$copy"
+    [[ $(copies) == 0 ]]; rc_is 'and its record goes' 0 "$?"
+    keep_file alice >/dev/null
+    entry=$(compgen -G "$E/clients/.homecopy.*" | head -n1)
+    echo '# my note' >> "$copy"
+    printf 'kept=' >> "$entry"
+    sed -i 's/^expires=.*/expires=1/' "$E/clients/alice.share"
+    mgr sweep >/dev/null
+    ok_if 'a copy that changed stays' test -s "$copy"
+    grep -qx '# my note' "$copy"; rc_is 'as its owner left it' 0 "$?"
+    [[ $(copies) == 1 ]]; rc_is 'its record stays' 0 "$?"
+    has 'and Diagnostics name it' 'changed after it was made, so it was kept' "$(mgr status)"
+}
+
+test_a_revocation_reads_no_other_kept_file() {
+    # B-gap-2, B-gap-8 and Q-L3: a revocation reads only the files of the client it revokes, so "not read yet" stays
+    # true for every other kept file. Where the file system keeps access times, a real read is then said as one.
+    local file=$E/clients/bob.ovpn options
+    expire_unit
+    menu '1\nbob\n0\n' >/dev/null
+    menu '1\ncarol\n0\n' >/dev/null
+    touch -a -d '@1000000000' "$file"
+    revoke_menu carol >/dev/null
+    [[ $(stat -c %X "$file") == 1000000000 ]]; rc_is 'revoking carol does not read the file kept for bob' 0 "$?"
+    has 'so menu 6 still says it was not read' 'not read yet' "$(menu '6\n\n0\n')"
+    options=$(/usr/bin/findmnt -n -o OPTIONS -T "$file" 2>/dev/null) || options=''
+    if [[ ,$options, == *,noatime,* || -z $options ]]; then skip_here 'this file system keeps no access times'; return 0; fi
+    # A read in the second the file was made is not seen, by design.
+    sleep 1.1
+    cat "$file" >/dev/null
+    [[ $(stat -c %X "$file") != 1000000000 ]]; rc_is 'a real read moves the access time here' 0 "$?"
+    has 'and menu 6 then says the file was read' 'file read' "$(menu '6\n\n0\n')"
 }
 
 test_a_revocation_deletes_a_kept_copy_by_the_certificate_it_holds_now() {
