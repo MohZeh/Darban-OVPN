@@ -14,6 +14,8 @@ jobs:
     name: Check the tag
     runs-on: ubuntu-24.04
     timeout-minutes: 3
+    outputs:
+      sums: ${{ steps.build.outputs.sums }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -24,7 +26,10 @@ jobs:
       - name: The tagged commit must be on main
         run: git merge-base --is-ancestor "$GITHUB_SHA" origin/main
       - name: The version, changelog and archive must be ready
-        run: bash scripts/build-release.sh "$RUNNER_TEMP/release"
+        id: build
+        run: |
+          bash scripts/build-release.sh "$RUNNER_TEMP/release"
+          echo "sums=$(sha256sum < "$RUNNER_TEMP/release/SHA256SUMS" | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
 
   test:
     needs: check
@@ -38,7 +43,7 @@ jobs:
   # Every release starts as a pre-release, so "latest" and the update notice never see an unchecked one.
   publish:
     name: Publish as a pre-release
-    needs: test
+    needs: [check, test]
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:
@@ -49,6 +54,11 @@ jobs:
           persist-credentials: false
       - name: Build assets
         run: bash scripts/build-release.sh "$RUNNER_TEMP/release"
+      # The files published are the ones the check built, byte for byte: the archive carries the commit's time.
+      - name: The same files as the check built
+        env:
+          CHECKED: ${{ needs.check.outputs.sums }}
+        run: test "$(sha256sum < "$RUNNER_TEMP/release/SHA256SUMS" | cut -d' ' -f1)" = "$CHECKED"
       - name: Publish
         env:
           GH_TOKEN: ${{ github.token }}

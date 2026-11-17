@@ -5,7 +5,7 @@
 **Run your own OpenVPN server from one terminal menu, on a clean Ubuntu 24.04 or 26.04 VPS.**
 
 [![CI](https://github.com/MohZeh/Darban-OVPN/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/MohZeh/Darban-OVPN/actions/workflows/ci.yml)
-[![Release](https://img.shields.io/github/v/release/MohZeh/Darban-OVPN?include_prereleases&sort=semver)](https://github.com/MohZeh/Darban-OVPN/releases)
+[![Release](https://img.shields.io/github/v/release/MohZeh/Darban-OVPN?sort=semver)](https://github.com/MohZeh/Darban-OVPN/releases)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 ![Ubuntu 24.04 and 26.04](https://img.shields.io/badge/Ubuntu-24.04%20%7C%2026.04-E95420?logo=ubuntu&logoColor=white)
 
@@ -13,17 +13,14 @@
 
 </div>
 
-> [!WARNING]
-> **Pre-release.** This version is being tested on real servers. Try it on a disposable VPS first. See [Project status](#project-status).
-
 Darban (دربان, "gatekeeper") installs a current OpenVPN server and then handles the daily work: creating clients, delivering their profiles safely, revoking access, and keeping the revocation list valid. Every risky change is confirmed first and, where possible, rolled back automatically if it fails.
 
 ## Install or update
 
-On a **fresh Ubuntu 24.04 or 26.04 VPS**, connected through direct SSH. The same command also updates an existing installation. Until `v1.0.0` is out, it installs the release candidate:
+On a **fresh Ubuntu 24.04 or 26.04 VPS**, connected through direct SSH. The same command also updates an existing installation:
 
 ```bash
-sudo bash -c 'curl -fsSL https://github.com/MohZeh/Darban-OVPN/releases/download/v1.0.0-rc.10/get.sh | bash'
+sudo bash -c 'curl -fsSL https://github.com/MohZeh/Darban-OVPN/releases/download/v1.0.0/get.sh | bash'
 ```
 
 Press Enter to accept the suggested address and port, and Enter again to install. The tool then offers to create your first client, shares it, and tells you when it connects.
@@ -34,7 +31,7 @@ Press Enter to accept the suggested address and port, and Enter again to install
 sudo darban
 ```
 
-**[Follow the step-by-step guide](docs/en/getting-started.md)**, from a new server to your first connected user. A release candidate is for testing: try it on a server that is not in use.
+**[Follow the step-by-step guide](docs/en/getting-started.md)**, from a new server to your first connected user.
 
 ## Why Darban
 
@@ -92,7 +89,7 @@ Report vulnerabilities as described in [SECURITY.md](SECURITY.md).
 
 ## Project status
 
-Automated tests run on every code change and once a week, separately on Ubuntu 24.04 and 26.04. They include a real installation answered in a real terminal, real client traffic through the tunnel and NAT, revocation, rollback, updates and full removal. A virtual machine also proves a real reboot and DCO. A provider's firewall, real networks and client apps are being checked on real servers before `v1.0.0`. Changes are listed in the [changelog](CHANGELOG.md).
+Automated tests run on every code change and once a week, separately on Ubuntu 24.04 and 26.04. They include a real installation answered in a real terminal, real client traffic through the tunnel and NAT, revocation, rollback, updates and full removal. A virtual machine also proves a real reboot and DCO. The release candidates were also installed on real servers, behind a provider's firewall, with real networks and client apps. Changes are listed in the [changelog](CHANGELOG.md).
 
 ## Guides
 

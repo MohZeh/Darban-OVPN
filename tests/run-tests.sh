@@ -2207,6 +2207,24 @@ test_release_assets_know_their_version() {
     if tar -tzf "$out/darban-ovpn.tar.gz" | grep -q '^tests/'; then result 0 'tests are not published'; else result 1 'tests are not published'; fi
     tar -tzf "$out/darban-ovpn.tar.gz" | grep -qx 'VERSION'; rc_is 'the archive states its version' 0 "$?"
     (cd "$out" && sha256sum --quiet -c SHA256SUMS >/dev/null); rc_is 'the checksums match' 0 "$?"
+
+    # Q12: every file carries the commit time, and a second build of the commit, from a copy whose files have
+    # another time, gives the same bytes.
+    local copy=$WORK/release-copy when times
+    when=$(git -C "$REPO" log -1 --format=%ct HEAD)
+    times=$(TZ=UTC tar --full-time -tvzf "$out/darban-ovpn.tar.gz" | awk '{print $4, $5}' | sort -u)
+    rc_is 'every file carries the commit time' "$(TZ=UTC date -d "@$when" '+%Y-%m-%d %H:%M:%S')" "$times"
+    mkdir -p "$copy" && git -C "$REPO" archive HEAD | tar -x -C "$copy"; rc_is 'a copy of the commit' 0 "$?"
+    find "$copy" -type f -exec touch -d '2001-02-03 04:05:06' {} +
+    # The suite runs on the commit's own tree: only an uncommitted change could make the two builds differ.
+    if [[ -z $(git -C "$REPO" status --porcelain -- VERSION bin lib setup systemd scripts README.md README.fa.md CHANGELOG.md LICENSE) ]]; then
+        SOURCE_DATE_EPOCH=$when bash "$copy/scripts/build-release.sh" "$WORK/release-again" >/dev/null 2>&1
+        rc_is 'the second build' 0 "$?"
+        rc_is 'two builds of one commit, one checksum' "$(sha256sum <"$out/SHA256SUMS")" "$(sha256sum <"$WORK/release-again/SHA256SUMS")"
+    fi
+    # Without git or SOURCE_DATE_EPOCH, there is no time to give the files, and nothing is built.
+    out=$(env -u SOURCE_DATE_EPOCH bash "$copy/scripts/build-release.sh" "$WORK/release-nogit" 2>&1); rc_not0 'no commit time, no build' "$?"
+    has 'it says what is missing' 'No commit time' "$out"
 }
 
 test_server_setup_continues_after_a_failure() {
