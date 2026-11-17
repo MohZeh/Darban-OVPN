@@ -5311,6 +5311,190 @@ test_what_a_restore_replaced_is_deleted_after_30_days() {
     ok_if 'after 30 days it is deleted' test ! -e "$dir"
 }
 
+# set_state <name> <V|E|R> [expiry]: the CA index row of /CN=<name> put in that state, as Easy-RSA writes it.
+set_state() {
+    awk -F'\t' -v OFS='\t' -v cn="/CN=$1" -v st="$2" -v ex="${3:-}" '$6 == cn {$1 = st; if (ex != "") $2 = ex; if (st != "R") $3 = ""} 1' \
+        "$PKI/index.txt" >"$E/index.new" && cat "$E/index.new" >"$PKI/index.txt"
+}
+
+test_a_stop_between_the_two_latest_names_misleads_no_backup() {
+    # R20-07: the names "latest" change one after the other, so a stop between the two leaves latest.manifest.json one
+    # backup behind. The newest backup is the one latest.tar.age names, and the daily one compares with it.
+    local first dir=$E/pki-backups
+    template_server
+    backup_key_set
+    menu '1\ncarol\n0\n' >/dev/null
+    first=$(readlink "$dir/latest.manifest.json")
+    revoke_menu carol >/dev/null
+    [[ $(backups) == 2 ]]; rc_is 'a new client and a revocation make two backups' 0 "$?"
+    ln -sfn "$first" "$dir/latest.manifest.json"
+    mgr backup-auto daily >/dev/null
+    [[ $(backups) == 2 ]]; rc_is 'with the manifest name behind, the daily one still sees that nothing changed' 0 "$?"
+    menu '1\ndave\n0\n' >/dev/null
+    [[ $(readlink "$dir/latest.manifest.json") == "$(basename "$(readlink "$dir/latest.tar.age")" .tar.age).manifest.json" ]]
+    rc_is 'the next backup names both again' 0 "$?"
+}
+
+test_a_restore_takes_a_backup_where_only_time_passed() {
+    # C.16.1: valid in the backup and expired here is only time passing, so the restore goes on.
+    local fp out
+    backed_up_server
+    fp=$(ca_fp)
+    set_state bob E 200101000000Z
+    out=$(printf '2\n' | bash "$E/manager.sh" restore "$E/backup.tar" --ca-fingerprint "$fp" 2>&1); rc_is 'expired here, valid in the backup: restored' 0 "$?"
+    lacks 'and not called older than the CA in use' 'older than the CA in use' "$out"
+    has 'it is done' 'Restored the backup of' "$out"
+}
+
+test_a_restore_keeps_a_revocation_only_the_backup_has() {
+    # C.16.1: revoked in the backup and valid here, the restore goes on, says so, and the client stays revoked.
+    local fp out
+    backed_up_server
+    fp=$(ca_fp)
+    revoke_menu bob >/dev/null
+    (cd "$E" && opened_backup "$E/backup.tar")
+    set_state bob V
+    out=$(printf '2\n' | bash "$E/manager.sh" restore "$E/backup.tar" --ca-fingerprint "$fp" 2>&1); rc_is 'revoked in the backup, valid here: restored' 0 "$?"
+    has 'and it says the backup has it revoked' 'The backup has these revoked, and they stay revoked: bob (serial ' "$out"
+    [[ $(state_row bob) == R ]]; rc_is 'bob is revoked after the restore' 0 "$?"
+}
+
+test_a_restore_refuses_what_was_issued_after_it_in_any_state() {
+    # C.16.1: a certificate issued after the backup is refused whatever its state here, valid, revoked or expired, and
+    # a server certificate the same. A revocation stays one once its certificate has expired. Nothing changes.
+    local fp out snapshot
+    backed_up_server
+    fp=$(ca_fp)
+    menu '1\ndave\n0\n' >/dev/null
+    revoke_menu dave >/dev/null
+    menu '1\nerin\n0\n' >/dev/null
+    set_state erin E 200101000000Z
+    easyrsa build-server-full server_new nopass >/dev/null 2>&1
+    revoke_menu bob >/dev/null
+    set_state bob R 200101000000Z
+    snapshot=$(cat "$PKI/index.txt" "$SERVER_CONF" "$CRL")
+    : > "$STUB_LOG"
+    out=$(printf '2\n' | bash "$E/manager.sh" restore "$E/backup.tar" --ca-fingerprint "$fp" 2>&1); rc_is 'refused' 1 "$?"
+    has 'a client issued and revoked since is named' 'dave (serial ' "$out"
+    has 'one issued since that has expired' 'erin (serial ' "$out"
+    has 'a server certificate issued since' 'server_new (serial ' "$out"
+    has 'and a revocation whose certificate has expired' 'bob (serial ' "$out"
+    [[ $(cat "$PKI/index.txt" "$SERVER_CONF" "$CRL") == "$snapshot" && ! -e $E/varlib/restore.journal ]]; rc_is 'and nothing changed' 0 "$?"
+    lacks 'OpenVPN was not touched' 'systemctl disable' "$(cat "$STUB_LOG")"
+}
+
+test_what_several_restores_replaced_goes_each_by_its_own_time() {
+    # Q-L2 and C.16.5: each restore keeps what it replaced, with its own time, and each goes on its own day. A clock
+    # 40 days ahead is the same as a time 40 days back: only what is past 30 days by the clock goes, never a backup.
+    local fp now count
+    local -a dirs
+    backed_up_server
+    fp=$(ca_fp)
+    printf '2\n' | bash "$E/manager.sh" restore "$E/backup.tar" --ca-fingerprint "$fp" >/dev/null 2>&1
+    printf '2\n' | bash "$E/manager.sh" restore "$E/backup.tar" --ca-fingerprint "$fp" >/dev/null 2>&1
+    mapfile -t dirs < <(find "$E/pki-backups" -maxdepth 1 -name 'pre-restore-*' -type d | sort)
+    [[ ${#dirs[@]} == 2 ]]; rc_is 'two restores keep two folders' 0 "$?"
+    count=$(backups)
+    now=$(date -u +%s)
+    echo $(( now - 31 * 86400 )) > "${dirs[0]}/.restored"
+    echo $(( now - 86400 )) > "${dirs[1]}/.restored"
+    mgr sweep >/dev/null
+    ok_if 'the one past 30 days goes' test ! -e "${dirs[0]}"
+    ok_if 'the other stays until its own day' test -d "${dirs[1]}"
+    echo $(( now - 41 * 86400 )) > "${dirs[1]}/.restored"
+    mgr sweep >/dev/null
+    ok_if 'with the clock 40 days ahead it goes too' test ! -e "${dirs[1]}"
+    [[ $(backups) == "$count" ]]; rc_is 'and no backup goes with them' 0 "$?"
+}
+
+test_a_restore_that_cannot_enable_openvpn_at_boot_is_finished_later() {
+    # A2-gap-5: when systemd refuses to enable OpenVPN at boot after the commit, OpenVPN runs with the restored CA, the
+    # cleanup is said to be unfinished, and --resume finishes it once systemd allows it.
+    local fp out
+    backed_up_server
+    fp=$(ca_fp)
+    out=$(printf '2\n' | FAKE_ENABLE_FAILS=1 bash "$E/manager.sh" restore "$E/backup.tar" --ca-fingerprint "$fp" 2>&1); rc_is 'the restore says it is not finished' 1 "$?"
+    has 'and why' 'could not be enabled at boot' "$out"
+    has 'and how to finish it' 'sudo darban restore --resume' "$out"
+    ok_if 'OpenVPN runs with the restored CA' unit_running
+    ok_if 'the journal stays' test -s "$E/varlib/restore.journal"
+    has 'the resume finishes it' 'The restore is finished.' "$(restore_run --resume)"
+    ok_if 'OpenVPN is then enabled at boot' unit_on
+    ok_if 'and no journal is left' test ! -e "$E/varlib/restore.journal"
+}
+
+test_a_journal_that_cannot_be_read_stops_everything() {
+    # Q26-T03: a restore journal that is not one this tool wrote is never acted on: --resume and --rollback refuse, a
+    # change waits, and Diagnostics say so.
+    local out snapshot kind
+    backed_up_server
+    snapshot=$(cat "$PKI/index.txt" "$SERVER_CONF")
+    mkdir -p "$E/varlib"
+    printf 'id=../../etc\nstate=swapped\n' > "$E/varlib/restore.journal"
+    ok_if 'the journal is in place' test -s "$E/varlib/restore.journal"
+    for kind in --resume --rollback; do
+        out=$(restore_run "$kind"); rc_is "$kind refuses it" 1 "$?"
+        has "$kind says to look at it" 'cannot be read. Look at it by hand.' "$out"
+    done
+    out=$(menu '1\nzed\n0\n')
+    ok_if 'no client is made meanwhile' test ! -e "$E/clients/zed.ovpn"
+    has 'a change says why' 'A restore is unfinished' "$out"
+    [[ $(cat "$PKI/index.txt" "$SERVER_CONF") == "$snapshot" ]]; rc_is 'and nothing changed' 0 "$?"
+    has 'Diagnostics name it' 'A restore is unfinished' "$(mgr status)"
+}
+
+test_a_restore_killed_from_outside_is_finished_by_resume() {
+    # Q26-T03 and A2-gap-1: a real SIGKILL, not a stop the restore asked for. The lock goes with the process, the
+    # journal stays, and --resume finishes the restore.
+    local pattern="$E/manager.sh restore $E/backup.tar"
+    backed_up_server
+    real_flock
+    paused_restore swapped "$E/killed.out"; rc_is 'the restore holds the lock half way' 0 "$?"
+    pgrep -f "$pattern" >/dev/null; rc_is 'its processes are found' 0 "$?"
+    # The manager runs each action in a subshell of its own, with the same command line: all of them go at once.
+    pkill -9 -f "$pattern"
+    wait_for '! pgrep -f "$pattern" >/dev/null'; rc_is 'and none is left' 0 "$?"
+    rm -f "$E/paused"
+    wait
+    ok_if 'the journal stays' test -s "$E/varlib/restore.journal"
+    has 'Diagnostics say a restore is unfinished' 'A restore is unfinished' "$(mgr status)"
+    has 'the resume takes the lock and finishes it' 'The restore is finished.' "$(env PATH="$E/realflock:$PATH" bash "$E/manager.sh" restore --resume 2>&1)"
+    ok_if 'OpenVPN runs, enabled at boot' unit_on
+    ok_if 'and no journal is left' test ! -e "$E/varlib/restore.journal"
+}
+
+test_no_backup_hook_starts_once_a_restore_began() {
+    # A-L8 and R24-A05: the journal is looked at before each hook, so once a restore has begun no further hook starts.
+    template_server
+    backup_key_set
+    mkdir -m 700 "$E/cfg/backup-hooks"
+    printf '#!/bin/sh\nprintf "id=abc\\nstate=starting\\n" > %s\n' "$E/varlib/restore.journal" > "$E/cfg/backup-hooks/a-first"
+    printf '#!/bin/sh\ntouch %s\n' "$E/second-ran" > "$E/cfg/backup-hooks/b-second"
+    chmod 700 "$E/cfg/backup-hooks/a-first" "$E/cfg/backup-hooks/b-second"
+    mkdir -p "$E/varlib"
+    menu '1\ncarol\n0\n' >/dev/null
+    wait_for '[[ -e $E/varlib/restore.journal ]]'; rc_is 'the first hook ran' 0 "$?"
+    sleep 1
+    ok_if 'the second never starts' test ! -e "$E/second-ran"
+    rm -f "$E/varlib/restore.journal"
+}
+
+test_every_test_variable_of_the_product_is_listed() {
+    # R18-16: the manager names each variable it reads for the tests, in one list near its top.
+    local listed used name
+    listed=$(sed -n '/^# Variables for the tests only/,/^# tests\/run-tests.sh checks/p' "$REPO/bin/darban" | grep -oE 'DARBAN_TEST_[A-Z_]+' | sort -u)
+    used=$(grep -v '^ *#' "$REPO/bin/darban" | grep -oE 'DARBAN_TEST_[A-Z_]+' | sort -u)
+    [[ -n $listed ]]; rc_is 'the list is there' 0 "$?"
+    for name in $used; do
+        grep -qx "$name" <<<"$listed"; rc_is "$name is listed" 0 "$?"
+    done
+    for name in $listed; do
+        grep -qx "$name" <<<"$used"; rc_is "$name is still read" 0 "$?"
+    done
+    used=$(grep -rhoE 'DARBAN_TEST_[A-Z_]+' "$REPO/lib" "$REPO/setup" "$REPO/systemd" | sort -u)
+    [[ -z $used ]]; rc_is 'no other part of the product reads one' 0 "$?"
+}
+
 real_flock() { mkdir -p "$E/realflock"; ln -sf /usr/bin/flock "$E/realflock/flock"; }
 wait_for() { local i; for i in $(seq 1 150); do if eval "$1"; then return 0; fi; sleep 0.1; done; return 1; }
 paused_restore() {

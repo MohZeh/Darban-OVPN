@@ -54,6 +54,36 @@ if grep -q 'nat.nft\|backup.conf\|\.ovpn$' "$LOG/members.log"; then echo 'FAIL: 
 python3 -c 'import json, sys; m = json.load(open(sys.argv[1])); assert m["schema"] == 1 and m["clients"] == {"valid": 2, "revoked": 1}, m' "${archive%.tar.age}.manifest.json"
 echo 'PASS: Backup now makes an archive only the owner can open, with the closed list and a manifest.'
 
+# R18-11 and C.16.3: the daily backup comes after the CRL job. Starting darban-crl.service runs darban-backup.service
+# once it succeeds; that makes a backup when something changed, and none when nothing did.
+backups() { find "$BACKUPS" -maxdepth 1 -name 'darban-pki-*.tar.age' | wc -l; }
+daily_backup_after_crl_job() {
+    # Starts the CRL job, and waits until the backup it starts has really run, and ended: a unit that never ran
+    # reports success too, so its invocation must be a new one.
+    local before attempt
+    before=$(systemctl show -p InvocationID --value darban-backup.service)
+    systemctl start darban-crl.service
+    for attempt in $(seq 1 60); do
+        if [[ $(systemctl show -p InvocationID --value darban-backup.service) != "$before" ]] \
+            && ! systemctl is-active --quiet darban-backup.service; then
+            [[ $(systemctl show -p Result --value darban-backup.service) == success ]]
+            return
+        fi
+        sleep 1
+    done
+    echo 'FAIL: the CRL job did not start the daily backup.'
+    return 1
+}
+count=$(backups)
+daily_backup_after_crl_job
+[[ $(backups) == "$count" ]]
+mkdir -p /var/lib/darban/clients
+printf 'first_seen=1\n' > /var/lib/darban/clients/zz-ci
+daily_backup_after_crl_job
+[[ $(backups) == $((count + 1)) ]]
+rm -f /var/lib/darban/clients/zz-ci
+echo 'PASS: a successful CRL job runs the daily backup, which makes one only when something changed.'
+
 # T22, I13 and C.16.1: a client issued and revoked on this server after the backup is never valid again: the
 # backup is older than the CA in use, so it is refused, and names it.
 printf '1\nc1\n0\n' | darban >/dev/null
