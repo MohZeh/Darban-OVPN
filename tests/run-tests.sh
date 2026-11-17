@@ -3302,30 +3302,6 @@ test_ci_scope_skips_only_documentation() {
     has 'a manual run always runs the tests' 'code=true' "$(scope EVENT=workflow_dispatch)"
 }
 
-test_guides_name_the_real_setup_items() {
-    # Every "`N` ... **Label**" for a Setup item in the guides uses the number the Setup menu shows.
-    local out
-    out=$(python3 - "$REPO" <<'PY'
-import pathlib, re, sys
-root = pathlib.Path(sys.argv[1])
-code = (root / 'bin/darban').read_text(encoding='utf-8')
-block = code[code.index('draw_setup() {'):code.index('setup_menu() {')]
-menu = {label: num for num, label in re.findall(r"menu_item (\d) \"?\$?\(?(?:printf '%-24s %s' )?'([^']+)'", block)}
-bad = []
-for path in sorted((root / 'docs').glob('*/usage.md')):
-    text = path.read_text(encoding='utf-8')
-    for num, label in re.findall(r'`(\d)`[^`*\n]{0,20}\*\*([A-Za-z ]+?)(?::)?\*\*', text):
-        for name, real in menu.items():
-            if label.strip().startswith(name.split(' (')[0]) and num != real:
-                bad.append(f'{path.relative_to(root)}: `{num}` {label.strip()} (menu: {real})')
-print('items: ' + ', '.join(f'{v} {k}' for k, v in sorted(menu.items(), key=lambda i: i[1])))
-print('\n'.join(bad) if bad else 'all match')
-PY
-)
-    has 'the Setup menu was read' '2 Check for updates' "$out"
-    has 'the guides use the Setup numbers of the menu' 'all match' "$out"
-}
-
 test_ci_skips_only_what_its_pull_request_tested() {
     local dir=$WORK/tested origin=$WORK/tested-origin.git script=$REPO/scripts/ci-already-tested.sh base pr squash other
     # REPO inside is the GitHub name the script asks the API about, not this checkout.
@@ -3393,6 +3369,29 @@ test_repo_checks_find_problems() {
     chmod +x "$dir/setup/a.sh"
     printf 'a\r\nb\r\n' >"$dir/docs/en/usage.md"
     out=$(check); rc_not0 'CRLF line endings fail' "$?"; has 'it names the file' 'usage.md: has CRLF' "$out"
+    printf '# Usage\n' >"$dir/docs/en/usage.md"
+
+    # The checks that came from this suite: claims the guides must not make, and the Setup numbers they give.
+    printf 'Only a hash of the link stays.\n' >>"$dir/docs/fa/usage.md"
+    out=$(check); rc_not0 'a claim the tool does not make fails' "$?"; has 'it names the line' 'docs/fa/usage.md:2: a claim' "$out"
+    printf '# Usage\n' >"$dir/docs/fa/usage.md"
+    printf 'draw_setup() {\n    menu_item 1 %s\n    menu_item 2 %s\n}\nsetup_menu() {\n' "'Install'" "'Check for updates'" >>"$dir/bin/darban"
+    printf '# Usage\n\nPress `3`, **Check for updates**.\n' >"$dir/docs/en/usage.md"
+    out=$(check); rc_not0 'a wrong Setup number in a guide fails' "$?"; has 'it names the item' '`3` Check for updates is 2 in the Setup menu' "$out"
+    printf '# Usage\n\nPress `2`, **Check for updates**.\n' >"$dir/docs/en/usage.md"
+    printf '# Usage\n\nPress `2`, **Check for updates**.\n' >"$dir/docs/fa/usage.md"
+    out=$(check); rc_is 'the right Setup number passes' 0 "$?"
+
+    # Both languages name the same commands, paths and versions, and show the same code blocks.
+    printf '\nRun `sudo darban status` or read `/etc/darban/config`.\n' >>"$dir/docs/en/usage.md"
+    printf '\nRun `sudo darban status`. Use `apt`.\n' >>"$dir/docs/fa/usage.md"
+    out=$(check); rc_not0 'a path in one language only fails' "$?"; has 'it names the path' 'docs/fa/usage.md: does not name `/etc/darban/config`' "$out"
+    lacks 'a plain word in code is no fact to share' '`apt`' "$out"
+    cp "$dir/docs/en/usage.md" "$dir/docs/fa/usage.md"
+    out=$(check); rc_is 'the same commands and paths pass' 0 "$?"
+    printf '\n```\nsudo darban status\n```\n' >>"$dir/docs/en/usage.md"
+    printf '\n```\nsudo darban status --verbose\n```\n' >>"$dir/docs/fa/usage.md"
+    out=$(check); rc_not0 'a code block that differs fails' "$?"; has 'it names the block' 'code block 1 differs' "$out"
 }
 
 # ---------- PR 1: revocation cleanup by certificate, and Remove everything that reports every failure ----------
@@ -3891,14 +3890,6 @@ test_diagnostics_check_the_open_link_over_https() {
     lacks 'and is not called fine' 'All checks passed' "$out"
     rc_is 'with the status of a problem' 1 "$rc"
     stop_links_stub
-}
-
-test_docs_claim_no_more_than_the_tool_does() {
-    # F04 and D1: no guide says only a hash of a link stays, or that an install is verified.
-    local found
-    found=$(grep -rniE 'only a hash|verified install' "$REPO/README.md" "$REPO/README.fa.md" "$REPO/docs" || true)
-    [[ -z $found ]]; rc_is 'no such claim is left' 0 "$?"
-    if [[ -n $found ]]; then printf '%s\n' "$found" | sed 's/^/    | /'; fi
 }
 
 # ---------- connection events ----------

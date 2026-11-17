@@ -7,6 +7,11 @@ on:
   schedule:
     - cron: '17 3 * * 1'
   workflow_dispatch:
+    inputs:
+      vm_only:
+        description: Only the reboot and arm64 tests, for a commit whose pull request runs the others
+        type: boolean
+        default: false
   workflow_call:
 
 permissions:
@@ -28,14 +33,25 @@ jobs:
       actions: read
       pull-requests: read
     outputs:
-      # The slow tests are skipped for documentation only, and for a push to main whose exact files its
-      # pull request already tested green.
-      code: ${{ steps.tested.outputs.tested == 'true' && 'false' || steps.scope.outputs.code }}
+      # The slow tests are skipped for documentation only, for a push to main whose exact files its pull request
+      # already tested green, and for a manual run that asks for the reboot and arm64 tests only.
+      code: ${{ (steps.tested.outputs.tested == 'true' || inputs.vm_only) && 'false' || steps.scope.outputs.code }}
+      tree: ${{ steps.source.outputs.tree }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
           persist-credentials: false
+      # The tree names the exact files, so a result can be matched to the code it tested after a squash or merge.
+      - name: The commit and the files it holds
+        id: source
+        run: |
+          tree=$(git rev-parse 'HEAD^{tree}')
+          echo "tree=$tree" >> "$GITHUB_OUTPUT"
+          echo "Commit $(git rev-parse HEAD), tree $tree" >> "$GITHUB_STEP_SUMMARY"
+      - name: Only the reboot and arm64 tests
+        if: inputs.vm_only
+        run: echo 'This manual run asked for the reboot and arm64 tests only. The other tests are not run here on purpose; the pull request runs them.' >> "$GITHUB_STEP_SUMMARY"
       - name: Decide which tests this change needs
         id: scope
         env:
@@ -55,10 +71,26 @@ jobs:
           if grep -qx 'tested=true' "$GITHUB_OUTPUT"; then
             echo 'The pull request of this commit already tested these exact files, and passed: the slow tests are not run again.' >> "$GITHUB_STEP_SUMMARY"
           fi
-      - name: ShellCheck, file modes and documentation
+      - name: ShellCheck, Python syntax, file modes and documentation
         run: |
           command -v shellcheck >/dev/null || { sudo apt-get update && sudo apt-get install -y shellcheck; }
           bash scripts/lint.sh
+      # Tests that still expect text the code no longer has: the text removed on this branch, compared with the
+      # commit it starts from. With nothing to compare with, only the scripted terminal answers are checked.
+      - name: Tests expect only text the code has
+        env:
+          BASE: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before }}
+        run: python3 scripts/check-stale-strings.py "$BASE"
+      - name: Workflows (actionlint)
+        env:
+          VERSION: 1.7.12
+          SHA256: 8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8
+        run: |
+          dir=$(mktemp -d)
+          curl -fsSL --retry 3 -o "$dir/actionlint.tar.gz" "https://github.com/rhysd/actionlint/releases/download/v$VERSION/actionlint_${VERSION}_linux_amd64.tar.gz"
+          echo "$SHA256  $dir/actionlint.tar.gz" | sha256sum -c -
+          tar -xzf "$dir/actionlint.tar.gz" -C "$dir" actionlint
+          "$dir/actionlint" -color
       - name: Release assets build
         run: bash scripts/build-release.sh "$RUNNER_TEMP/release"
 
@@ -78,7 +110,9 @@ jobs:
           - ubuntu: '26.04'
             suite: stand-in Easy-RSA
     runs-on: ubuntu-${{ matrix.ubuntu }}
-    timeout-minutes: 20
+    # A suite takes 9 to 17 minutes. A slow runner has run every test about 1.8 times slower, and 20 minutes
+    # stopped a suite that was passing just before its end.
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -233,8 +267,10 @@ jobs:
         run: sudo bash tests/acceptance-ci.sh --i-know
 
   # The one check a branch rule requires. Matrix job names cannot be required reliably when they are skipped.
+  # A manual run for the reboot and arm64 tests only gets another name: it skips the other tests on purpose, so
+  # it must never stand in for the CI result of the commit.
   result:
-    name: CI result
+    name: ${{ inputs.vm_only && 'VM qualification result' || 'CI result' }}
     if: always()
     needs: [lint, test, acceptance, public-setup, rc10-upgrade, restore, acceptance-arm, reboot]
     runs-on: ubuntu-24.04
@@ -251,9 +287,17 @@ jobs:
           RESTORE: ${{ needs.restore.result }}
           ARM: ${{ needs.acceptance-arm.result }}
           REBOOT: ${{ needs.reboot.result }}
+          VM_ONLY: ${{ inputs.vm_only && 'true' || 'false' }}
+          TREE: ${{ needs.lint.outputs.tree }}
         run: |
-          echo "Lint: $LINT, Test: $TEST, Acceptance: $ACCEPTANCE, public address: $PUBLIC, from rc.10: $RC10, restore: $RESTORE, arm64: $ARM, reboot: $REBOOT, code changed: $CODE"
+          echo "Lint: $LINT, Test: $TEST, Acceptance: $ACCEPTANCE, public address: $PUBLIC, from rc.10: $RC10, restore: $RESTORE, arm64: $ARM, reboot: $REBOOT, code changed: $CODE, reboot and arm64 only: $VM_ONLY"
+          echo "Tree $TREE" >> "$GITHUB_STEP_SUMMARY"
           test "$LINT" = success
+          if [ "$VM_ONLY" = true ]; then
+            # What this run was asked for must have run, not been skipped.
+            test "$REBOOT" = success
+            test "$ARM" = success
+          fi
           test "$ARM" = success || test "$ARM" = skipped
           test "$REBOOT" = success || test "$REBOOT" = skipped
           if [ "$CODE" = true ]; then
