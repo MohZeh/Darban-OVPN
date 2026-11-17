@@ -20,3 +20,10 @@ python3 scripts/check-repo.py
 # ends before any test starts.
 if bash tests/run-tests.sh no_test_has_this_name >/dev/null 2>&1; then echo 'run-tests.sh passed a filter that matched no test' >&2; exit 1; fi
 echo 'run-tests.sh: a filter that matches no test fails.'
+# A test that calls exit ends the whole run; with status 0 it must still fail, and a test that passes must not.
+extra=$(mktemp)
+trap 'rm -f -- "$extra"' EXIT
+printf '%s\n' "test_zz_lint_ends_early() { ok_if 'one check' true; exit 0; }" "test_zz_lint_passes() { ok_if 'one check' true; }" >"$extra"
+if RUN_TESTS_EXTRA=$extra bash tests/run-tests.sh test_zz_lint_ends_early >/dev/null 2>&1; then echo 'run-tests.sh passed a run a test ended early with exit 0' >&2; exit 1; fi
+RUN_TESTS_EXTRA=$extra bash tests/run-tests.sh test_zz_lint_passes >/dev/null 2>&1 || { echo 'run-tests.sh failed a test that passes' >&2; exit 1; }
+echo 'run-tests.sh: a run that ends early fails, and a test that passes passes.'
