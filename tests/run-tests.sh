@@ -5429,7 +5429,9 @@ test_a_journal_that_cannot_be_read_stops_everything() {
     local out snapshot kind
     backed_up_server
     snapshot=$(cat "$PKI/index.txt" "$SERVER_CONF")
+    mkdir -p "$E/varlib"
     printf 'id=../../etc\nstate=swapped\n' > "$E/varlib/restore.journal"
+    ok_if 'the journal is in place' test -s "$E/varlib/restore.journal"
     for kind in --resume --rollback; do
         out=$(restore_run "$kind"); rc_is "$kind refuses it" 1 "$?"
         has "$kind says to look at it" 'cannot be read. Look at it by hand.' "$out"
@@ -5444,13 +5446,14 @@ test_a_journal_that_cannot_be_read_stops_everything() {
 test_a_restore_killed_from_outside_is_finished_by_resume() {
     # Q26-T03 and A2-gap-1: a real SIGKILL, not a stop the restore asked for. The lock goes with the process, the
     # journal stays, and --resume finishes the restore.
-    local pid
+    local pattern="$E/manager.sh restore $E/backup.tar"
     backed_up_server
     real_flock
     paused_restore swapped "$E/killed.out"; rc_is 'the restore holds the lock half way' 0 "$?"
-    pid=$(pgrep -f "$E/manager.sh restore $E/backup.tar" | head -n 1)
-    [[ -n $pid ]]; rc_is 'its process is found' 0 "$?"
-    kill -9 "$pid" 2>/dev/null
+    pgrep -f "$pattern" >/dev/null; rc_is 'its processes are found' 0 "$?"
+    # The manager runs each action in a subshell of its own, with the same command line: all of them go at once.
+    pkill -9 -f "$pattern"
+    wait_for '! pgrep -f "$pattern" >/dev/null'; rc_is 'and none is left' 0 "$?"
     rm -f "$E/paused"
     wait
     ok_if 'the journal stays' test -s "$E/varlib/restore.journal"
