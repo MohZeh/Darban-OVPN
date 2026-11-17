@@ -3,7 +3,8 @@
 
 1. Every quoted text this change removed from bin/, lib/ or setup/ that a test still contains, while the code no
    longer does. This needs the commit the change starts from: python3 scripts/check-stale-strings.py <base>
-2. Every "Enter: <label> =>" answer in the scripted terminal tests whose label is nowhere in the code.
+2. Every "Enter: <label> =>" answer in the scripted terminal tests whose label is nowhere in the code, and every
+   option a script answers by its label, "=> {Label}", that the code does not have.
 
 The tests are the four that hold screen text: tests/run-tests.sh, tests/run-tty-tests.py, tests/pty-drive.py and
 the key scripts in tests/acceptance-ci.sh. Without a base, or with one this clone does not have, only part 2 runs.
@@ -16,6 +17,7 @@ import sys
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 QUOTED = re.compile(r"""'([^'\n]{12,})'|"([^"\n]{12,})\"""")
 ENTER = re.compile(r'Enter: (.+?) =>')
+OPTION_LABEL = re.compile(r' => [^\n]*?\{([^{}$\n]+)\}')
 
 
 def read(paths):
@@ -54,7 +56,8 @@ def main():
     removed = removed_texts(base)
     stale = sorted(t for t in removed or () if t not in code and t in tests)
     labels = sorted({m.group(1) for m in ENTER.finditer(tests)
-                     if '$' not in m.group(1) and m.group(1) not in code and m.group(1).split(' ')[0] != 'Install'})
+                     if '$' not in m.group(1) and m.group(1) not in code and m.group(1).split(' ')[0] != 'Install'}
+                    | {m.group(1) for m in OPTION_LABEL.finditer(tests) if m.group(1) not in code})
     for text in stale:
         print(f'ERROR: removed from the code, still in a test: {text!r}', file=sys.stderr)
     for label in labels:

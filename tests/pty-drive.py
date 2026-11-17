@@ -4,7 +4,9 @@
     pty-drive.py [--timeout SECONDS] SCRIPT -- COMMAND...
 
 Each line of SCRIPT is "text to wait for => keys to press". In keys, \\r is Enter and \\e is Esc; an empty
-right side only waits.
+right side only waits. {Label} in keys is the number the screen shows for the option that starts with Label, as
+in "Choose [0-9] => {Share a profile}\\r", so a script does not break when a list changes order. The option must be
+on the screen this step waited through, or the step fails as a text that did not appear does.
 
 Where a step looks: after keys were pressed, only in what the command showed since then, so a screen from
 before the keys never answers a step. After a step that pressed nothing, right after the text it matched, so
@@ -23,6 +25,16 @@ import termios
 import time
 
 ANSI = re.compile(r'\x1b\[[0-9;?]*[A-Za-z]')
+# A numbered option as menus and choices show it: "    5  Share a profile", or " ❯ 2  Create a client".
+OPTION = re.compile(r'^\s*(?:[❯>]\s*)?(\d+)\s{2,}(\S.*?)\s*$')
+LABEL = re.compile(r'\{([^{}]+)\}')
+
+
+def option_number(label, shown):
+    """The number of the last option in shown that starts with label, or None."""
+    numbers = [match.group(1) for line in ANSI.sub('', shown).replace('\r', '').split('\n')
+               if (match := OPTION.match(line)) and match.group(2).startswith(label)]
+    return numbers[-1] if numbers else None
 
 
 def main():
@@ -82,6 +94,7 @@ def main():
     start = 0
     for step in steps:
         text, keys = step[0], step[1] if len(step) > 1 else ''
+        step_from = start
         end = time.time() + timeout
         while (found := find(text, start)) < 0:
             if time.time() > end or not read_some(0.1):
@@ -96,6 +109,15 @@ def main():
         # The prompts ignore keys pressed before they were visible, so give them a moment to appear fully.
         time.sleep(0.25)
         read_some(0)
+        for label in LABEL.findall(keys):
+            number = option_number(label, seen[step_from:])
+            if number is None:
+                print(f'pty-drive: no option on the screen starts with: {label}', file=sys.stderr)
+                show()
+                os.killpg(proc.pid, signal.SIGKILL)
+                proc.wait()
+                return 3
+            keys = keys.replace('{' + label + '}', number, 1)
         if keys:
             # What the keys cause comes after this point; nothing shown before it may answer the next step.
             start = len(seen)

@@ -24,8 +24,8 @@ new_install() {
 Server address [ => 127.0.0.1\r
 VPN port [ => \r
 Enter: Install now => \r
-Enter: Create a client => 1\r
-Choose [0-9] => 0\r
+Enter: Create a client => {Not now}\r
+Choose [0-9] => {Exit}\r
 EOF
     in_terminal new "$(one_line "$1")"
 }

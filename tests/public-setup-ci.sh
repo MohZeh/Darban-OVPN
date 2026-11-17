@@ -22,9 +22,16 @@ if command -v snap >/dev/null; then
     elif ! timeout 60 snap info certbot >/dev/null 2>&1; then
         # The Snap Store itself is down, which no change here can fix: the setup must still finish, and did.
         echo 'NOTE: the Snap Store does not answer, so the setup could not install certbot; this check is skipped.'
+    elif DARBAN_SNAP_RETRY_DELAY=30 bash -c 'set -uo pipefail; source lib/common.sh; darban_snap_install_certbot "$1"' _ "$MARKER"; then
+        # The store answered, the setup's two tries failed, and the same code installed it a moment later: the
+        # store failed for a moment, which no change here can fix. The removal below is still checked.
+        reason='the Snap Store failed both tries of the setup; the same code installed certbot a moment later'
+        echo "NOT TESTED: certbot from the snap during the setup: $reason"
+        if [[ -n ${GITHUB_STEP_SUMMARY:-} ]]; then echo "Not tested: certbot from the snap during the setup: $reason" >>"$GITHUB_STEP_SUMMARY"; fi
     else
-        echo 'FAIL: the Snap Store answers, but the setup did not install certbot. What the setup logged about it:'
+        echo 'FAIL: the Snap Store answers, but neither the setup nor the same code once more installed certbot.'
         grep -iE 'certbot|snap' /var/log/darban-setup.log 2>/dev/null | tail -n 20 || true
+        echo "What snap says: $(timeout 300 snap install --classic certbot 2>&1 | tail -n 3 | tr '\n' ' ')"
         exit 1
     fi
 else

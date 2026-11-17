@@ -19,7 +19,7 @@ posix() { if command -v cygpath >/dev/null; then cygpath -u "$1"; else printf '%
 WORK=$(native "$(mktemp -d "${TMPDIR:-/tmp}/darban-tests.XXXXXXXX")")
 trap 'rm -rf "$WORK"' EXIT
 export BASE_PATH=$PATH
-PASS=0; FAIL=0; FAILED=()
+PASS=0; FAIL=0; FAILED=(); SKIPPED=()
 CURRENT=''
 
 fresh() {
@@ -33,10 +33,34 @@ fresh() {
 }
 result() { if (( $1 )); then PASS=$((PASS + 1)); else FAIL=$((FAIL + 1)); FAILED+=("$CURRENT: $2"); printf '  FAIL %s\n' "$2"; fi; }
 ok_if() { local what=$1; shift; if "$@"; then result 1 "$what"; else result 0 "$what"; fi; }
-has() { local what=$1 needle=$2 text=$3; if [[ $text == *"$needle"* ]]; then result 1 "$what"; else result 0 "$what (wanted: $needle)"; printf '%s\n' "$text" | sed 's/^/    | /' | tail -25; fi; }
-lacks() { local what=$1 needle=$2 text=$3; if [[ $text != *"$needle"* ]]; then result 1 "$what"; else result 0 "$what (unwanted: $needle)"; printf '%s\n' "$text" | sed 's/^/    | /' | tail -25; fi; }
+has() { local what=$1 needle=$2 text=$3; if [[ $text == *"$needle"* ]]; then result 1 "$what"; else result 0 "$what (wanted: $needle)"; printf '%s\n' "$text" | sed 's/^/    | /' | tail -25; keep_output "$what" "$text"; fi; }
+lacks() { local what=$1 needle=$2 text=$3; if [[ $text != *"$needle"* ]]; then result 1 "$what"; else result 0 "$what (unwanted: $needle)"; printf '%s\n' "$text" | sed 's/^/    | /' | tail -25; keep_output "$what" "$text"; fi; }
+# Evidence of a failure, for CI to keep when DARBAN_TEST_EVIDENCE names a directory. The repository is public, so
+# only what is listed here is kept, and never a key, a certificate or a profile: scrub drops every PEM block and
+# every inline key or certificate of a profile.
+scrub() { sed -E '/-----BEGIN /,/-----END /d; /<(key|cert|ca|tls-crypt|tls-crypt-v2|tls-auth|secret)>/,/<\/(key|cert|ca|tls-crypt|tls-crypt-v2|tls-auth|secret)>/d'; }
+keep_output() {
+    # keep_output <check> <text>: the whole output a failed check looked at, where the log shows its last lines.
+    [[ -n ${DARBAN_TEST_EVIDENCE:-} ]] || return 0
+    mkdir -p "$DARBAN_TEST_EVIDENCE/$CURRENT"
+    printf '== %s\n%s\n\n' "$1" "$2" | scrub >>"$DARBAN_TEST_EVIDENCE/$CURRENT/outputs.txt"
+}
+keep_evidence() {
+    # keep_evidence <test>: the logs of the test's fake server, its files by name only, and the TCP listeners and
+    # Python processes of the moment.
+    [[ -n ${DARBAN_TEST_EVIDENCE:-} ]] || return 0
+    local dir=$DARBAN_TEST_EVIDENCE/$1 file
+    mkdir -p "$dir"
+    for file in "$E"/*.log; do [[ -f $file ]] && scrub <"$file" >"$dir/${file##*/}"; done
+    ls -la "$E" "$E/cfg" >"$dir/files.txt" 2>&1
+    ss -ltnp >"$dir/listeners.txt" 2>&1
+    ps -eo pid,ppid,stat,lstart,args 2>/dev/null | grep -E '[p]ython3' >"$dir/processes.txt"
+    return 0
+}
 rc_is() { local what=$1 want=$2 got=$3; if [[ $got == "$want" ]]; then result 1 "$what"; else result 0 "$what (rc $got, wanted $want)"; fi; }
 rc_not0() { local what=$1 got=$2; if [[ $got != 0 ]]; then result 1 "$what"; else result 0 "$what (rc 0)"; fi; }
+# skip_here <why>: this test cannot run here, said by name, so it is neither a failure nor a pass on nothing.
+skip_here() { RUN_SKIP=1; SKIPPED+=("$CURRENT: $1"); printf '  SKIP %s\n' "$1"; }
 
 # Commands get an empty stdin: an open one that never answers would hold a prompt until the idle timeout.
 mgr() { bash "$E/manager.sh" "$@" 2>&1 </dev/null; }
@@ -247,7 +271,7 @@ test_stale_certificate_file_is_refused_with_a_reason() {
 test_blocked_valid_certificates_are_visible() {
     local out
     # This builds states the real Easy-RSA refuses to create: a repeated name and a name with a space.
-    if [[ -n ${DARBAN_REAL_EASYRSA:-} ]]; then return 0; fi
+    if [[ -n ${DARBAN_REAL_EASYRSA:-} ]]; then skip_here 'the real Easy-RSA refuses to build a repeated name or a name with a space'; return 0; fi
     easyrsa build-client-full bob nopass
     rm "$PKI/issued/bob.crt"
     easyrsa build-client-full carol nopass
@@ -1317,7 +1341,11 @@ start_links_stub() {
 #!/usr/bin/env bash
 if [[ " \$* " == *" restart darban-links.service "* ]]; then
     echo "systemctl \$*" >> "\$STUB_LOG"
-    if [[ -s "$LINKS_PIDFILE" ]]; then kill "\$(cat "$LINKS_PIDFILE")" 2>/dev/null; sleep 0.3; fi
+    if [[ -s "$LINKS_PIDFILE" ]]; then
+        old=\$(cat "$LINKS_PIDFILE")
+        kill "\$old" 2>/dev/null
+        for (( try = 0; try < 50; try++ )); do kill -0 "\$old" 2>/dev/null || break; sleep 0.1; done
+    fi
     source "$E/cfg/links.env"
     python3 -I "$REPO/lib/linkd.py" --dir "$E/links" --cert "$E/cfg/link-cert.pem" --key "$E/cfg/link-key.pem" --host "\$LINK_HOST" --port "\$LINK_PORT" --server-conf "$SERVER_CONF" --event-script "$E/libexec/darban-ovpn-event" --interval 0.2 --idle-exit 1 >>"$E/links.log" 2>&1 </dev/null &
     echo \$! > "$LINKS_PIDFILE"
@@ -1339,7 +1367,15 @@ STUB
     echo 127.0.0.1 > "$E/cfg/domain"
     printf 'LINK_PORT=%s\n' "$LINK_TEST_PORT" >> "$E/cfg/config"
 }
-stop_links_stub() { if [[ -s ${LINKS_PIDFILE:-/nonexistent} ]]; then kill "$(cat "$LINKS_PIDFILE")" 2>/dev/null; fi; }
+stop_links_stub() {
+    # Stops the link server of this test, and waits until it is gone: a server still ending holds its port.
+    local pid try
+    [[ -s ${LINKS_PIDFILE:-/nonexistent} ]] || return 0
+    pid=$(cat "$LINKS_PIDFILE")
+    kill "$pid" 2>/dev/null || return 0
+    for (( try = 0; try < 50; try++ )); do kill -0 "$pid" 2>/dev/null || return 0; sleep 0.1; done
+    result 0 "the link server $pid stopped within 5 seconds"
+}
 web() { /usr/bin/curl -ks --max-time 10 "$@"; }
 new_link() { menu "5\n${1:-alice}\n1\n1\n0\n" | grep -oE 'https://[^ ]+/l/[0-9a-f]{64}'; }
 
@@ -1636,6 +1672,56 @@ s = socket.socket(); s.bind(("127.0.0.1", int(sys.argv[1]))); s.listen(); time.s
     kill "$pid" 2>/dev/null
 }
 
+test_failure_evidence_holds_no_key_certificate_or_profile() {
+    # The evidence CI keeps of a failed test is public: only listed files, and no PEM block or inline profile key.
+    local kept=$WORK/evidence-check DARBAN_TEST_EVIDENCE found
+    DARBAN_TEST_EVIDENCE=$kept
+    printf 'step one\n-----BEGIN PRIVATE KEY-----\nSECRETKEYDATA\n-----END PRIVATE KEY-----\nstep two\n' >"$E/links.log"
+    printf 'client\n<key>\nSECRETINLINE\n</key>\n<tls-crypt>\nSECRETTLS\n</tls-crypt>\nremote vpn.example.com\n' >"$E/profile.log"
+    keep_output 'a check' "$(printf 'before\n<cert>\nSECRETCERT\n</cert>\nafter')"
+    keep_evidence "$CURRENT"
+    found=$(grep -rl 'SECRET' "$kept" 2>/dev/null)
+    [[ -z $found ]]; rc_is 'no key, certificate or inline profile secret is kept' 0 "$?"
+    grep -q 'step two' "$kept/$CURRENT/links.log"; rc_is 'the rest of a log is kept' 0 "$?"
+    grep -q 'remote vpn.example.com' "$kept/$CURRENT/profile.log"; rc_is 'and the rest of a profile-like text' 0 "$?"
+    grep -q 'after' "$kept/$CURRENT/outputs.txt"; rc_is 'the whole output of a failed check is kept' 0 "$?"
+    ok_if 'files are named, not copied' test -s "$kept/$CURRENT/files.txt"
+    found=$(find "$kept" -type f ! -name '*.log' ! -name outputs.txt ! -name files.txt ! -name listeners.txt ! -name processes.txt)
+    [[ -z $found ]]; rc_is 'nothing but the listed files' 0 "$?"
+    [[ ! -e $kept/$CURRENT/pki && ! -e $kept/$CURRENT/cfg ]]; rc_is 'no PKI or settings folder is copied' 0 "$?"
+}
+
+test_link_port_held_by_no_visible_program_for_a_moment() {
+    # F2: the link service that ends after its idle time shows its socket for a moment after its process is
+    # gone. That is no other program: a share made then waits for it, and a socket that stays is still refused.
+    local port out
+    start_links_stub
+    port=$(( 40000 + RANDOM % 20000 ))
+    printf 'LINK_PORT=%s\n' "$port" >> "$E/cfg/config"
+    mv "$E/bin/ss" "$E/bin/ss.real"
+    # FAKE_SS_HELD: how many more TCP questions see a listener on the port with no process.
+    cat > "$E/bin/ss" <<STUB
+#!/usr/bin/env bash
+for arg in "\$@"; do
+    if [[ \$arg =~ ^-[A-Za-z]*t && -n \${FAKE_SS_HELD:-} ]]; then
+        left=\$(cat "$E/ss-held" 2>/dev/null || echo "\$FAKE_SS_HELD")
+        if (( left > 0 )); then echo \$(( left - 1 )) > "$E/ss-held"; echo "LISTEN 0 5 127.0.0.1:$port 0.0.0.0:*"; exit 0; fi
+    fi
+done
+exec bash "$E/bin/ss.real" "\$@"
+STUB
+    chmod +x "$E/bin/ss"
+    out=$(FAKE_SS_HELD=3 menu '5\nalice\n1\n1\n0\n')
+    lacks 'a socket that goes within a second is not called another program' 'is now used by' "$out"
+    has 'and the link is made' "/l/" "$out"
+    rm -f "$E/ss-held"
+    stop_links_stub
+    out=$(FAKE_SS_HELD=1000 menu '5\nalice\n1\n1\n0\n')
+    has 'a socket that stays is still refused' "TCP $port, the port for links, is now used by another program" "$out"
+    lacks 'and no link is made' '/l/' "$out"
+    mv "$E/bin/ss.real" "$E/bin/ss"
+}
+
 test_share_qr_code_in_a_real_terminal() {
     # The QR code is one option of the copy question; once drawn, the question comes back without it.
     local script=$E/script out rc
@@ -1643,15 +1729,15 @@ test_share_qr_code_in_a_real_terminal() {
     printf '#!/usr/bin/env bash\necho "qrencode $*" >> "$STUB_LOG"; echo QRCODE-DRAWN\n' > "$E/bin/qrencode"
     chmod +x "$E/bin/qrencode"
     cat > "$script" <<'EOF'
-Choose [0-9] => 5\r
+Choose [0-9] => {Share a profile}\r
 Number or name => alice\r
 Enter: Temporary link => \r
 Enter: No password => \r
-Enter: Copy link and note => 2\r
+Enter: Copy link and note => {Show a QR code}\r
 QRCODE-DRAWN
-Enter: Copy link and note => 3\r
+Enter: Copy link and note => {Do not copy}\r
 Press Enter to return => \r
-Choose [0-9] => 0\r
+Choose [0-9] => {Exit}\r
 EOF
     out=$(NO_COLOR=1 python3 "$HERE/pty-drive.py" --timeout 30 "$script" -- bash "$E/manager.sh" 2>&1); rc=$?
     rc_is 'the QR code comes from the copy question' 0 "$rc"
@@ -2536,6 +2622,23 @@ test_pty_drive_reads_what_arrived_together() {
     has 'each answer went to its own question' 'done xy' "$out"
 }
 
+test_pty_drive_answers_an_option_by_its_label() {
+    # E6 and B02: {Label} is the number the screen shows for that option, wherever the list puts it.
+    local script=$E/script out rc menu
+    menu='printf "    1  First thing\n    2  Exit\n ❯ 3  Share a profile \nChoose: "; read -r a; echo "chose $a"'
+    printf 'Choose: => {Share a profile}\\r\nchose\n' > "$script"
+    out=$(python3 "$HERE/pty-drive.py" --timeout 5 "$script" -- bash -c "$menu" 2>&1); rc=$?
+    rc_is 'a label is answered' 0 "$rc"
+    has 'with the number the screen shows for it' 'chose 3' "$out"
+    printf 'Choose: => {Exit}\\r\nchose\n' > "$script"
+    out=$(python3 "$HERE/pty-drive.py" --timeout 5 "$script" -- bash -c "$menu" 2>&1)
+    has 'a plain option line counts too' 'chose 2' "$out"
+    printf 'Choose: => {Remove everything}\\r\n' > "$script"
+    out=$(python3 "$HERE/pty-drive.py" --timeout 5 "$script" -- bash -c "$menu" 2>&1); rc=$?
+    rc_is 'a label the screen does not show fails the script' 3 "$rc"
+    has 'and says which' 'no option on the screen starts with: Remove everything' "$out"
+}
+
 test_first_client_in_a_real_terminal() {
     # From the end of the setup to a link and a confirmed connection: Enter at every step.
     local script=$E/script out rc
@@ -2549,7 +2652,7 @@ Enter: Temporary link => \r
 Enter: No password => \r
 Enter: Copy link and note => \r
 client1 is connected from 198.51.100.7 => \r
-Choose [0-9] => 0\r
+Choose [0-9] => {Exit}\r
 EOF
     out=$(NO_COLOR=1 python3 "$HERE/pty-drive.py" --timeout 30 "$script" -- bash "$E/manager.sh" welcome 2>&1); rc=$?
     rc_is 'the whole path takes only Enter' 0 "$rc"
@@ -2579,11 +2682,11 @@ test_first_client_on_a_public_ip_in_a_real_terminal() {
 Enter: Create a client => \r
 Client name [client1] => \r
 Enter: Temporary link => \r
-Enter: Yes, get a certificate => 2\r
+Enter: Yes, get a certificate => {No, use a self-signed certificate}\r
 Enter: No password => \r
 Enter: Copy link and note => \r
 client1 is connected from 198.51.100.7 => \r
-Choose [0-9] => 0\r
+Choose [0-9] => {Exit}\r
 EOF
     out=$(NO_COLOR=1 python3 "$HERE/pty-drive.py" --timeout 30 "$script" -- bash "$E/manager.sh" welcome 2>&1); rc=$?
     rc_is 'a public IP also takes only Enter' 0 "$rc"
@@ -2599,16 +2702,16 @@ test_own_password_in_a_real_terminal() {
     local script=$E/script out rc
     start_links_stub
     cat > "$script" <<'EOF'
-Choose [0-9] => 5\r
+Choose [0-9] => {Share a profile}\r
 Number or name => alice\r
 Enter: Temporary link => \r
-Enter: No password => 2\r
+Enter: No password => {Yes, make a password}\r
 Password (Enter = the suggested one) => short\r
 Use at least 9 characters => سلام دنیای خوب\r
 Use only English letters => blue sky 42\r
-Enter: Copy link, password and note => 2\r
+Enter: Copy link, password and note => {Copy without the password}\r
 Press Enter to return => \r
-Choose [0-9] => 0\r
+Choose [0-9] => {Exit}\r
 EOF
     out=$(NO_COLOR=1 python3 "$HERE/pty-drive.py" --timeout 30 "$script" -- bash "$E/manager.sh" 2>&1); rc=$?
     rc_is 'a password of your own' 0 "$rc"
@@ -2623,13 +2726,13 @@ test_keep_on_server_copies_each_command_in_a_real_terminal() {
     # Keeping the file is for the admin: no password, and each command can be copied on its own.
     local script=$E/script out rc copied
     cat > "$script" <<'EOF'
-Choose [0-9] => 5\r
+Choose [0-9] => {Share a profile}\r
 Number or name => alice\r
-Enter: Temporary link => 2\r
-Enter: Windows => 2\r
+Enter: Temporary link => {Keep it on the server}\r
+Enter: Windows => {macOS or Linux}\r
 Enter: Copy the command => \r
 Press Enter to return => \r
-Choose [0-9] => 0\r
+Choose [0-9] => {Exit}\r
 EOF
     out=$(NO_COLOR=1 python3 "$HERE/pty-drive.py" --timeout 30 "$script" -- bash "$E/manager.sh" 2>&1); rc=$?
     rc_is 'keeping the file in a real terminal' 0 "$rc"
@@ -2653,11 +2756,11 @@ test_link_block_and_copy_in_a_real_terminal() {
 Enter: Create a client => \r
 Client name [client1] => \r
 Enter: Temporary link => \r
-Enter: No password => 2\r
+Enter: No password => {Yes, make a password}\r
 Password (Enter = the suggested one) => \r
-Enter: Copy link, password and note => 2\r
+Enter: Copy link, password and note => {Copy without the password}\r
 client1 is connected from 198.51.100.7 => \r
-Choose [0-9] => 0\r
+Choose [0-9] => {Exit}\r
 EOF
     out=$(NO_COLOR=1 python3 "$HERE/pty-drive.py" --timeout 30 "$script" -- bash "$E/manager.sh" welcome 2>&1); rc=$?
     rc_is 'a link with a password' 0 "$rc"
@@ -5737,12 +5840,23 @@ test_the_download_panel_never_reads_a_file_without_a_record() {
 }
 
 mapfile -t TESTS < <(declare -F | awk '$3 ~ /^test_/ {print $3}' | sort)
+SELECTED=0
 for t in "${TESTS[@]}"; do
     [[ -z $FILTER || $t == *"$FILTER"* ]] || continue
+    SELECTED=$((SELECTED + 1))
     CURRENT=$t
     printf '%s\n' "$t"
     fresh
+    RUN_CHECKS=$((PASS + FAIL)) RUN_FAILED=$FAIL RUN_SKIP=0
     "$t"
+    # A test that ends before its first check proves nothing, and must not pass, unless it said why it cannot run.
+    (( PASS + FAIL > RUN_CHECKS || RUN_SKIP )) || result 0 'no check ran'
+    (( FAIL == RUN_FAILED )) || keep_evidence "$t"
+    # Its link server goes with it, so the next test finds its ports free.
+    stop_links_stub
 done
-printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
+# A filter that matches no test runs nothing, and must not pass either.
+if (( SELECTED == 0 )); then printf 'No test matches: %s\n' "$FILTER" >&2; exit 1; fi
+printf '\n%d tests, %d passed, %d failed, %d tests skipped here\n' "$SELECTED" "$PASS" "$FAIL" "${#SKIPPED[@]}"
+if (( ${#SKIPPED[@]} )); then printf 'Skipped here:\n'; printf '  %s\n' "${SKIPPED[@]}"; fi
 if (( FAIL > 0 )); then printf 'Failed:\n'; printf '  %s\n' "${FAILED[@]}"; exit 1; fi

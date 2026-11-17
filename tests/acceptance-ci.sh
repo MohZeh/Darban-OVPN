@@ -125,12 +125,12 @@ cat > "$LOG/welcome.keys" <<'EOF'
 Open UDP 1194 in your server
 Enter: Create a client => \r
 Client name [client1] => accept1\r
-Enter: Temporary link => 2\r
+Enter: Temporary link => {Keep it on the server}\r
 Kept on the server
 Enter: Windows => \r
-Enter: Copy the command => 2\r
+Enter: Copy the command => {Do not copy}\r
 Waiting for accept1 to connect => \r
-Choose [0-9] => 0\r
+Choose [0-9] => {Exit}\r
 EOF
 in_terminal welcome 60 darban welcome
 cp /root/openvpn-clients/accept1.ovpn "$LOG/old.ovpn"
@@ -162,13 +162,13 @@ echo 'PASS: the connected client is listed.'
 
 # The tool waits for the connection after sharing, and another SSH user gets a copy it can read.
 cat > "$LOG/share.keys" <<'EOF'
-Choose [0-9] => 5\r
+Choose [0-9] => {Share a profile}\r
 Number or name => accept1\r
-Enter: Temporary link => 2\r
+Enter: Temporary link => {Keep it on the server}\r
 Enter: Windows => \r
-Enter: Copy the command => 2\r
+Enter: Copy the command => {Do not copy}\r
 accept1 is connected from => \r
-Choose [0-9] => 0\r
+Choose [0-9] => {Exit}\r
 EOF
 in_terminal share 60 darban
 if [[ -n ${SUDO_USER:-} && $SUDO_USER != root ]]; then
@@ -706,7 +706,9 @@ tar -xzf "$pebble_dir/src.tar.gz" -C "$pebble_dir"
 pebble_bin=$(find "$pebble_dir/bin" -type f -name pebble | head -n 1)
 pebble_src=$(find "$pebble_dir" -maxdepth 1 -type d -name 'pebble-*' | head -n 1)
 chmod +x "$pebble_bin"
-(cd "$pebble_src" && PEBBLE_VA_ALWAYS_VALID=1 PEBBLE_VA_NOSLEEP=1 "$pebble_bin" -config test/config/pebble-config.json </dev/null >"$LOG/pebble.log" 2>&1 &)
+# Pebble rejects a share of good nonces by default, to test a client's retry. That is certbot's code, not this
+# tool's, and two rejections in a row made a renewal here fail now and then: the renewals here test the tool.
+(cd "$pebble_src" && PEBBLE_VA_ALWAYS_VALID=1 PEBBLE_VA_NOSLEEP=1 PEBBLE_WFE_NONCEREJECT=0 "$pebble_bin" -config test/config/pebble-config.json </dev/null >"$LOG/pebble.log" 2>&1 &)
 export REQUESTS_CA_BUNDLE=$pebble_src/test/certs/pebble.minica.pem
 for attempt in $(seq 1 20); do
     if curl -fs --cacert "$REQUESTS_CA_BUNDLE" https://localhost:14000/dir >/dev/null; then break; fi
@@ -801,6 +803,11 @@ serial=$(openssl x509 -in "$LE_LIVE/cert.pem" -noout -serial)
 certbot renew --no-random-sleep-on-renew --force-renewal --cert-name darban-ovpn-links 2>&1 | tee "$LOG/le-renew-after.log"
 [[ $(openssl x509 -in "$LE_LIVE/cert.pem" -noout -serial) != "$serial" ]]
 echo "PASS: after an uninstall, certbot from Ubuntu renews the kept certificate without this tool's hook."
+# not_tested <what and why>: said in the log and in the run's summary, so a green run shows what it did not test.
+not_tested() {
+    echo "SKIPPED: $1"
+    if [[ -n ${GITHUB_STEP_SUMMARY:-} ]]; then echo "Not tested: $1" >>"$GITHUB_STEP_SUMMARY"; fi
+}
 # certbot from the snap, which the tool uses for an IP address, when this runner can install it.
 if timeout 300 snap install --classic certbot >"$LOG/snap.log" 2>&1; then
     serial=$(openssl x509 -in "$LE_LIVE/cert.pem" -noout -serial)
@@ -810,11 +817,11 @@ if timeout 300 snap install --classic certbot >"$LOG/snap.log" 2>&1; then
         && [[ $(openssl x509 -in "$LE_LIVE/cert.pem" -noout -serial) != "$serial" ]]; then
         echo "PASS: certbot from the snap renews it too."
     else
-        echo "SKIPPED: certbot from the snap did not renew against the test ACME server here: $(grep -v '^ *$' "$LOG/le-renew-snap.log" | tail -n 2 | tr '\n' ' ')"
+        not_tested "certbot from the snap did not renew against the test ACME server here: $(grep -v '^ *$' "$LOG/le-renew-snap.log" | tail -n 2 | tr '\n' ' ')"
     fi
     snap remove certbot >/dev/null 2>&1 || true
 else
-    echo "SKIPPED: certbot from the snap could not be installed on this runner: $(tail -n 1 "$LOG/snap.log")"
+    not_tested "certbot from the snap could not be installed on this runner: $(tail -n 1 "$LOG/snap.log")"
 fi
 bash setup/install.sh
 darban status >/dev/null
