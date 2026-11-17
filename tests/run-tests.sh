@@ -5673,6 +5673,32 @@ test_a_changed_copy_stays_known_until_it_is_gone() {
     [[ $(copies) == 0 ]]; rc_is 'once deleted, it is forgotten' 0 "$?"
 }
 
+test_a_revocation_deletes_a_kept_copy_by_the_certificate_it_holds_now() {
+    # R26-B01: a kept copy is judged by the certificate it holds now. One that the SSH user replaced with the profile
+    # of a client issued again under the same name goes when that certificate is revoked, with another user set now,
+    # just as the repair would delete it, and no revocation is left unfinished.
+    local copy
+    two_homes
+    ssh_user ali
+    keep_file alice >/dev/null
+    copy=$E/home/ali/alice.ovpn
+    echo 'not a profile any more' > "$copy"
+    sed -i 's/^expires=.*/expires=1/' "$E/clients/alice.share"
+    mgr sweep >/dev/null
+    [[ $(copies) == 1 ]]; rc_is 'the changed copy is kept, with its record' 0 "$?"
+    revoke_menu alice >/dev/null
+    grep -qx 'not a profile any more' "$copy"; rc_is 'revoking the certificate it no longer holds leaves it' 0 "$?"
+    # alice is issued again under the same name, and ali puts that profile where the kept copy is.
+    menu '1\nalice\n0\n' >/dev/null
+    ok_if 'alice is issued again' test -s "$E/clients/alice.ovpn"
+    cp "$E/clients/alice.ovpn" "$copy"
+    ssh_user bea
+    revoke_menu alice >/dev/null
+    ok_if 'revoking the new certificate deletes the kept copy that holds it, with bea as the user now' test ! -e "$copy"
+    lacks 'and leaves no revocation unfinished' 'Revocation unfinished' "$(menu '0\n')"
+    [[ $(copies) == 0 ]]; rc_is 'and no record is left' 0 "$?"
+}
+
 test_a_copy_that_could_not_be_written_leaves_nothing() {
     # R24-B02: a copy whose writing fails half way is removed, so nothing half written stays in that home, and the
     # next share makes it under its own name.
