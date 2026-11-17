@@ -1147,10 +1147,16 @@ home_copy_end_share() {
 }
 home_copy_revoked() {
     # home_copy_revoked <name> <serial>: after a revocation, under the CA lock: every recorded copy of that
-    # certificate, and <name>.ovpn in the home of the SSH user set now when it holds it.
+    # certificate, and <name>.ovpn in the home of the SSH user set now when it holds it. A kept copy is no longer
+    # the file this tool made, so the certificate it holds now decides, as the repair would.
     local entry home rc=0
     while IFS= read -r entry; do
-        home_copy_read "$entry" && [[ $HC_SERIAL == "$2" ]] || continue
+        home_copy_read "$entry" || continue
+        if [[ -n $HC_KEPT_AT ]]; then
+            [[ $HC_NAME == "$1" && $(share_serial "$HC_PATH" "$HC_NAME" 2>/dev/null) == "$2" ]] || continue
+        else
+            [[ $HC_SERIAL == "$2" ]] || continue
+        fi
         home_copy_drop "$entry" "$1 revoked" "$2" || rc=1
     done < <(home_copy_entries)
     if home=$(ssh_user_home) && copy_holds "$home/$1.ovpn" "$1" "$2"; then
