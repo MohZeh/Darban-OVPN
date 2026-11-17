@@ -516,10 +516,34 @@ if (( ! USE_UFW )); then
     iptables -D FORWARD -o tun0 -j ACCEPT
 fi
 
-# A real temporary link: it can be opened again until the client connects, and then it ends. The link
-# service asks the real management interface, from inside its sandbox.
+# A real temporary link: it can be opened again until the client connects, and then it ends.
 url=$(printf '5\naccept1\n1\n1\n0\n' | darban | grep -oE 'https://[^ ]+/l/[0-9a-f]{64}')
 curl -ksf "$url" | grep 'Download profile' >/dev/null
+
+# The link service sees only what it needs. From inside its mount namespace, the link key and the link files are
+# there, which also shows that nsenter reached it; every path its unit hides, that has something in it here, shows
+# nothing there. It may open no unix socket, so the management interface is out of its reach too.
+pid=$(systemctl show -p MainPID --value darban-links.service)
+[[ $pid =~ ^[1-9][0-9]*$ ]]
+inside() { nsenter -t "$pid" -m -- "$@"; }
+inside test -s /etc/darban/link-key.pem
+[[ -n $(inside ls -A /run/darban-links) ]]
+hidden=0
+for path in /etc/openvpn /etc/letsencrypt /var/backups/darban-pki /var/lib/darban /run/darban-events /run/openvpn-server /etc/shadow /etc/gshadow; do
+    if [[ -d $path && -n $(ls -A "$path") ]]; then
+        [[ -z $(inside ls -A "$path" 2>/dev/null) ]] || { echo "FAIL: the link service sees what is in $path."; exit 1; }
+    elif [[ -f $path && -s $path ]]; then
+        if inside test -s "$path"; then echo "FAIL: the link service can read $path."; exit 1; fi
+    else
+        continue
+    fi
+    hidden=$((hidden + 1))
+done
+# /etc/openvpn, /run/openvpn-server, /etc/shadow and /etc/gshadow always have something in them here.
+(( hidden >= 4 )) || { echo "FAIL: only $hidden of the hidden paths could be checked."; exit 1; }
+families=$(systemctl show -p RestrictAddressFamilies --value darban-links.service)
+[[ $families == *AF_INET* && $families != *AF_UNIX* ]] || { echo "FAIL: the link service may open: $families"; exit 1; }
+echo "PASS: the link service sees the link key and its files, and none of $hidden paths it has no use for, and opens no unix socket."
 curl -ksf -H 'Accept-Language: fa-IR,fa;q=0.9' "$url" | grep 'dir="rtl"' >/dev/null
 curl -ksf "$url/file" -o "$LOG/link.ovpn"
 grep -q '<key>' "$LOG/link.ovpn"
@@ -737,6 +761,8 @@ printf '5\naccept2\n1\n1\n0\n' | darban | tee "$LOG/le-link.log"
 grep -oE 'https://[^ ]+/l/[0-9a-f]{64}' "$LOG/le-link.log" >/dev/null
 [[ $(served_fp) == "$(link_fp)" ]]
 before=$(link_fp)
+# A reload, not a restart: the same process serves the new certificate, so a download in progress goes on.
+before_pid=$(systemctl show -p MainPID --value darban-links.service)
 certbot renew --no-random-sleep-on-renew --force-renewal --cert-name darban-ovpn-links 2>&1 | tee "$LOG/le-renew.log"
 cmp -s /etc/darban/link-cert.pem "$LE_LIVE/fullchain.pem"
 [[ $(link_fp) != "$before" ]]
@@ -745,6 +771,7 @@ for attempt in $(seq 1 10); do
     sleep 0.5
 done
 [[ $(served_fp) == "$(link_fp)" ]]
+[[ $(systemctl show -p MainPID --value darban-links.service) == "$before_pid" ]] || { echo 'FAIL: the link service was restarted, not reloaded.'; exit 1; }
 journalctl -u darban-links.service --no-pager | grep 'certificate reloaded' >/dev/null
 echo "PASS: certbot's renewal reaches the open link through this tool's hook, by a reload."
 cp "$LOG/domain.before" /etc/darban/domain

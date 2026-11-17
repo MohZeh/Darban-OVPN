@@ -2855,8 +2855,9 @@ mgmt_kill_client() {
     return 1
 }
 link_sees_connections() {
-    # Connection events end a link at the first connection. Without them, the link service reads the management
-    # interface itself, without socat: one local management line is enough.
+    # Connection events end a link at the first connection. Without them, the five-minute check asks the management
+    # interface, as root; the link service cannot reach it. One local management line is enough, with the socat that
+    # setup installs.
     local spec addr port extra
     if events_lines_on && events_units_installed; then return 0; fi
     spec=$(awk '$1=="management" {n++; s=$2 "\t" $3 "\t" $4} END {if(n==1) print s}' "$DARBAN_SERVER_CONF" 2>/dev/null)
@@ -3414,9 +3415,9 @@ events_health() {
     if ! events_lines_on; then
         if events_units_installed; then
             if reason=$(events_blocker); then
-                check info "Connection events are off: $reason. A link ends when it expires, or when the link service sees the connection"
+                check info "Connection events are off: $reason. A link ends when it expires, or when the five-minute check sees the connection"
             else
-                check info "Connection events are off. A link ends when it expires, or when the link service sees the connection. To turn them on $S_ARROW $reinstall"
+                check info "Connection events are off. A link ends when it expires, or when the five-minute check sees the connection. To turn them on $S_ARROW $reinstall"
             fi
         fi
         return 0

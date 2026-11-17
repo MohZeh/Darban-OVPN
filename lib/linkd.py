@@ -6,8 +6,9 @@ without keeping its token. darban keeps the whole address in <same>.url, readabl
 a link again; this service never reads that file, and removes it with the link. A link works until the client it
 was made for connects to the VPN for the first time, or until it expires, whichever comes first. With connection
 events on, darban sees that connection and ends the link itself. Without them, this service looks in OpenVPN's
-management interface; without that interface either, or when it misses a short connection, the link lasts until
-it expires. Until then the page and the file can be opened again, so a mistake on the phone costs nothing.
+management interface when it can read server.conf. Its unit hides that file and allows no unix socket, so on a
+server this tool installed, darban's five-minute check does that instead; when that misses a short connection, or
+there is no interface, the link lasts until it expires. Until then the page and the file can be opened again, so a mistake on the phone costs nothing.
 Opening the page never uses anything up: messengers fetch links for their previews.
 Standard library only. The process ends by itself once no link is left. SIGHUP reads the certificate again:
 new connections get the new one, and a download in progress finishes on the old one.
