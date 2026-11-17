@@ -4956,11 +4956,17 @@ backup_latest_value() {
     archive=$(readlink "$PKI_BACKUP_DIR/latest.tar.age" 2>/dev/null) || return 1
     [[ $archive == darban-pki-*.tar.age ]] || return 1
     manifest=$PKI_BACKUP_DIR/${archive%.tar.age}.manifest.json
-    # Only a backup that is there: a manifest left beside an archive deleted by hand describes nothing.
+    # Only a backup that is there and whole: a manifest left beside an archive deleted by hand describes nothing, and
+    # neither does one whose archive no longer has the bytes it recorded, after a fault of the disk or a change by
+    # hand. That is not proof the archive opens, which needs the private key, only that it is the one made.
     [[ -f $PKI_BACKUP_DIR/$archive && -f $manifest ]] || return 1
-    python3 -I -c 'import json, sys
-value = json.load(open(sys.argv[1])).get(sys.argv[2], "")
-print(value if isinstance(value, (str, int)) else "")' "$manifest" "$1" 2>/dev/null
+    python3 -I -c 'import hashlib, json, sys
+manifest = json.load(open(sys.argv[1]))
+with open(sys.argv[2], "rb") as handle:
+    if manifest.get("archive_sha256") != hashlib.sha256(handle.read()).hexdigest():
+        sys.exit(1)
+value = manifest.get(sys.argv[3], "")
+print(value if isinstance(value, (str, int)) else "")' "$manifest" "$PKI_BACKUP_DIR/$archive" "$1" 2>/dev/null
 }
 backup_make() {
     # backup_make <auto|now> <reason> [passphrase]: one backup, under the CA lock the caller holds, so the index, the
@@ -5150,7 +5156,7 @@ backup_health() {
         check info 'This copy is on this server. To recover from a lost server you need a copy elsewhere and your private key.'
     elif [[ -L $PKI_BACKUP_DIR/latest.tar.age ]]; then
         # "latest" names a backup that is not there, or not whole: the next automatic one makes a new one.
-        check warn "The newest backup of the CA is missing from $PKI_BACKUP_DIR $S_ARROW Maintenance $S_CRUMB 4"
+        check warn "The newest backup of the CA is missing or damaged in $PKI_BACKUP_DIR $S_ARROW Maintenance $S_CRUMB 4"
     elif backup_recipient >/dev/null; then
         check warn "No backup of the CA has been made yet $S_ARROW Maintenance $S_CRUMB 4"
     fi
