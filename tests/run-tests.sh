@@ -6123,6 +6123,7 @@ test_the_download_panel_never_reads_a_file_without_a_record() {
 }
 
 # RUN_TESTS_EXTRA=<file>: more tests, for Lint's checks of this runner itself.
+# shellcheck source=/dev/null  # The file is named only at run time.
 if [[ -n ${RUN_TESTS_EXTRA:-} ]]; then source "$RUN_TESTS_EXTRA"; fi
 mapfile -t TESTS < <(declare -F | awk '$3 ~ /^test_/ {print $3}' | sort)
 SELECTED=0
