@@ -17,10 +17,21 @@ export DARBAN_SNAP_RETRY_DELAY=0
 native() { if command -v cygpath >/dev/null; then cygpath -m "$1"; else printf '%s' "$1"; fi; }
 posix() { if command -v cygpath >/dev/null; then cygpath -u "$1"; else printf '%s' "$1"; fi; }
 WORK=$(native "$(mktemp -d "${TMPDIR:-/tmp}/darban-tests.XXXXXXXX")")
-trap 'rm -rf "$WORK"' EXIT
 export BASE_PATH=$PATH
 PASS=0; FAIL=0; FAILED=(); SKIPPED=()
-CURRENT=''
+CURRENT='' RUN_DONE=0
+# A test that calls exit ends the whole run there. Its status may be 0, so the run must still fail unless it got to
+# its summary: the tests after it did not run.
+on_exit() {
+    local rc=$?
+    rm -rf "$WORK"
+    if (( ! RUN_DONE )) && [[ -n $CURRENT ]]; then
+        printf '\nThe run ended early, in %s: the tests after it did not run.\n' "$CURRENT" >&2
+        exit 1
+    fi
+    exit "$rc"
+}
+trap on_exit EXIT
 
 fresh() {
     E=$WORK/env
@@ -38,7 +49,8 @@ lacks() { local what=$1 needle=$2 text=$3; if [[ $text != *"$needle"* ]]; then r
 # Evidence of a failure, for CI to keep when DARBAN_TEST_EVIDENCE names a directory. The repository is public, so
 # only what is listed here is kept, and never a key, a certificate or a profile: scrub drops every PEM block and
 # every inline key or certificate of a profile.
-scrub() { sed -E '/-----BEGIN /,/-----END /d; /<(key|cert|ca|tls-crypt|tls-crypt-v2|tls-auth|secret)>/,/<\/(key|cert|ca|tls-crypt|tls-crypt-v2|tls-auth|secret)>/d'; }
+# It also hides the key of each link and the line after "Password:", where the tool shows a new password once.
+scrub() { sed -E '/-----BEGIN /,/-----END /d; /<(key|cert|ca|tls-crypt|tls-crypt-v2|tls-auth|secret)>/,/<\/(key|cert|ca|tls-crypt|tls-crypt-v2|tls-auth|secret)>/d; s#/l/[0-9a-fA-F]{16,}#/l/<link key>#g; /Password:[[:space:]]*$/{n;s/.*/<password>/}'; }
 keep_output() {
     # keep_output <check> <text>: the whole output a failed check looked at, where the log shows its last lines.
     [[ -n ${DARBAN_TEST_EVIDENCE:-} ]] || return 0
@@ -1679,9 +1691,15 @@ test_failure_evidence_holds_no_key_certificate_or_profile() {
     printf 'step one\n-----BEGIN PRIVATE KEY-----\nSECRETKEYDATA\n-----END PRIVATE KEY-----\nstep two\n' >"$E/links.log"
     printf 'client\n<key>\nSECRETINLINE\n</key>\n<tls-crypt>\nSECRETTLS\n</tls-crypt>\nremote vpn.example.com\n' >"$E/profile.log"
     keep_output 'a check' "$(printf 'before\n<cert>\nSECRETCERT\n</cert>\nafter')"
+    # R29-T05: the key of a link, and a new password the tool shows once on the line after "Password:".
+    keep_output 'a link' "$(printf 'Link: https://vpn.example.com:9563/l/%s\nPassword:\nSECRETPASSWORD words\nNote: send it apart\n' "$(printf 'ab%.0s' $(seq 1 32))")"
     keep_evidence "$CURRENT"
     found=$(grep -rl 'SECRET' "$kept" 2>/dev/null)
-    [[ -z $found ]]; rc_is 'no key, certificate or inline profile secret is kept' 0 "$?"
+    [[ -z $found ]]; rc_is 'no key, certificate, inline profile secret or new password is kept' 0 "$?"
+    found=$(grep -rlE '/l/[0-9a-f]{64}' "$kept" 2>/dev/null)
+    [[ -z $found ]]; rc_is 'and no link key' 0 "$?"
+    grep -q 'Link: https://vpn.example.com:9563/l/<link key>' "$kept/$CURRENT/outputs.txt"; rc_is 'the link is still named, without its key' 0 "$?"
+    grep -q 'Note: send it apart' "$kept/$CURRENT/outputs.txt"; rc_is 'and the line after the password stays' 0 "$?"
     grep -q 'step two' "$kept/$CURRENT/links.log"; rc_is 'the rest of a log is kept' 0 "$?"
     grep -q 'remote vpn.example.com' "$kept/$CURRENT/profile.log"; rc_is 'and the rest of a profile-like text' 0 "$?"
     grep -q 'after' "$kept/$CURRENT/outputs.txt"; rc_is 'the whole output of a failed check is kept' 0 "$?"
@@ -2637,6 +2655,18 @@ test_pty_drive_answers_an_option_by_its_label() {
     out=$(python3 "$HERE/pty-drive.py" --timeout 5 "$script" -- bash -c "$menu" 2>&1); rc=$?
     rc_is 'a label the screen does not show fails the script' 3 "$rc"
     has 'and says which' 'no option on the screen starts with: Remove everything' "$out"
+    # R29-T04: two options that start alike. The one whose text is the label wins; a shorter label that fits both is
+    # refused, never answered with one of them.
+    menu='printf "    1  Copy link and note\n    2  Copy link\n    3  Do not copy\nChoose: "; read -r a; echo "chose $a"'
+    printf 'Choose: => {Copy link}\\r\nchose\n' > "$script"
+    out=$(python3 "$HERE/pty-drive.py" --timeout 5 "$script" -- bash -c "$menu" 2>&1); rc=$?
+    rc_is 'the option whose text is the label is answered' 0 "$rc"
+    has 'even when another starts with it' 'chose 2' "$out"
+    printf 'Choose: => {Copy li}\\r\nchose\n' > "$script"
+    out=$(python3 "$HERE/pty-drive.py" --timeout 5 "$script" -- bash -c "$menu" 2>&1); rc=$?
+    rc_is 'a label that fits two options fails the script' 3 "$rc"
+    has 'and says so' 'more than one option on the screen starts with: Copy li' "$out"
+    lacks 'and answers nothing' 'chose' "$out"
 }
 
 test_first_client_in_a_real_terminal() {
@@ -6092,6 +6122,8 @@ test_the_download_panel_never_reads_a_file_without_a_record() {
     [[ $(stat -c %X "$E/clients/alice.ovpn") == "$before" ]]; rc_is 'the file is not read' 0 "$?"
 }
 
+# RUN_TESTS_EXTRA=<file>: more tests, for Lint's checks of this runner itself.
+if [[ -n ${RUN_TESTS_EXTRA:-} ]]; then source "$RUN_TESTS_EXTRA"; fi
 mapfile -t TESTS < <(declare -F | awk '$3 ~ /^test_/ {print $3}' | sort)
 SELECTED=0
 for t in "${TESTS[@]}"; do
@@ -6110,6 +6142,7 @@ for t in "${TESTS[@]}"; do
 done
 # A filter that matches no test runs nothing, and must not pass either.
 if (( SELECTED == 0 )); then printf 'No test matches: %s\n' "$FILTER" >&2; exit 1; fi
+RUN_DONE=1
 printf '\n%d tests, %d passed, %d failed, %d tests skipped here\n' "$SELECTED" "$PASS" "$FAIL" "${#SKIPPED[@]}"
 if (( ${#SKIPPED[@]} )); then printf 'Skipped here:\n'; printf '  %s\n' "${SKIPPED[@]}"; fi
 if (( FAIL > 0 )); then printf 'Failed:\n'; printf '  %s\n' "${FAILED[@]}"; exit 1; fi

@@ -31,10 +31,20 @@ LABEL = re.compile(r'\{([^{}]+)\}')
 
 
 def option_number(label, shown):
-    """The number of the last option in shown that starts with label, or None."""
-    numbers = [match.group(1) for line in ANSI.sub('', shown).replace('\r', '').split('\n')
-               if (match := OPTION.match(line)) and match.group(2).startswith(label)]
-    return numbers[-1] if numbers else None
+    """The number of the option in shown that label names, or None, with why. An option whose text is label wins;
+    otherwise the one that starts with it. Two different options that both start with it are ambiguous, so the
+    step fails rather than choose one of them."""
+    found = [(match.group(1), match.group(2)) for line in ANSI.sub('', shown).replace('\r', '').split('\n')
+             if (match := OPTION.match(line)) and match.group(2).startswith(label)]
+    exact = [number for number, text in found if text == label]
+    if exact:
+        return exact[-1], ''
+    texts = sorted({text for _, text in found})
+    if len(texts) > 1:
+        return None, 'more than one option on the screen starts with: ' + label + ' (' + '; '.join(texts) + ')'
+    if not found:
+        return None, 'no option on the screen starts with: ' + label
+    return found[-1][0], ''
 
 
 def main():
@@ -110,9 +120,9 @@ def main():
         time.sleep(0.25)
         read_some(0)
         for label in LABEL.findall(keys):
-            number = option_number(label, seen[step_from:])
+            number, why = option_number(label, seen[step_from:])
             if number is None:
-                print(f'pty-drive: no option on the screen starts with: {label}', file=sys.stderr)
+                print(f'pty-drive: {why}', file=sys.stderr)
                 show()
                 os.killpg(proc.pid, signal.SIGKILL)
                 proc.wait()
