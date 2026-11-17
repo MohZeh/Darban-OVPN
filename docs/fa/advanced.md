@@ -13,7 +13,7 @@
 </div>
 
 ```bash
-curl -fsSL https://github.com/MohZeh/Darban-OVPN/releases/download/v1.0.0-rc.10/get.sh -o get.sh
+curl -fsSL https://github.com/MohZeh/Darban-OVPN/releases/download/v1.0.0/get.sh -o get.sh
 ```
 
 ```bash
@@ -26,7 +26,7 @@ sudo bash get.sh
 
 `get.sh` بستهٔ نسخه را دانلود می‌کند و آن را با `SHA256SUMS` مقایسه می‌کند؛ اگر یکسان نباشند، چیزی اجرا نمی‌شود. این هش از همان نسخه می‌آید؛ بنابراین دانلود خراب را تشخیص می‌دهد، نه حسابی را که به دست دیگری افتاده است.
 
-اگر به یک انتشار شک دارید، گیت‌هاب می‌تواند آن را با گواهی خودش بررسی کند: `gh release verify v1.0.0-rc.10 --repo MohZeh/Darban-OVPN`، و برای فایلی که دانلود کرده‌اید `gh release verify-asset v1.0.0-rc.10 get.sh --repo MohZeh/Darban-OVPN`. نصب‌کننده این بررسی‌ها را اجرا نمی‌کند.
+اگر به یک انتشار شک دارید، گیت‌هاب می‌تواند آن را با گواهی خودش بررسی کند: `gh release verify v1.0.0 --repo MohZeh/Darban-OVPN`، و برای فایلی که دانلود کرده‌اید `gh release verify-asset v1.0.0 get.sh --repo MohZeh/Darban-OVPN`. نصب‌کننده این بررسی‌ها را اجرا نمی‌کند.
 
 ## نصب یک نسخهٔ مشخص
 
@@ -35,7 +35,7 @@ sudo bash get.sh
 </div>
 
 ```bash
-sudo bash -c 'curl -fsSL https://github.com/MohZeh/Darban-OVPN/releases/download/v1.0.0-rc.10/get.sh | bash'
+sudo bash -c 'curl -fsSL https://github.com/MohZeh/Darban-OVPN/releases/download/v1.0.0/get.sh | bash'
 ```
 
 <div dir="rtl">
@@ -45,7 +45,7 @@ sudo bash -c 'curl -fsSL https://github.com/MohZeh/Darban-OVPN/releases/download
 </div>
 
 ```bash
-sudo bash -c 'curl -fsSL https://github.com/MohZeh/Darban-OVPN/releases/download/v1.0.0-rc.10/get.sh | bash -s -- --version v1.0.0-rc.9'
+sudo bash -c 'curl -fsSL https://github.com/MohZeh/Darban-OVPN/releases/download/v1.0.0/get.sh | bash -s -- --version v1.0.0-rc.10'
 ```
 
 <div dir="rtl">
@@ -55,7 +55,7 @@ sudo bash -c 'curl -fsSL https://github.com/MohZeh/Darban-OVPN/releases/download
 </div>
 
 ```bash
-sudo bash -c 'set -o pipefail; curl -fsSL https://github.com/MohZeh/Darban-OVPN/releases/download/v1.0.0-rc.10/get.sh | bash -s -- --yes --host vpn.example.com --port 1194'
+sudo bash -c 'set -o pipefail; curl -fsSL https://github.com/MohZeh/Darban-OVPN/releases/download/v1.0.0/get.sh | bash -s -- --yes --host vpn.example.com --port 1194'
 ```
 
 <div dir="rtl">

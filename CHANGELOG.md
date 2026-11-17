@@ -4,7 +4,39 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## [Unreleased]
 
-## [1.0.0-rc.10] - 2026-11-15
+## [1.0.0] - 2026-11-17
+
+The first stable release. It replaces `v1.0.0-rc.10`, with the changes from its test on a real server and from the reviews before this release: OpenVPN tells the tool of each connection, a profile kept on the server ends like a link, the CA can be backed up encrypted and restored, the link service sees less, and the busiest screens are simpler. The sections of the release candidates below record the way here. A server on `v1.0.0-rc.6` or later reaches it from the menu (Setup › 2) or with `sudo darban update`. The update restarts OpenVPN once, to turn connection events on, and says so first: connected users drop for a few seconds and reconnect by themselves.
+
+### Added
+- **Connection events.** OpenVPN tells the tool each time a client connects or disconnects, so a link ends within seconds of its first connection. The update turns them on only on a `server.conf` this tool's setup made, and only when every check passes. Diagnostics show them in a group of their own. Where they are off, a check every five minutes ends the links of connected clients.
+- **List clients** has a **LAST SEEN** column: `now`, how long ago, or `never`, and `-` while connection events are off.
+- **A profile kept on the server ends like a link:** at its time, or at the first connection of its client, with the copy made for the SSH user. The time is **Shares expire after**, in Settings › Sharing. Menu 6 shows the time left for each file, and whether it was read. A file kept by an earlier version gets the whole time from the update.
+- **An encrypted backup of the CA,** in Maintenance › **Back up the CA now**. It is encrypted to an `age` public key, so the server cannot open it, or with a passphrase for that one backup. It holds the CA and its key, the issued certificates with their keys, the server's own files and settings, and the client records, never a profile. Restoring it needs the private key or the passphrase, which stay with you. A backup is also made after each new client, each revocation, and once a day when something changed. The newest 14 are kept in `/var/backups/darban-pki`.
+- Diagnostics show the newest backup. **The newest backup of the CA is missing or damaged** means its archive was deleted, or no longer has the bytes its manifest recorded; the daily backup then makes a new one.
+- **Restore** of a backup opened with your key, with `sudo darban restore <file.tar> --ca-fingerprint <sha256>` or `--ca-from <profile.ovpn>`. Every check runs before anything changes. A backup of the CA in use that does not know a certificate issued, or a revocation made, after it is refused with nothing changed. A restore that stopped half way is finished with `--resume` or undone with `--rollback`, and Diagnostics name it until then.
+- **Diagnostics** open with one summary line and only what needs attention, each with what to do; **Show all checks** shows the rest. `sudo darban status` still prints every check.
+- **Connected now** shows how long each session has lasted and its traffic.
+
+### Changed
+- **The link service sees less.** OpenVPN's files, the Let's Encrypt folder, the backups, the client records, the event queue and `/etc/shadow` are hidden from it, and it can open no unix socket, so OpenVPN's management interface is out of its reach. It needs none of them. On a server without connection events, a link therefore ends within five minutes of the connection, not ten seconds.
+- **Settings › Link certificate** shows the state and four choices: **Keep it**, which is what Enter does, **Renew now** (or **Get a trusted one**), **Use another certificate**, and **Details**, with the dates, the fingerprint and this week's certificates.
+- **The link result** shows what to send first, then the choices to copy it; the rest is under **More about this link**. **Keep it on the server** asks which computer will download the file and shows that one command.
+- The header shows a healthy blocklist as one mark on the server line, and the menu has one hint line.
+- The link certificate and its key change as one pair, and the pair kept to undo a change is a real copy. A certificate made only for clients is refused, with the reason.
+- **Uninstall this tool only** removes this tool's hook from certbot's renewal of the link certificate, keeps the certificate, and says that certbot still renews it and how to delete it. Using the certificate again puts the hook back.
+
+### Fixed
+- A link made at the moment the link service ended was sometimes refused with "the port for links, is now used by another program", although no other program held the port.
+- A revocation whose links the link service held at that moment stopped short. The rest now runs: the CRL, the copies and the session. It says `link cleanup unfinished`, Diagnostics show it in red, and `sudo darban repair-crl` finishes it. The repair finds what a revoked certificate left by the certificate inside each file, so a link of a client issued again under the same name stays.
+- **Remove everything** with the certificate kept did not report a failed removal of certbot.
+- Diagnostics check the CRL as OpenVPN reads it: missing, unreadable for OpenVPN's user, or due for renewal within 7 days. They warn when the NAT rules run but their file is gone, so a reboot would cut the internet, and the install writes the file again. With a link open, they check that the link port answers with the link certificate.
+- `sudo darban status | head` no longer says it ended unexpectedly; it ends with status `141`, as any command cut short.
+
+### Going back to v1.0.0-rc.10
+Setup › Restore previous version works. rc.10 has no connection events, so their units are removed first. The event script and its lines in `server.conf` stay, every client still connects, and the tool shows the command that removes them. rc.10's own link service then ends a link by asking OpenVPN, as before. Backups made by this version stay in `/var/backups/darban-pki`; rc.10 neither makes nor reads them.
+
+## [1.0.0-rc.10] - 2026-11-14
 
 Release candidate for `v1.0.0`, for testing on a server that is not in use. It replaces `v1.0.0-rc.9`, with the fixes from its test on a real server: a kept link certificate now really survives a removal, the Link certificate screen is clear, and the settings menus explain themselves. A server on `v1.0.0-rc.6` or later reaches it from the menu (Setup › 2) or with `sudo darban update`.
 
