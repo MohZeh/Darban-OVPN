@@ -110,7 +110,9 @@ jobs:
           - ubuntu: '26.04'
             suite: stand-in Easy-RSA
     runs-on: ubuntu-${{ matrix.ubuntu }}
-    timeout-minutes: 20
+    # A suite takes 9 to 17 minutes. A slow runner has run every test about 1.8 times slower, and 20 minutes
+    # stopped a suite that was passing just before its end.
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
