@@ -28,6 +28,15 @@ PRE_RESTORE_WARN_DAYS=7
 BACKUP_HOOK_SECONDS=120
 RESTORE_WARN=/var/lib/darban/restore-unverified
 BACKUP_PY=$DARBAN_LIB/backup.py
+# Variables for the tests only (R18-16). Unset, they change nothing. Only root runs this tool, and sudo's env_reset
+# drops them, so only a root shell that sets them itself can use them; that shell could change the files anyway.
+#   DARBAN_TEST_RESTORE_FAIL=<step>             that restore step fails, as a full disk would
+#   DARBAN_TEST_RESTORE_STOP=<rename>|after:<step>  the restore stops there, as a crash would
+#   DARBAN_TEST_RESTORE_WAIT=<step>             the restore waits there, holding what it holds, until the file
+#   DARBAN_TEST_RESTORE_WAIT_FILE=<file>          DARBAN_TEST_RESTORE_WAIT_FILE names is deleted
+#   DARBAN_TEST_COPY_FAIL=write                 writing the copy for the SSH user fails after its file was opened
+#   DARBAN_TEST_HOME_COPY_HOOK=<command>        runs while that copy is made, to change its file under it
+# tests/run-tests.sh checks that this list names every one the code reads.
 # Each run of the worker takes at most this many events, or this many seconds; the path unit starts it again.
 EVENT_MAX=500
 EVENT_SECONDS=60
@@ -4936,11 +4945,16 @@ fingerprint_hex() {
 }
 backup_host() { local host; host=$(hostname -s 2>/dev/null) || host=''; host=${host//[!A-Za-z0-9.-]/}; printf '%s' "${host:-server}"; }
 backup_latest_value() {
-    # backup_latest_value <field>: one value from the manifest of the newest backup.
-    [[ -f $PKI_BACKUP_DIR/latest.manifest.json ]] || return 1
+    # backup_latest_value <field>: one value from the manifest of the newest backup. That is the manifest beside the
+    # archive "latest" names: a stop between the two renames below leaves latest.manifest.json one backup behind.
+    local archive manifest
+    archive=$(readlink "$PKI_BACKUP_DIR/latest.tar.age" 2>/dev/null) || return 1
+    [[ $archive == darban-pki-*.tar.age ]] || return 1
+    manifest=$PKI_BACKUP_DIR/${archive%.tar.age}.manifest.json
+    [[ -f $manifest ]] || return 1
     python3 -I -c 'import json, sys
 value = json.load(open(sys.argv[1])).get(sys.argv[2], "")
-print(value if isinstance(value, (str, int)) else "")' "$PKI_BACKUP_DIR/latest.manifest.json" "$1" 2>/dev/null
+print(value if isinstance(value, (str, int)) else "")' "$manifest" "$1" 2>/dev/null
 }
 backup_make() {
     # backup_make <auto|now> <reason> [passphrase]: one backup, under the CA lock the caller holds, so the index, the

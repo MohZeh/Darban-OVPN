@@ -81,7 +81,8 @@ if [[ $unit == openvpn-server@* ]]; then
     case " $* " in
       *" disable "*) if [[ -n ${FAKE_STOP_FAILS:-} ]]; then exit 1; fi; : > "$state/$unit.disabled"; [[ " $* " != *" --now "* ]] || : > "$state/$unit.stopped" ;;
       *" stop "*) if [[ -n ${FAKE_STOP_FAILS:-} ]]; then exit 1; fi; : > "$state/$unit.stopped" ;;
-      *" enable "*) rm -f "$state/$unit.disabled"; if [[ " $* " == *" --now "* ]]; then if [[ -n ${FAKE_START_FAILS:-} ]]; then exit 1; fi; rm -f "$state/$unit.stopped"; fi ;;
+      # FAKE_ENABLE_FAILS: enabling it at boot fails, as systemd can refuse it.
+      *" enable "*) if [[ -n ${FAKE_ENABLE_FAILS:-} && " $* " != *" --now "* ]]; then exit 1; fi; rm -f "$state/$unit.disabled"; if [[ " $* " == *" --now "* ]]; then if [[ -n ${FAKE_START_FAILS:-} ]]; then exit 1; fi; rm -f "$state/$unit.stopped"; fi ;;
       *" start "*|*" restart "*) if [[ -n ${FAKE_START_FAILS:-} ]]; then exit 1; fi; [[ -n ${FAIL_RESTART:-} ]] || rm -f "$state/$unit.stopped" ;;
       *" is-active "*) if [[ -e $state/$unit.stopped ]]; then ((q)) || echo inactive; exit 3; fi ;;
       *" is-enabled "*) if [[ -e $state/$unit.disabled ]]; then echo disabled; exit 1; fi ;;
