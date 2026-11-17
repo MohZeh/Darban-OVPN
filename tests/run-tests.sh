@@ -5437,6 +5437,46 @@ test_a_backup_deleted_by_hand_is_not_taken_for_the_newest() {
     has 'and Diagnostics name it' 'Newest backup of the CA' "$(mgr status)"
 }
 
+test_a_damaged_backup_is_not_taken_for_the_newest() {
+    # R30-N01: the archive "latest" names is there, but its bytes are no longer those its manifest recorded, after a
+    # fault of the disk or a change by hand. That is no backup either: Diagnostics do not call it the newest, and the
+    # daily one makes a new one though nothing changed. The damaged one is not deleted, and a whole one is kept.
+    local dir=$E/pki-backups archive before out
+    template_server
+    backup_key_set
+    menu '1\ncarol\n0\n' >/dev/null
+    [[ $(backups) == 1 ]]; rc_is 'a backup is made' 0 "$?"
+    mgr backup-auto daily >/dev/null
+    [[ $(backups) == 1 ]]; rc_is 'a whole one with nothing changed makes no other' 0 "$?"
+
+    # One byte changed, the size the same.
+    archive=$(readlink "$dir/latest.tar.age")
+    python3 -c 'import sys; p = sys.argv[1]; b = bytearray(open(p, "rb").read()); b[len(b) // 2] ^= 0xff; open(p, "wb").write(b)' "$dir/$archive"
+    out=$(mgr status)
+    lacks 'Diagnostics do not call a changed one the newest backup' 'Newest backup of the CA' "$out"
+    has 'they say it is missing or damaged' 'The newest backup of the CA is missing or damaged' "$out"
+    mgr backup-auto daily >/dev/null
+    [[ $(backups) == 2 && $(readlink "$dir/latest.tar.age") != "$archive" ]]; rc_is 'the daily one makes a new one, and latest names it' 0 "$?"
+    ok_if 'the damaged one is not deleted' test -f "$dir/$archive"
+    has 'and Diagnostics name the new one' 'Newest backup of the CA' "$(mgr status)"
+
+    # Cut short.
+    before=$(readlink "$dir/latest.tar.age")
+    : >"$dir/$before"
+    lacks 'nor an archive cut short' 'Newest backup of the CA' "$(mgr status)"
+    mgr backup-auto daily >/dev/null
+    [[ $(backups) == 3 && $(readlink "$dir/latest.tar.age") != "$before" ]]; rc_is 'and the daily one makes a new one again' 0 "$?"
+
+    # A manifest that cannot be read.
+    before=$(readlink "$dir/latest.tar.age")
+    printf '{' >"$dir/${before%.tar.age}.manifest.json"
+    lacks 'nor one whose manifest cannot be read' 'Newest backup of the CA' "$(mgr status)"
+    mgr backup-auto daily >/dev/null
+    [[ $(backups) == 4 && $(readlink "$dir/latest.tar.age") != "$before" ]]; rc_is 'and the daily one makes a new one for that too' 0 "$?"
+    mgr backup-auto daily >/dev/null
+    [[ $(backups) == 4 ]]; rc_is 'once whole again, nothing changed makes no other' 0 "$?"
+}
+
 test_a_restore_takes_a_backup_where_only_time_passed() {
     # C.16.1: valid in the backup and expired here is only time passing, so the restore goes on.
     local fp out
