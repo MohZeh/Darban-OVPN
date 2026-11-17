@@ -19,7 +19,7 @@ posix() { if command -v cygpath >/dev/null; then cygpath -u "$1"; else printf '%
 WORK=$(native "$(mktemp -d "${TMPDIR:-/tmp}/darban-tests.XXXXXXXX")")
 trap 'rm -rf "$WORK"' EXIT
 export BASE_PATH=$PATH
-PASS=0; FAIL=0; FAILED=()
+PASS=0; FAIL=0; FAILED=(); SKIPPED=()
 CURRENT=''
 
 fresh() {
@@ -59,6 +59,8 @@ keep_evidence() {
 }
 rc_is() { local what=$1 want=$2 got=$3; if [[ $got == "$want" ]]; then result 1 "$what"; else result 0 "$what (rc $got, wanted $want)"; fi; }
 rc_not0() { local what=$1 got=$2; if [[ $got != 0 ]]; then result 1 "$what"; else result 0 "$what (rc 0)"; fi; }
+# skip_here <why>: this test cannot run here, said by name, so it is neither a failure nor a pass on nothing.
+skip_here() { RUN_SKIP=1; SKIPPED+=("$CURRENT: $1"); printf '  SKIP %s\n' "$1"; }
 
 # Commands get an empty stdin: an open one that never answers would hold a prompt until the idle timeout.
 mgr() { bash "$E/manager.sh" "$@" 2>&1 </dev/null; }
@@ -269,7 +271,7 @@ test_stale_certificate_file_is_refused_with_a_reason() {
 test_blocked_valid_certificates_are_visible() {
     local out
     # This builds states the real Easy-RSA refuses to create: a repeated name and a name with a space.
-    if [[ -n ${DARBAN_REAL_EASYRSA:-} ]]; then return 0; fi
+    if [[ -n ${DARBAN_REAL_EASYRSA:-} ]]; then skip_here 'the real Easy-RSA refuses to build a repeated name or a name with a space'; return 0; fi
     easyrsa build-client-full bob nopass
     rm "$PKI/issued/bob.crt"
     easyrsa build-client-full carol nopass
@@ -5845,15 +5847,16 @@ for t in "${TESTS[@]}"; do
     CURRENT=$t
     printf '%s\n' "$t"
     fresh
-    RUN_CHECKS=$((PASS + FAIL)) RUN_FAILED=$FAIL
+    RUN_CHECKS=$((PASS + FAIL)) RUN_FAILED=$FAIL RUN_SKIP=0
     "$t"
-    # A test that ends before its first check proves nothing, and must not pass.
-    (( PASS + FAIL > RUN_CHECKS )) || result 0 'no check ran'
+    # A test that ends before its first check proves nothing, and must not pass, unless it said why it cannot run.
+    (( PASS + FAIL > RUN_CHECKS || RUN_SKIP )) || result 0 'no check ran'
     (( FAIL == RUN_FAILED )) || keep_evidence "$t"
     # Its link server goes with it, so the next test finds its ports free.
     stop_links_stub
 done
 # A filter that matches no test runs nothing, and must not pass either.
 if (( SELECTED == 0 )); then printf 'No test matches: %s\n' "$FILTER" >&2; exit 1; fi
-printf '\n%d tests, %d passed, %d failed\n' "$SELECTED" "$PASS" "$FAIL"
+printf '\n%d tests, %d passed, %d failed, %d tests skipped here\n' "$SELECTED" "$PASS" "$FAIL" "${#SKIPPED[@]}"
+if (( ${#SKIPPED[@]} )); then printf 'Skipped here:\n'; printf '  %s\n' "${SKIPPED[@]}"; fi
 if (( FAIL > 0 )); then printf 'Failed:\n'; printf '  %s\n' "${FAILED[@]}"; exit 1; fi
