@@ -5388,6 +5388,25 @@ test_a_stop_between_the_two_latest_names_misleads_no_backup() {
     rc_is 'the next backup names both again' 0 "$?"
 }
 
+test_a_backup_deleted_by_hand_is_not_taken_for_the_newest() {
+    # R29-T02: "latest" names an archive deleted by hand, and its manifest is still there. That is no backup:
+    # Diagnostics say the newest is missing, and the daily one makes a new one though nothing changed.
+    local dir=$E/pki-backups archive out
+    template_server
+    backup_key_set
+    menu '1\ncarol\n0\n' >/dev/null
+    [[ $(backups) == 1 ]]; rc_is 'a backup is made' 0 "$?"
+    archive=$(readlink "$dir/latest.tar.age")
+    rm -f "$dir/$archive"
+    ok_if 'its manifest is still there' test -s "$dir/${archive%.tar.age}.manifest.json"
+    out=$(mgr status)
+    lacks 'Diagnostics do not call it the newest backup' 'Newest backup of the CA' "$out"
+    has 'they say it is missing' 'The newest backup of the CA is missing' "$out"
+    mgr backup-auto daily >/dev/null
+    [[ $(backups) == 1 && -f $dir/$(readlink "$dir/latest.tar.age") ]]; rc_is 'the daily one makes a new one, and latest names it' 0 "$?"
+    has 'and Diagnostics name it' 'Newest backup of the CA' "$(mgr status)"
+}
+
 test_a_restore_takes_a_backup_where_only_time_passed() {
     # C.16.1: valid in the backup and expired here is only time passing, so the restore goes on.
     local fp out
@@ -5560,6 +5579,30 @@ paused_restore() {
     ( printf '2\n' | env PATH="$E/realflock:$PATH" DARBAN_TEST_RESTORE_WAIT="$step" DARBAN_TEST_RESTORE_WAIT_FILE="$E/paused" "$@" \
         bash "$E/manager.sh" restore "$E/backup.tar" --ca-fingerprint "$fp" >"$out" 2>&1; echo "$?" >"$out.rc" ) &
     wait_for '[[ -e $E/paused ]]'
+}
+
+test_a_resume_or_rollback_that_waits_too_long_changes_nothing() {
+    # A2-gap-4 and R29-T01, with the real lock: a --resume or --rollback that waits past the 15 seconds of the lock
+    # gives up, says so, and changes nothing; the restore that held the lock then finishes.
+    local kind journal start took out
+    backed_up_server
+    real_flock
+    for kind in --resume --rollback; do
+        paused_restore swapped "$E/first.out"; rc_is "$kind: a restore holds the lock half way" 0 "$?"
+        journal=$(cat "$E/varlib/restore.journal")
+        start=$SECONDS
+        out=$(env PATH="$E/realflock:$PATH" bash "$E/manager.sh" restore "$kind" 2>&1); rc_is "$kind: it gives up" 1 "$?"
+        took=$(( SECONDS - start ))
+        (( took >= 14 && took <= 30 )); rc_is "$kind: after the 15 seconds of the lock (took ${took}s)" 0 "$?"
+        has "$kind: and says why" 'still running' "$out"
+        [[ $(cat "$E/varlib/restore.journal") == "$journal" ]]; rc_is "$kind: the journal is as it was" 0 "$?"
+        lacks "$kind: nothing was undone" 'The restore was undone' "$out"
+        rm -f "$E/paused"
+        wait
+        rc_is "$kind: the restore that held the lock finishes" 0 "$(cat "$E/first.out.rc")"
+        ok_if "$kind: OpenVPN runs, enabled at boot" unit_on
+        ok_if "$kind: no journal is left" test ! -e "$E/varlib/restore.journal"
+    done
 }
 
 test_a_resume_or_rollback_that_waited_decides_under_the_lock() {
