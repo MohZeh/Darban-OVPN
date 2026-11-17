@@ -131,13 +131,27 @@ jobs:
           sudo apt-get -o Acquire::Retries=3 install -y easy-rsa
       - name: Tests with the stand-in Easy-RSA
         if: matrix.suite == 'stand-in Easy-RSA'
+        env:
+          DARBAN_TEST_EVIDENCE: ${{ runner.temp }}/evidence
         run: bash tests/run-tests.sh </dev/null
       - name: Tests with the real Easy-RSA
         if: matrix.suite == 'real Easy-RSA'
+        env:
+          DARBAN_TEST_EVIDENCE: ${{ runner.temp }}/evidence
         run: DARBAN_REAL_EASYRSA=/usr/share/easy-rsa/easyrsa bash tests/run-tests.sh </dev/null
       - name: Real-terminal key tests
         if: matrix.suite == 'real terminal'
         run: python3 tests/run-tty-tests.py </dev/null
+      # What a failed test left: its whole outputs, the fake server's logs, the listeners and processes of that
+      # moment. The suite writes no key, certificate or profile there (scrub in run-tests.sh).
+      - name: Keep the evidence of failed tests
+        if: failure() && matrix.suite != 'real terminal'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: evidence-${{ matrix.ubuntu }}-${{ matrix.suite }}
+          path: ${{ runner.temp }}/evidence
+          if-no-files-found: ignore
+          retention-days: 7
 
   # Runs the real setup, OpenVPN, Easy-RSA, systemd and a real client on a throwaway runner.
   acceptance:
@@ -164,7 +178,8 @@ jobs:
       - name: The runner must not already have a PKI or server
         run: sudo test ! -e /root/pki && test ! -e /etc/openvpn/server/server.conf
       - name: Real setup and client on Ubuntu ${{ matrix.ubuntu }}
-        run: sudo bash tests/acceptance-ci.sh --i-know
+        # sudo keeps no variable, so the summary file is named: what a green run did not test is written there.
+        run: sudo GITHUB_STEP_SUMMARY="$GITHUB_STEP_SUMMARY" bash tests/acceptance-ci.sh --i-know
 
   # The setup on a public address: the path the acceptance run skips, because it uses 127.0.0.1.
   public-setup:
@@ -184,7 +199,7 @@ jobs:
       - name: The runner must not already have a PKI or server
         run: sudo test ! -e /root/pki && test ! -e /etc/openvpn/server/server.conf
       - name: Real setup on a public address, and its removal
-        run: sudo bash tests/public-setup-ci.sh --i-know
+        run: sudo GITHUB_STEP_SUMMARY="$GITHUB_STEP_SUMMARY" bash tests/public-setup-ci.sh --i-know
 
   rc10-upgrade:
     name: From rc.10 and back (Ubuntu ${{ matrix.ubuntu }})
@@ -264,7 +279,7 @@ jobs:
       - name: The runner must not already have a PKI or server
         run: sudo test ! -e /root/pki && test ! -e /etc/openvpn/server/server.conf
       - name: Real setup and client on arm64
-        run: sudo bash tests/acceptance-ci.sh --i-know
+        run: sudo GITHUB_STEP_SUMMARY="$GITHUB_STEP_SUMMARY" bash tests/acceptance-ci.sh --i-know
 
   # The one check a branch rule requires. Matrix job names cannot be required reliably when they are skipped.
   # A manual run for the reboot and arm64 tests only gets another name: it skips the other tests on purpose, so

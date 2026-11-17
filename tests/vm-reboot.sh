@@ -30,6 +30,8 @@ finish() {
     if (( rc != 0 )); then
         echo "FAILED with status $rc"
         in_vm 'sudo journalctl -u openvpn-server@server -n 30 --no-pager; sudo tail -n 30 /var/log/darban-setup.log' 2>/dev/null || true
+        # The tool's own units, the event watcher among them: a failed reboot check is often one of them.
+        in_vm 'sudo systemctl list-units --all --no-pager "darban-*"; sudo journalctl -b -u "darban-*" -n 80 --no-pager' 2>/dev/null || true
         tail -n 40 "$WORK/console.log" 2>/dev/null || true
         tail -n 20 "$WORK/client.log" 2>/dev/null || true
     fi
