@@ -44,13 +44,15 @@ fresh() {
 }
 result() { if (( $1 )); then PASS=$((PASS + 1)); else FAIL=$((FAIL + 1)); FAILED+=("$CURRENT: $2"); printf '  FAIL %s\n' "$2"; fi; }
 ok_if() { local what=$1; shift; if "$@"; then result 1 "$what"; else result 0 "$what"; fi; }
-has() { local what=$1 needle=$2 text=$3; if [[ $text == *"$needle"* ]]; then result 1 "$what"; else result 0 "$what (wanted: $needle)"; printf '%s\n' "$text" | sed 's/^/    | /' | tail -25; keep_output "$what" "$text"; fi; }
-lacks() { local what=$1 needle=$2 text=$3; if [[ $text != *"$needle"* ]]; then result 1 "$what"; else result 0 "$what (unwanted: $needle)"; printf '%s\n' "$text" | sed 's/^/    | /' | tail -25; keep_output "$what" "$text"; fi; }
+has() { local what=$1 needle=$2 text=$3; if [[ $text == *"$needle"* ]]; then result 1 "$what"; else result 0 "$what (wanted: $needle)"; printf '%s\n' "$text" | scrub | sed 's/^/    | /' | tail -25; keep_output "$what" "$text"; fi; }
+lacks() { local what=$1 needle=$2 text=$3; if [[ $text != *"$needle"* ]]; then result 1 "$what"; else result 0 "$what (unwanted: $needle)"; printf '%s\n' "$text" | scrub | sed 's/^/    | /' | tail -25; keep_output "$what" "$text"; fi; }
 # Evidence of a failure, for CI to keep when DARBAN_TEST_EVIDENCE names a directory. The repository is public, so
 # only what is listed here is kept, and never a key, a certificate or a profile: scrub drops every PEM block and
 # every inline key or certificate of a profile.
-# It also hides the key of each link and the line after "Password:", where the tool shows a new password once.
-scrub() { sed -E '/-----BEGIN /,/-----END /d; /<(key|cert|ca|tls-crypt|tls-crypt-v2|tls-auth|secret)>/,/<\/(key|cert|ca|tls-crypt|tls-crypt-v2|tls-auth|secret)>/d; s#/l/[0-9a-fA-F]{16,}#/l/<link key>#g; /Password:[[:space:]]*$/{n;s/.*/<password>/}'; }
+# It also hides the key of each link, the line after "Password:" or "Suggested password:", where the tool shows a
+# new password, and what a copy to the clipboard (OSC 52) holds. The log shows a failed check's last lines through
+# it too: the log of a public repository is public as well.
+scrub() { sed -E '/-----BEGIN /,/-----END /d; /<(key|cert|ca|tls-crypt|tls-crypt-v2|tls-auth|secret)>/,/<\/(key|cert|ca|tls-crypt|tls-crypt-v2|tls-auth|secret)>/d; s#/l/[0-9a-fA-F]{16,}#/l/<link key>#g; s#\x1b\]52;[a-z]*;[A-Za-z0-9+/=]*#<clipboard>#g; /[Pp]assword:[[:space:]]*$/{n;s/.*/<password>/}'; }
 keep_output() {
     # keep_output <check> <text>: the whole output a failed check looked at, where the log shows its last lines.
     [[ -n ${DARBAN_TEST_EVIDENCE:-} ]] || return 0
@@ -1686,18 +1688,31 @@ s = socket.socket(); s.bind(("127.0.0.1", int(sys.argv[1]))); s.listen(); time.s
 
 test_failure_evidence_holds_no_key_certificate_or_profile() {
     # The evidence CI keeps of a failed test is public: only listed files, and no PEM block or inline profile key.
-    local kept=$WORK/evidence-check DARBAN_TEST_EVIDENCE found
+    local kept=$WORK/evidence-check DARBAN_TEST_EVIDENCE found clip text printed
     DARBAN_TEST_EVIDENCE=$kept
     printf 'step one\n-----BEGIN PRIVATE KEY-----\nSECRETKEYDATA\n-----END PRIVATE KEY-----\nstep two\n' >"$E/links.log"
     printf 'client\n<key>\nSECRETINLINE\n</key>\n<tls-crypt>\nSECRETTLS\n</tls-crypt>\nremote vpn.example.com\n' >"$E/profile.log"
     keep_output 'a check' "$(printf 'before\n<cert>\nSECRETCERT\n</cert>\nafter')"
     # R29-T05: the key of a link, and a new password the tool shows once on the line after "Password:".
     keep_output 'a link' "$(printf 'Link: https://vpn.example.com:9563/l/%s\nPassword:\nSECRETPASSWORD words\nNote: send it apart\n' "$(printf 'ab%.0s' $(seq 1 32))")"
+    # R30-N03: the password the tool suggests, and a copy to the clipboard, which holds the password in base64.
+    clip=$(printf 'Link:\nSECRETCLIPBOARD\n' | base64 -w0)
+    text=$(printf 'Suggested password:\nSECRETSUGGESTED\nPress Enter to use it.\n\e]52;c;%s\a\nCopied.\n' "$clip")
+    keep_output 'a suggestion' "$text"
+    # The log is public too: what a failed check prints there goes through the same scrub. In a subshell, so this
+    # failure on purpose counts for nothing.
+    printed=$(has 'a check that fails on purpose' 'not in the text' "$text"$'\n'"-----BEGIN PRIVATE KEY-----"$'\n'"SECRETPRINTED"$'\n'"-----END PRIVATE KEY-----")
+    [[ $printed != *SECRET* && $printed != *"$clip"* ]]; rc_is 'what a failed check prints in the log holds no secret' 0 "$?"
+    has 'and it still says why it failed' 'wanted: not in the text' "$printed"
+    has 'and what the screen said around the password' 'Press Enter to use it.' "$printed"
     keep_evidence "$CURRENT"
     found=$(grep -rl 'SECRET' "$kept" 2>/dev/null)
     [[ -z $found ]]; rc_is 'no key, certificate, inline profile secret or new password is kept' 0 "$?"
     found=$(grep -rlE '/l/[0-9a-f]{64}' "$kept" 2>/dev/null)
     [[ -z $found ]]; rc_is 'and no link key' 0 "$?"
+    found=$(grep -rlF "$clip" "$kept" 2>/dev/null)
+    [[ -z $found ]]; rc_is 'nor what a copy to the clipboard held' 0 "$?"
+    grep -q 'Press Enter to use it.' "$kept/$CURRENT/outputs.txt"; rc_is 'the line after a suggested password stays' 0 "$?"
     grep -q 'Link: https://vpn.example.com:9563/l/<link key>' "$kept/$CURRENT/outputs.txt"; rc_is 'the link is still named, without its key' 0 "$?"
     grep -q 'Note: send it apart' "$kept/$CURRENT/outputs.txt"; rc_is 'and the line after the password stays' 0 "$?"
     grep -q 'step two' "$kept/$CURRENT/links.log"; rc_is 'the rest of a log is kept' 0 "$?"
@@ -1778,7 +1793,7 @@ EOF
     grep -q 'qrencode -t ANSIUTF8 https://127.0.0.1' "$STUB_LOG"; rc_is 'the QR holds the link' 0 "$?"
     lacks 'and is not offered again' 'Show a QR code' "${out#*QRCODE-DRAWN}"
     lacks 'Do not copy copies nothing' 'Copied to your clipboard' "$out"
-    if (( rc != 0 )); then printf '%s\n' "$out" | tail -n 25 | cut -c1-150 | sed 's/^/    | /'; fi
+    if (( rc != 0 )); then printf '%s\n' "$out" | scrub | tail -n 25 | cut -c1-150 | sed 's/^/    | /'; fi
     stop_links_stub
 }
 
@@ -1831,7 +1846,7 @@ test_link_certificate_for_a_hostname() {
     has 'and the link is made with it' "https://vpn.example.com:$LINK_TEST_PORT/l/" "$out"
     # This failed once on CI with no cause in the last lines: keep all of it, and the state of the certificates.
     if [[ $out != *"https://vpn.example.com:$LINK_TEST_PORT/l/"* ]]; then
-        printf '%s\n' "$out" | sed 's/^/    > /'
+        printf '%s\n' "$out" | scrub | sed 's/^/    > /'
         ls -l "$E/cfg/" "$E/le/" 2>&1 | sed 's/^/    > /'
         openssl x509 -in "$E/cfg/link-cert.pem" -noout -subject -issuer -dates 2>&1 | sed 's/^/    > /'
     fi
@@ -2706,7 +2721,7 @@ EOF
     has 'which says what a password would do' 'A password on the key protects the profile' "$out"
     lacks 'Enter makes no password' 'shown only now' "$out"
     if grep -q 'ENCRYPTED PRIVATE KEY' "$E/clients/client1.ovpn"; then result 0 'the key stays open without a password'; else result 1 'the key stays open without a password'; fi
-    if (( rc != 0 )); then printf '%s\n' "$out" | tail -n 25 | cut -c1-150 | sed 's/^/    | /'; fi
+    if (( rc != 0 )); then printf '%s\n' "$out" | scrub | tail -n 25 | cut -c1-150 | sed 's/^/    | /'; fi
     ok_if 'the client exists' test -s "$PKI/issued/client1.crt"
     has 'it says what the connection shows' "your provider's firewall let the VPN through" "$out"
     has 'and how to check the internet' 'open a website on that device' "$out"
@@ -2738,7 +2753,7 @@ EOF
     has 'and Enter would take it' 'Enter: Yes, get a certificate' "$out"
     has 'it ends with a link on that IP' 'https://203.0.113.9:' "$out"
     if grep -q '^certbot certonly' "$STUB_LOG" 2>/dev/null; then result 0 'choosing No gets no certificate'; else result 1 'choosing No gets no certificate'; fi
-    if (( rc != 0 )); then printf '%s\n' "$out" | tail -n 25 | cut -c1-150 | sed 's/^/    | /'; fi
+    if (( rc != 0 )); then printf '%s\n' "$out" | scrub | tail -n 25 | cut -c1-150 | sed 's/^/    | /'; fi
 }
 
 test_own_password_in_a_real_terminal() {
@@ -2762,7 +2777,7 @@ EOF
     out=${out//$'\r'/}
     has 'it is taken, and says so' 'Your password is used.' "$out"
     has 'it goes into the block' $'Password:\nblue sky 42\n' "$out"
-    if (( rc != 0 )); then printf '%s\n' "$out" | tail -n 25 | cut -c1-150 | sed 's/^/    | /'; fi
+    if (( rc != 0 )); then printf '%s\n' "$out" | scrub | tail -n 25 | cut -c1-150 | sed 's/^/    | /'; fi
     stop_links_stub
 }
 
@@ -2786,7 +2801,7 @@ EOF
     copied=$(grep -o $'\e]52;c;[A-Za-z0-9+/=]*' <<<"$out" | tail -n 1 | sed 's/^.*;//' | base64 -d 2>/dev/null)
     [[ $copied == 'scp -P '*' ~/Downloads/' ]]; rc_is 'macOS or Linux gets its command, and Enter copies it' 0 "$?"
     has 'it says what to select if copying is not allowed' 'Select the command with the mouse instead.' "$out"
-    if (( rc != 0 )); then printf '%s\n' "$out" | tail -n 25 | cut -c1-150 | sed 's/^/    | /'; fi
+    if (( rc != 0 )); then printf '%s\n' "$out" | scrub | tail -n 25 | cut -c1-150 | sed 's/^/    | /'; fi
 }
 
 test_link_block_and_copy_in_a_real_terminal() {
@@ -2821,7 +2836,7 @@ EOF
     has 'the second option copies the link' "Link:"$'\n'"$link" "$copied"
     lacks 'without the password' "$password" "$copied"
     has 'and the note says it comes separately' 'Its password comes to you separately.' "$copied"
-    if (( rc != 0 )); then printf '%s\n' "$out" | tail -n 25 | cut -c1-150 | sed 's/^/    | /'; fi
+    if (( rc != 0 )); then printf '%s\n' "$out" | scrub | tail -n 25 | cut -c1-150 | sed 's/^/    | /'; fi
 }
 
 test_setup_in_a_real_terminal() {
@@ -2836,7 +2851,7 @@ OpenVPN is running on UDP 1194
 EOF
     out=$(NO_COLOR=1 python3 "$HERE/pty-drive.py" --timeout 30 "$script" -- bash "$E/setup/server-setup.sh" 2>&1); rc=$?
     rc_is 'the real terminal path takes only Enter' 0 "$rc"
-    if (( rc != 0 )); then printf '%s\n' "$out" | tail -n 25 | cut -c1-150 | sed 's/^/    | /'; fi
+    if (( rc != 0 )); then printf '%s\n' "$out" | scrub | tail -n 25 | cut -c1-150 | sed 's/^/    | /'; fi
     grep -qx setup_complete "$E/cfg/.server-setup-started"; rc_is 'the setup finished' 0 "$?"
     has 'the address step names a trusted certificate, not a domain, as what avoids the warning' 'the tool can get a trusted certificate' "$out"
     has 'the last check says nothing is installed yet' 'Nothing is installed yet' "$out"
