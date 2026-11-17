@@ -1,7 +1,14 @@
 [Unit]
 Description=Darban OVPN connection events: watch the queue
-After=darban-events-setup.service
+# A path unit is ordered before paths.target, and so before basic.target, by default. It waits for the queue,
+# which a service makes after basic.target, so with the default order the two would form a cycle, and at boot
+# systemd breaks a cycle by dropping one of its jobs. Hence the order of its own, without that default.
+DefaultDependencies=no
+Requires=sysinit.target
+After=sysinit.target darban-events-setup.service
 Wants=darban-events-setup.service
+Conflicts=shutdown.target
+Before=shutdown.target
 
 [Path]
 DirectoryNotEmpty=/run/darban-events/new
