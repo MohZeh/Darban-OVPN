@@ -1712,18 +1712,25 @@ test_failure_evidence_holds_no_key_certificate_or_profile() {
 test_link_port_held_by_no_visible_program_for_a_moment() {
     # F2: the link service that ends after its idle time shows its socket for a moment after its process is
     # gone. That is no other program: a share made then waits for it, and a socket that stays is still refused.
-    local port out
+    # The same for a process still listed with the socket while it ends: a zombie, or one already gone, has no
+    # command line.
+    local port out gone
     start_links_stub
     port=$(( 40000 + RANDOM % 20000 ))
     printf 'LINK_PORT=%s\n' "$port" >> "$E/cfg/config"
     mv "$E/bin/ss" "$E/bin/ss.real"
-    # FAKE_SS_HELD: how many more TCP questions see a listener on the port with no process.
+    # FAKE_SS_HELD: how many more TCP questions see a listener on the port, held by no process, or by the process
+    # FAKE_SS_PID when it is set.
     cat > "$E/bin/ss" <<STUB
 #!/usr/bin/env bash
 for arg in "\$@"; do
     if [[ \$arg =~ ^-[A-Za-z]*t && -n \${FAKE_SS_HELD:-} ]]; then
         left=\$(cat "$E/ss-held" 2>/dev/null || echo "\$FAKE_SS_HELD")
-        if (( left > 0 )); then echo \$(( left - 1 )) > "$E/ss-held"; echo "LISTEN 0 5 127.0.0.1:$port 0.0.0.0:*"; exit 0; fi
+        if (( left > 0 )); then
+            echo \$(( left - 1 )) > "$E/ss-held"
+            echo "LISTEN 0 5 127.0.0.1:$port 0.0.0.0:*\${FAKE_SS_PID:+ users:((\"python3\",pid=\$FAKE_SS_PID,fd=3))}"
+            exit 0
+        fi
     fi
 done
 exec bash "$E/bin/ss.real" "\$@"
@@ -1732,6 +1739,13 @@ STUB
     out=$(FAKE_SS_HELD=3 menu '5\nalice\n1\n1\n0\n')
     lacks 'a socket that goes within a second is not called another program' 'is now used by' "$out"
     has 'and the link is made' "/l/" "$out"
+    rm -f "$E/ss-held"
+    ( exit 0 ) & gone=$!
+    wait "$gone"
+    ok_if 'the stand-in for an ending process has no command line' test ! -s "/proc/$gone/cmdline"
+    out=$(FAKE_SS_HELD=3 FAKE_SS_PID=$gone menu '5\nalice\n1\n1\n0\n')
+    lacks 'nor is a process that ends with the socket' 'is now used by' "$out"
+    has 'and the link is made then too' "/l/" "$out"
     rm -f "$E/ss-held"
     stop_links_stub
     out=$(FAKE_SS_HELD=1000 menu '5\nalice\n1\n1\n0\n')
@@ -3932,7 +3946,8 @@ test_uninstall_keeps_the_certificate_and_removes_only_this_hook() {
 
     # Installed again: the next link that uses the certificate gives the hook back. The stand-in link service
     # is started once per test: a second start would make its systemctl call itself.
-    menu '5\nfirst\n1\n1\n0\n' >/dev/null
+    out=$(menu '5\nfirst\n1\n1\n0\n')
+    has 'a link is made again' '/l/' "$out"
     grep -qx "renew_hook = $E/sbin/darban reload-links" "$conf"; rc_is 'the hook comes back' 0 "$?"
     menu '6\n1\n2\n0\n' >/dev/null
     stop_links_stub

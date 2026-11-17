@@ -1286,16 +1286,20 @@ tcp_port_open() { timeout 1 bash -c 'exec 3<>"/dev/tcp/127.0.0.1/$0"' "$1" 2>/de
 tcp_port_taken() {
     # True when another program listens on TCP $1, on any address: a panel bound only to the public IP counts
     # too. The link service itself does not.
-    local listeners pid try
+    local listeners pid try cmdline ending
     for (( try = 0; try < 10; try++ )); do
         listeners=$(ss -H -ltnp "sport = :$1" 2>/dev/null) || listeners=''
         if [[ -z $listeners ]]; then tcp_port_open "$1"; return; fi
+        ending=''
         for pid in $(grep -o 'pid=[0-9]*' <<<"$listeners" | cut -d= -f2 | sort -u); do
-            tr '\0' ' ' <"/proc/$pid/cmdline" 2>/dev/null | grep '/linkd\.py ' >/dev/null || return 0
+            cmdline=$(tr '\0' ' ' <"/proc/$pid/cmdline" 2>/dev/null) || cmdline=''
+            # A process that is ending, or already gone, has no command line left to tell what it was.
+            if [[ -z $cmdline ]]; then ending=1; continue; fi
+            grep '/linkd\.py ' <<<"$cmdline" >/dev/null || return 0
         done
-        grep -q 'pid=' <<<"$listeners" && return 1
-        # Held, but by no process this tool can see. The link service that ends after its idle time shows its
-        # socket so for a moment after its process is gone, so look again for up to a second.
+        [[ -z $ending ]] && grep -q 'pid=' <<<"$listeners" && return 1
+        # Held, but by no process this tool can see, or by one that is ending. The link service that ends after its
+        # idle time shows its socket so for a moment, so look again for up to a second.
         sleep 0.1
     done
     return 0
