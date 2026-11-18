@@ -4,7 +4,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## [Unreleased]
 
-## [1.0.0] - 2026-11-17
+## [1.0.0] - 2026-11-18
 
 The first stable release. It replaces `v1.0.0-rc.10`, with the changes from its test on a real server and from the reviews before this release: OpenVPN tells the tool of each connection, a profile kept on the server ends like a link, the CA can be backed up encrypted and restored, the link service sees less, and the busiest screens are simpler. The sections of the release candidates below record the way here. A server on `v1.0.0-rc.6` or later reaches it from the menu (Setup › 2) or with `sudo darban update`. The update restarts OpenVPN once, to turn connection events on, and says so first: connected users drop for a few seconds and reconnect by themselves.
 
@@ -31,6 +31,7 @@ The first stable release. It replaces `v1.0.0-rc.10`, with the changes from its 
 - A revocation whose links the link service held at that moment stopped short. The rest now runs: the CRL, the copies and the session. It says `link cleanup unfinished`, Diagnostics show it in red, and `sudo darban repair-crl` finishes it. The repair finds what a revoked certificate left by the certificate inside each file, so a link of a client issued again under the same name stays.
 - **Remove everything** with the certificate kept did not report a failed removal of certbot.
 - Diagnostics check the CRL as OpenVPN reads it: missing, unreadable for OpenVPN's user, or due for renewal within 7 days. They warn when the NAT rules run but their file is gone, so a reboot would cut the internet, and the install writes the file again. With a link open, they check that the link port answers with the link certificate.
+- On Ubuntu 26.04, an update sometimes stopped with "INSTALL INCOMPLETE: could not load the NAT rules", and Diagnostics sometimes said the TCP MSS rule was missing, although the rules were loaded and right. The check read the rules before nftables had finished printing them.
 - `sudo darban status | head` no longer says it ended unexpectedly; it ends with status `141`, as any command cut short.
 
 ### Going back to v1.0.0-rc.10
