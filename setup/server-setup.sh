@@ -78,20 +78,18 @@ free_port() {
     printf '%s\n' "$PORT_LAST"
 }
 easyrsa() { env EASYRSA_PKI="$PKI" EASYRSA_BATCH=1 "$EASYRSA_BIN" "$@" </dev/null >/dev/null; }
-# A fresh VPS often runs unattended-upgrades right after boot, so wait for the dpkg lock instead of failing.
 timed() {
     # timed <label> <command...>: the command, with its start and how long it took written to the log, so a
     # slow install shows which part was slow. Its exit status is the command's.
     local label=$1 start rc=0
     shift
     start=$SECONDS
-    printf '== %s: started at %s
-' "$label" "$(date -u '+%H:%M:%S UTC')" || true
+    printf '== %s: started at %s\n' "$label" "$(date -u '+%H:%M:%S UTC')" || true
     "$@" || rc=$?
-    printf '== %s: %s s, exit %s
-' "$label" "$((SECONDS - start))" "$rc" || true
+    printf '== %s: %s s, exit %s\n' "$label" "$((SECONDS - start))" "$rc" || true
     return "$rc"
 }
+# A fresh VPS often runs unattended-upgrades right after boot, so wait for the dpkg lock instead of failing.
 apt_run() { apt-get -o DPkg::Lock::Timeout=300 -o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold "$@"; }
 # apt marks an upgrade with the old version in brackets. Those packages were already here, so they are
 # neither shown as new nor recorded for removal.
