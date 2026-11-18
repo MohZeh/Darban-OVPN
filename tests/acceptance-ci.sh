@@ -416,7 +416,9 @@ fi
 # A path with a smaller MTU that drops IP fragments, as many mobile and home networks do: without the TCP
 # size rule a website does not load through the VPN, with it it does. Fragments are dropped before the
 # kernel would put them together again.
-website() { ip netns exec "$NS" curl -4 -sS -o /dev/null --max-time 20 -w '%{size_download}' https://www.google.com/ 2>/dev/null || true; }
+# Redirects are followed: from some runners' addresses the site first answers with a short redirect, which is
+# not the page and would read as a website that did not load.
+website() { ip netns exec "$NS" curl -4 -sS -L --max-redirs 5 -o /dev/null --max-time 20 -w '%{size_download}' https://www.google.com/ 2>/dev/null || true; }
 ip link set dt0 mtu 1400
 ip netns exec "$NS" ip link set dt1 mtu 1400
 nft add table ip darbantest
