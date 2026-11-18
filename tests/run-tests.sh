@@ -3309,12 +3309,13 @@ test_setup_installs_certbot_for_links() {
 fake_snap() {
     # A snapd that remembers what it installed. FAKE_SNAP_RC fails every install; FAKE_SNAP_ONCE fails the first
     # one only; FAKE_SNAP_LATE fails the command but the snap arrives anyway; FAKE_SNAP_DOING shows a change in
-    # progress, which a watch finishes.
+    # progress, which a watch finishes. FAKE_SNAPD_DOWN is a snapd that does not answer.
     mkdir -p "$E/snapd"
     printf '#!/usr/bin/env bash\ndir=%q\n' "$E/snapd" > "$E/bin/snap"
     cat >> "$E/bin/snap" <<'STUB'
 echo "snap $*" >> "$STUB_LOG"
 case $1 in
+    version) if [[ -n ${FAKE_SNAPD_DOWN:-} ]]; then printf 'snap    2.70\nsnapd   unavailable\nseries  -\n'; else printf 'snap    2.70\nsnapd   2.70\nseries  16\n'; fi ;;
     list) [[ -e $dir/$2 ]] ;;
     install)
         name=${!#}
@@ -3334,7 +3335,7 @@ STUB
 snap_try() { : > "$STUB_LOG"; (source "$REPO/lib/common.sh"; darban_snap_install_certbot "$E/record") >/dev/null 2>&1; }
 snap_installs() { grep -c '^snap install' "$STUB_LOG"; }
 test_certbot_snap_is_owned_only_when_installed_here() {
-    local record=$E/record rc
+    local record=$E/record rc out
     fake_snap
     : > "$record"
     snap_try; rc_is 'a missing snap is installed' 0 "$?"
@@ -3359,6 +3360,13 @@ test_certbot_snap_is_owned_only_when_installed_here() {
     rm -f "$record"
     snap_try; rc_is 'without a record file it still installs' 0 "$?"
     ok_if 'and writes no record' test ! -e "$record"
+    # A snapd that does not answer: no install that waits out its time, and a reason.
+    rm -f "$E/snapd/certbot"; : > "$record"
+    : > "$STUB_LOG"
+    out=$( (source "$REPO/lib/common.sh"; FAKE_SNAPD_DOWN=1 darban_snap_install_certbot "$record") 2>&1 ); rc=$?
+    rc_is 'a snapd that does not answer is a failure at once' 1 "$rc"
+    [[ $(snap_installs) == 0 && ! -s $record ]]; rc_is 'with no install tried and nothing recorded' 0 "$?"
+    has 'and it says why' 'snapd does not answer on this server' "$out"
 }
 
 test_old_certbot_is_not_used_for_an_ip() {

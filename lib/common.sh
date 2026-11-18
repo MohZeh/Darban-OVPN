@@ -442,6 +442,13 @@ darban_publish_crl() {
 # Seconds before the one more try; the tests set it to 0.
 DARBAN_SNAP_RETRY_DELAY=${DARBAN_SNAP_RETRY_DELAY:-30}
 darban_snap_has_certbot() { snap list certbot >/dev/null 2>&1; }
+# snapd itself answers. The snap command can be there while snapd fails at every start, as on a server image
+# that lists a snap whose files are gone: an install then waits out its whole time, twice, and says nothing.
+darban_snapd_answers() {
+    local out
+    out=$(timeout 15 snap version 2>/dev/null) || return 1
+    awk '$1 == "snapd" {seen = 1; if ($2 == "" || $2 == "unavailable") bad = 1} END {exit !(seen && !bad)}' <<<"$out"
+}
 darban_snap_certbot_busy() {
     # snapd is still working on certbot: it can go on after the command that asked for it gave up.
     snap changes 2>/dev/null | awk '$2 == "Doing" && /certbot/ {found = 1} END {exit !found}'
@@ -452,6 +459,10 @@ darban_snap_install_certbot() {
     # stays its owner's. After a failed install there is one more try, unless the snap arrived anyway; a change
     # still in progress is waited for instead of asked for again.
     local record=$1 attempt rc
+    if ! darban_snapd_answers; then
+        printf 'snapd does not answer on this server, so certbot cannot come from the snap store. See: systemctl status snapd\n' >&2 || true
+        return 1
+    fi
     if darban_snap_has_certbot; then
         timeout 300 snap refresh certbot >/dev/null 2>&1 || true
         return 0
