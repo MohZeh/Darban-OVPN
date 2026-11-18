@@ -2454,6 +2454,11 @@ test_setup_screen_is_quiet() {
     lacks 'apt output stays off the screen' 'NOISE-FROM-APT' "$out"
     lacks 'the plan stays off the screen' 'adds the OpenVPN project' "$out"
     grep -q NOISE-FROM-APT "$E/setup.log"; rc_is 'apt output is in the log' 0 "$?"
+    # The log says how long each slow part took, so a slow install shows where the time went.
+    grep -q '^== apt update: started at [0-9:]* UTC$' "$E/setup.log"; rc_is 'the log says when apt update started' 0 "$?"
+    grep -Eq '^== apt update: [0-9]+ s, exit 0$' "$E/setup.log"; rc_is 'and how long it took' 0 "$?"
+    grep -Eq '^== apt install: [0-9]+ s, exit 0$' "$E/setup.log"; rc_is 'the package install is timed too' 0 "$?"
+    lacks 'the times stay off the screen' '== apt' "$out"
 
     prepare_blank_server_again
     sed -i '1a echo LAST-WORDS-OF-APT' "$E/bin/systemctl"
@@ -3286,6 +3291,7 @@ test_setup_installs_certbot_for_links() {
     : > "$STUB_LOG"
     setup_run --host vpn.example.com --port 21194 --yes >/dev/null
     grep -q -- '-y -q --no-install-recommends install certbot' "$STUB_LOG"; rc_is 'a hostname gets Ubuntu certbot during setup' 0 "$?"
+    grep -Eq '^== certbot from apt: [0-9]+ s, exit 0$' "$E/setup.log"; rc_is 'the log says how long certbot from apt took' 0 "$?"
     grep -qx 'package certbot' "$E/cfg/.server-setup-started"; rc_is 'and it is recorded for removal' 0 "$?"
     prepare_blank_server_again
     : > "$STUB_LOG"
@@ -3297,9 +3303,13 @@ test_setup_installs_certbot_for_links() {
     grep -qx setup_complete "$E/cfg/.server-setup-started"; rc_is 'and records it as complete' 0 "$?"
     grep -q 'snap install --classic certbot' "$STUB_LOG"; rc_is 'a public IP gets the Certbot snap, new enough for it' 0 "$?"
     grep -qx 'snap certbot' "$E/cfg/.server-setup-started"; rc_is 'also recorded' 0 "$?"
+    grep -Eq '^== certbot from the snap store: [0-9]+ s, exit 0$' "$E/setup.log"; rc_is 'the log says how long the snap took' 0 "$?"
+    lacks 'and the screen does not' '== certbot' "$out"
     prepare_blank_server_again
+    : > "$E/setup.log"
     FAKE_SNAP_RC=1 setup_run --host 203.0.113.9 --port 21194 --yes >/dev/null
     grep -qx setup_complete "$E/cfg/.server-setup-started"; rc_is 'a failed certbot install does not stop the setup' 0 "$?"
+    grep -Eq '^== certbot from the snap store: [0-9]+ s, exit 1$' "$E/setup.log"; rc_is 'the log shows the failed snap and its time' 0 "$?"
     prepare_blank_server_again
     : > "$STUB_LOG"
     setup_run --host 192.168.1.10 --port 21194 --yes >/dev/null

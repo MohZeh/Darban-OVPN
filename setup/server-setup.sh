@@ -79,6 +79,19 @@ free_port() {
 }
 easyrsa() { env EASYRSA_PKI="$PKI" EASYRSA_BATCH=1 "$EASYRSA_BIN" "$@" </dev/null >/dev/null; }
 # A fresh VPS often runs unattended-upgrades right after boot, so wait for the dpkg lock instead of failing.
+timed() {
+    # timed <label> <command...>: the command, with its start and how long it took written to the log, so a
+    # slow install shows which part was slow. Its exit status is the command's.
+    local label=$1 start rc=0
+    shift
+    start=$SECONDS
+    printf '== %s: started at %s
+' "$label" "$(date -u '+%H:%M:%S UTC')" || true
+    "$@" || rc=$?
+    printf '== %s: %s s, exit %s
+' "$label" "$((SECONDS - start))" "$rc" || true
+    return "$rc"
+}
 apt_run() { apt-get -o DPkg::Lock::Timeout=300 -o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold "$@"; }
 # apt marks an upgrade with the old version in brackets. Those packages were already here, so they are
 # neither shown as new nor recorded for removal.
@@ -341,7 +354,7 @@ add_repository() {
 }
 install_packages() {
     local version pkg planned
-    apt_run -qq update
+    timed 'apt update' apt_run -qq update
     planned=$(apt_run -s --no-install-recommends install openvpn easy-rsa socat nftables | new_packages) ||
         die 'apt cannot install the OpenVPN packages.'
     for pkg in $planned; do
@@ -352,7 +365,7 @@ install_packages() {
         esac
     done
     # shellcheck disable=SC2086  # an empty KERNEL_INSTALL must add no argument
-    apt_run -y -q --no-install-recommends install openvpn easy-rsa socat nftables $KERNEL_INSTALL
+    timed 'apt install' apt_run -y -q --no-install-recommends install openvpn easy-rsa socat nftables $KERNEL_INSTALL
     version=$(openvpn --version | awk 'NR==1 {print $2}')
     case $version in
         2.[7-9]*|[3-9].*) ok "OpenVPN $version installed." ;;
@@ -378,7 +391,7 @@ install_certbot_for_links() {
             :
         elif command -v snap >/dev/null; then
             # Recorded for removal only when this install put it here.
-            darban_snap_install_certbot "$MARKER" || warn 'Could not install certbot from the snap store; the first link tries again.'
+            timed 'certbot from the snap store' darban_snap_install_certbot "$MARKER" || warn 'Could not install certbot from the snap store; the first link tries again.'
             return 0
         else
             return 0
@@ -386,7 +399,7 @@ install_certbot_for_links() {
     fi
     if dpkg-query -W -f='${Status}' certbot 2>/dev/null | grep -q 'install ok installed'; then return 0; fi
     planned=$(apt_run -s --no-install-recommends install certbot | new_packages) || { warn 'apt cannot install certbot; the first link tries again.'; return 0; }
-    if apt_run -y -q --no-install-recommends install certbot; then
+    if timed 'certbot from apt' apt_run -y -q --no-install-recommends install certbot; then
         for pkg in $planned; do
             if [[ $pkg == certbot ]]; then printf 'package certbot\n' >>"$MARKER"; else printf 'dep %s\n' "$pkg" >>"$MARKER"; fi
         done
