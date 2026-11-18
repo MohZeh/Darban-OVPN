@@ -129,7 +129,13 @@ darban_conf_net() {
     awk '$1=="server" && $3=="255.255.255.0" {print $2; exit}' "${1:-$DARBAN_SERVER_CONF}" 2>/dev/null
 }
 # The live rules, not the file: a flushed chain or a changed rule must not pass.
-darban_live_nat_ok() { nft list chain ip darban postrouting 2>/dev/null | grep -F "ip saddr $1/24 oifname " | grep -Fq ' masquerade'; }
+# nft's output is read whole before it is searched. Piped into grep -q, nft may still be writing when grep has
+# found the line and left; nft then ends with SIGPIPE, and under pipefail a rule that is there reads as missing.
+darban_live_nat_ok() {
+    local rules
+    rules=$(nft list chain ip darban postrouting 2>/dev/null) || return 1
+    grep -F "ip saddr $1/24 oifname " <<<"$rules" | grep -F ' masquerade' >/dev/null
+}
 # The interface a NAT rule sends VPN traffic out through, from a file or from standard input.
 darban_nat_iface() { awk '{for (i=1; i<NF; i++) if ($i=="oifname") {gsub(/"/, "", $(i+1)); print $(i+1); exit}}' "$@"; }
 darban_default_iface() { ip -4 route show default 2>/dev/null | awk '{for (i=1; i<NF; i++) if ($i=="dev") {print $(i+1); exit}}'; }
@@ -143,8 +149,10 @@ darban_live_mss_ok() {
     local rules clamp="tcp flags syn tcp option maxseg size > $DARBAN_MSS tcp option maxseg size set $DARBAN_MSS"
     rules=$(nft list chain ip darban forward 2>/dev/null) || return 1
     grep -Fq "ip saddr $1/24 $clamp" <<<"$rules" && grep -Fq "ip daddr $1/24 $clamp" <<<"$rules" || return 1
-    nft list chain ip darban input 2>/dev/null | grep -Fq "ip saddr $1/24 $clamp" || return 1
-    nft list chain ip darban output 2>/dev/null | grep -Fq "ip daddr $1/24 $clamp"
+    rules=$(nft list chain ip darban input 2>/dev/null) || return 1
+    grep -Fq "ip saddr $1/24 $clamp" <<<"$rules" || return 1
+    rules=$(nft list chain ip darban output 2>/dev/null) || return 1
+    grep -Fq "ip daddr $1/24 $clamp" <<<"$rules"
 }
 subnet_conflict() {
     # Prints the first route overlapping this /24: clients could not reach it through the VPN.

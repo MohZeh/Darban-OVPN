@@ -2622,6 +2622,32 @@ STUB
     has 'rules that are not loaded are reported' 'The NAT rules of this tool are not loaded' "$(mgr status)"
 }
 
+test_live_rule_checks_read_all_of_nft() {
+    # An nft that still writes after the line being looked for, as nftables 1.1 on Ubuntu 26.04 can: a reader
+    # that leaves at the first match ends it with SIGPIPE, and under pipefail, as in the installer, a rule that
+    # is there must still pass.
+    cat > "$E/bin/nft" <<'STUB'
+#!/usr/bin/env bash
+clamp='tcp flags syn tcp option maxseg size > 1280 tcp option maxseg size set 1280'
+case "$*" in
+    'list chain ip darban postrouting') printf '\t\tip saddr 10.8.0.0/24 oifname "eth0" masquerade\n' ;;
+    'list chain ip darban forward') printf '\t\tip saddr 10.8.0.0/24 ip daddr 10.8.0.0/24 drop\n\t\tip saddr 10.8.0.0/24 ip daddr 169.254.0.0/16 drop\n\t\tip saddr 10.8.0.0/24 %s\n\t\tip daddr 10.8.0.0/24 %s\n' "$clamp" "$clamp" ;;
+    'list chain ip darban input') printf '\t\tip saddr 10.8.0.0/24 %s\n' "$clamp" ;;
+    'list chain ip darban output') printf '\t\tip daddr 10.8.0.0/24 %s\n' "$clamp" ;;
+    *) exit 0 ;;
+esac
+sleep 0.3
+printf '\t}\n}\n'
+STUB
+    chmod +x "$E/bin/nft"
+    source "$REPO/lib/common.sh"
+    ( set -o pipefail; darban_live_nat_ok 10.8.0.0 ); rc_is 'NAT that is there passes while nft is still writing' 0 "$?"
+    ( set -o pipefail; darban_live_isolation_ok 10.8.0.0 ); rc_is 'so do the rules that keep clients apart' 0 "$?"
+    ( set -o pipefail; darban_live_mss_ok 10.8.0.0 ); rc_is 'and the TCP size rules, to and from the server too' 0 "$?"
+    ( set -o pipefail; darban_live_nat_ok 10.9.0.0 ); rc_is 'NAT for another network still fails' 1 "$?"
+    ( set -o pipefail; darban_live_mss_ok 10.9.0.0 ); rc_is 'and so do TCP size rules for another network' 1 "$?"
+}
+
 test_advanced_menu_prints_only_itself() {
     # An unquoted 'download=not set' ran the set builtin, which printed every shell variable.
     local out
