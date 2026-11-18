@@ -3307,6 +3307,8 @@ test_setup_installs_certbot_for_links() {
     lacks 'and the screen does not' '== certbot' "$out"
     prepare_blank_server_again
     : > "$E/setup.log"
+    # The snap from the run above is gone, so this install really fails.
+    rm -f -- "$E/snapd/certbot"
     FAKE_SNAP_RC=1 setup_run --host 203.0.113.9 --port 21194 --yes >/dev/null
     grep -qx setup_complete "$E/cfg/.server-setup-started"; rc_is 'a failed certbot install does not stop the setup' 0 "$?"
     grep -Eq '^== certbot from the snap store: [0-9]+ s, exit 1$' "$E/setup.log"; rc_is 'the log shows the failed snap and its time' 0 "$?"
