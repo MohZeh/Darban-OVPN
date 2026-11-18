@@ -14,6 +14,9 @@ NS=darban-test
 dump() {
     journalctl -u "$UNIT" -n 40 --no-pager || true
     tail -n 30 "$LOG"/*.log 2>/dev/null || true
+    # What the install itself was doing: its own log, and any apt or dpkg still running, such as one that waits.
+    tail -n 60 /var/log/darban-setup.log 2>/dev/null || true
+    ps -eo pid,etimes,args | grep -E '[a]pt|[d]pkg|[u]nattended' || true
     ip netns del "$NS" 2>/dev/null || true
 }
 trap 'echo "FAILED at line $LINENO"; dump' ERR
