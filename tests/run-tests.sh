@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 # shellcheck disable=SC2319  # "[[ ... ]]; rc_is ... "$?"" is how these tests read a condition's result.
 # Regression tests for Darban OVPN. Run: bash tests/run-tests.sh [name-filter]
+# DARBAN_TEST_PART=<i>/<n> runs only part i of n: every n-th test of the sorted list, from the i-th on. CI runs
+# the parts side by side, and together they are the whole suite.
 #
 # Each test gets a fresh fake server (see fake-server.sh) and drives the real entry points: the
 # manager's menu and commands, and the CRL maintainer. Only synthetic data under a temp directory.
@@ -11,6 +13,11 @@ set -uo pipefail
 HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 REPO=$(cd "$HERE/.." && pwd)
 FILTER=${1:-}
+PART=${DARBAN_TEST_PART:-1/1}
+if [[ ! $PART =~ ^([1-9][0-9]*)/([1-9][0-9]*)$ ]] || (( BASH_REMATCH[1] > BASH_REMATCH[2] )); then
+    printf 'DARBAN_TEST_PART must be <i>/<n> with 1 <= i <= n, not: %s\n' "$PART" >&2; exit 2
+fi
+PART_INDEX=$(( BASH_REMATCH[1] - 1 )) PARTS=${BASH_REMATCH[2]}
 export MSYS2_ARG_CONV_EXCL='*' LC_ALL=C.UTF-8 NO_COLOR=1
 # The one more try of a failed snap install comes at once.
 export DARBAN_SNAP_RETRY_DELAY=0
@@ -6386,7 +6393,9 @@ test_the_download_panel_never_reads_a_file_without_a_record() {
 if [[ -n ${RUN_TESTS_EXTRA:-} ]]; then source "$RUN_TESTS_EXTRA"; fi
 mapfile -t TESTS < <(declare -F | awk '$3 ~ /^test_/ {print $3}' | sort)
 SELECTED=0
-for t in "${TESTS[@]}"; do
+for TEST_INDEX in "${!TESTS[@]}"; do
+    t=${TESTS[TEST_INDEX]}
+    (( TEST_INDEX % PARTS == PART_INDEX )) || continue
     [[ -z $FILTER || $t == *"$FILTER"* ]] || continue
     SELECTED=$((SELECTED + 1))
     CURRENT=$t
@@ -6403,6 +6412,7 @@ done
 # A filter that matches no test runs nothing, and must not pass either.
 if (( SELECTED == 0 )); then printf 'No test matches: %s\n' "$FILTER" >&2; exit 1; fi
 RUN_DONE=1
+if (( PARTS > 1 )); then printf '\nPart %d of %d: %d of the %d tests\n' "$((PART_INDEX + 1))" "$PARTS" "$SELECTED" "${#TESTS[@]}"; fi
 printf '\n%d tests, %d passed, %d failed, %d tests skipped here\n' "$SELECTED" "$PASS" "$FAIL" "${#SKIPPED[@]}"
 if (( ${#SKIPPED[@]} )); then printf 'Skipped here:\n'; printf '  %s\n' "${SKIPPED[@]}"; fi
 if (( FAIL > 0 )); then printf 'Failed:\n'; printf '  %s\n' "${FAILED[@]}"; exit 1; fi
