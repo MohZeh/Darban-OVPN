@@ -120,8 +120,7 @@ jobs:
           - {ubuntu: '26.04', suite: real Easy-RSA, part: 2, parts: 4}
           - {ubuntu: '26.04', suite: real Easy-RSA, part: 3, parts: 4}
           - {ubuntu: '26.04', suite: real Easy-RSA, part: 4, parts: 4}
-          - {ubuntu: '24.04', suite: real terminal, part: 1, parts: 1}
-          - {ubuntu: '26.04', suite: real terminal, part: 1, parts: 1}
+        # The real-terminal tests take under a minute, so they run in the short checks job below.
     runs-on: ubuntu-${{ matrix.ubuntu }}
     # A part takes about 5 minutes. A slow runner has run every test about 1.8 times slower.
     timeout-minutes: 15
@@ -156,13 +155,10 @@ jobs:
           DARBAN_TEST_EVIDENCE: ${{ runner.temp }}/evidence
           DARBAN_TEST_PART: ${{ matrix.part }}/${{ matrix.parts }}
         run: DARBAN_REAL_EASYRSA=/usr/share/easy-rsa/easyrsa bash tests/run-tests.sh </dev/null
-      - name: Real-terminal key tests
-        if: matrix.suite == 'real terminal'
-        run: python3 tests/run-tty-tests.py </dev/null
       # What a failed test left: its whole outputs, the fake server's logs, the listeners and processes of that
       # moment. The suite writes no key, certificate or profile there (scrub in run-tests.sh).
       - name: Keep the evidence of failed tests
-        if: failure() && matrix.suite != 'real terminal'
+        if: failure()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: evidence-${{ matrix.ubuntu }}-${{ matrix.suite }}-part-${{ matrix.part }}-of-${{ matrix.parts }}
@@ -207,9 +203,12 @@ jobs:
           PART: ${{ matrix.part }}
         run: sudo GITHUB_STEP_SUMMARY="$GITHUB_STEP_SUMMARY" bash tests/acceptance-ci.sh --i-know "$PART"
 
-  # The setup on a public address: the path the acceptance run skips, because it uses 127.0.0.1.
-  public-setup:
-    name: Setup on a public address (Ubuntu ${{ matrix.ubuntu }})
+  # Three checks of about a minute each, on one runner, so a run waits less for runners: the real-terminal tests,
+  # which change nothing on the machine, then the setup on a public address, the path the acceptance run skips
+  # because it uses 127.0.0.1, which ends with Remove everything; then, on the machine it left, the way from rc.10
+  # and back. That that machine has no PKI or server left is checked first, so it is a clean start for rc.10 too.
+  short:
+    name: Terminal, public address and rc.10 (Ubuntu ${{ matrix.ubuntu }})
     needs: lint
     if: needs.lint.outputs.code == 'true'
     strategy:
@@ -217,11 +216,13 @@ jobs:
       matrix:
         ubuntu: ['24.04', '26.04']
     runs-on: ubuntu-${{ matrix.ubuntu }}
-    timeout-minutes: 15
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - name: Real-terminal key tests
+        run: python3 tests/run-tty-tests.py </dev/null
       # A mirror that is down or slow must not decide a test: the fastest one goes first.
       - name: Fastest apt mirror first
         run: sudo GITHUB_STEP_SUMMARY="$GITHUB_STEP_SUMMARY" bash scripts/ci-apt-mirrors.sh
@@ -229,25 +230,7 @@ jobs:
         run: sudo test ! -e /root/pki && test ! -e /etc/openvpn/server/server.conf
       - name: Real setup on a public address, and its removal
         run: sudo GITHUB_STEP_SUMMARY="$GITHUB_STEP_SUMMARY" bash tests/public-setup-ci.sh --i-know
-
-  rc10-upgrade:
-    name: From rc.10 and back (Ubuntu ${{ matrix.ubuntu }})
-    needs: lint
-    if: needs.lint.outputs.code == 'true'
-    strategy:
-      fail-fast: false
-      matrix:
-        ubuntu: ['24.04', '26.04']
-    runs-on: ubuntu-${{ matrix.ubuntu }}
-    timeout-minutes: 20
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      # A mirror that is down or slow must not decide a test: the fastest one goes first.
-      - name: Fastest apt mirror first
-        run: sudo GITHUB_STEP_SUMMARY="$GITHUB_STEP_SUMMARY" bash scripts/ci-apt-mirrors.sh
-      - name: The runner must not already have a PKI or server
+      - name: Remove everything left no PKI or server
         run: sudo test ! -e /root/pki && test ! -e /etc/openvpn/server/server.conf
       - name: rc.10 from its release, the update to this code, Restore previous version, and back
         run: sudo bash tests/rc10-upgrade-ci.sh --i-know
@@ -322,7 +305,7 @@ jobs:
   result:
     name: ${{ inputs.vm_only && 'VM qualification result' || 'CI result' }}
     if: always()
-    needs: [lint, test, acceptance, public-setup, rc10-upgrade, restore, acceptance-arm, reboot]
+    needs: [lint, test, acceptance, short, restore, acceptance-arm, reboot]
     runs-on: ubuntu-24.04
     timeout-minutes: 2
     steps:
@@ -332,8 +315,7 @@ jobs:
           LINT: ${{ needs.lint.result }}
           TEST: ${{ needs.test.result }}
           ACCEPTANCE: ${{ needs.acceptance.result }}
-          PUBLIC: ${{ needs.public-setup.result }}
-          RC10: ${{ needs.rc10-upgrade.result }}
+          SHORT: ${{ needs.short.result }}
           RESTORE: ${{ needs.restore.result }}
           ARM: ${{ needs.acceptance-arm.result }}
           REBOOT: ${{ needs.reboot.result }}
@@ -341,7 +323,7 @@ jobs:
           DRAFT: ${{ github.event.pull_request.draft && 'true' || 'false' }}
           TREE: ${{ needs.lint.outputs.tree }}
         run: |
-          echo "Lint: $LINT, Test: $TEST, Acceptance: $ACCEPTANCE, public address: $PUBLIC, from rc.10: $RC10, restore: $RESTORE, arm64: $ARM, reboot: $REBOOT, code changed: $CODE, reboot and arm64 only: $VM_ONLY"
+          echo "Lint: $LINT, Test: $TEST, Acceptance: $ACCEPTANCE, terminal, public address and rc.10: $SHORT, restore: $RESTORE, arm64: $ARM, reboot: $REBOOT, code changed: $CODE, reboot and arm64 only: $VM_ONLY"
           echo "Tree $TREE" >> "$GITHUB_STEP_SUMMARY"
           test "$LINT" = success
           # A draft is never a pass: its slow tests did not run, and a skipped required check would count as passed.
@@ -359,13 +341,11 @@ jobs:
           if [ "$CODE" = true ]; then
             test "$TEST" = success
             test "$ACCEPTANCE" = success
-            test "$PUBLIC" = success
-            test "$RC10" = success
+            test "$SHORT" = success
             test "$RESTORE" = success
           else
             test "$TEST" = skipped
             test "$ACCEPTANCE" = skipped
-            test "$PUBLIC" = skipped
-            test "$RC10" = skipped
+            test "$SHORT" = skipped
             test "$RESTORE" = skipped
           fi
