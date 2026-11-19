@@ -547,7 +547,7 @@ inside() { nsenter -t "$pid" -m -- "$@"; }
 inside test -s /etc/darban/link-key.pem
 [[ -n $(inside ls -A /run/darban-links) ]]
 hidden=0
-for path in /etc/openvpn /etc/letsencrypt /var/backups/darban-pki /var/lib/darban /run/darban-events /run/openvpn-server /etc/shadow /etc/gshadow; do
+for path in /etc/openvpn /etc/letsencrypt /var/backups/darban-pki /var/lib/darban /run/darban-events /run/openvpn-server /etc/shadow /etc/gshadow /etc/ssh /etc/ssl/private /var/log; do
     if [[ -d $path && -n $(ls -A "$path") ]]; then
         [[ -z $(inside ls -A "$path" 2>/dev/null) ]] || { echo "FAIL: the link service sees what is in $path."; exit 1; }
     elif [[ -f $path && -s $path ]]; then
@@ -557,11 +557,17 @@ for path in /etc/openvpn /etc/letsencrypt /var/backups/darban-pki /var/lib/darba
     fi
     hidden=$((hidden + 1))
 done
-# /etc/openvpn, /run/openvpn-server, /etc/shadow and /etc/gshadow always have something in them here.
-(( hidden >= 4 )) || { echo "FAIL: only $hidden of the hidden paths could be checked."; exit 1; }
+# /etc/openvpn, /run/openvpn-server, /etc/shadow, /etc/gshadow, /etc/ssh and /var/log always have something in
+# them here.
+(( hidden >= 6 )) || { echo "FAIL: only $hidden of the hidden paths could be checked."; exit 1; }
 families=$(systemctl show -p RestrictAddressFamilies --value darban-links.service)
 [[ $families == *AF_INET* && $families != *AF_UNIX* ]] || { echo "FAIL: the link service may open: $families"; exit 1; }
 echo "PASS: the link service sees the link key and its files, and none of $hidden paths it has no use for, and opens no unix socket."
+[[ $(systemctl show -p SystemCallFilter --value darban-links.service) == *read* ]] || { echo 'FAIL: the link service has no system call filter.'; exit 1; }
+# A number to compare from one run to the next, not a gate: lower means less exposed.
+exposure=$(systemd-analyze security darban-links.service 2>/dev/null | sed -n 's/.*Overall exposure level for [^:]*: *//p' || true)
+echo "systemd-analyze security, darban-links.service: ${exposure:-not reported}"
+if [[ -n ${GITHUB_STEP_SUMMARY:-} ]]; then echo "Link service exposure (systemd-analyze security): ${exposure:-not reported}" >> "$GITHUB_STEP_SUMMARY"; fi
 curl -ksf -H 'Accept-Language: fa-IR,fa;q=0.9' "$url" | grep 'dir="rtl"' >/dev/null
 curl -ksf "$url/file" -o "$LOG/link.ovpn"
 grep -q '<key>' "$LOG/link.ovpn"
