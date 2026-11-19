@@ -25,7 +25,7 @@ python3 tests/run-tty-tests.py
 
 Pass part of a test name to run a subset: `bash tests/run-tests.sh temporary_link`. `DARBAN_TEST_PART=2/4` runs the second of four parts of the suite, as CI does on four runners side by side.
 
-`tests/acceptance-ci.sh` **reconfigures the machine it runs on**. Use it only on a disposable Ubuntu 24.04 or 26.04 machine. `tests/release-smoke.sh` does the same with a published release, and `tests/vm-reboot.sh` runs inside a virtual machine and needs KVM.
+`tests/acceptance-ci.sh` **reconfigures the machine it runs on**. Use it only on a disposable Ubuntu 24.04 or 26.04 machine. After the install it runs two parts; `1` or `2` after `--i-know` runs only one, as CI does on two runners. `tests/release-smoke.sh` does the same with a published release, and `tests/vm-reboot.sh` runs inside a virtual machine and needs KVM.
 
 ## Before opening a pull request
 

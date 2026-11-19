@@ -4,7 +4,13 @@
 # --i-know. The questions are answered in a real terminal, as a person would. Clients connect over loopback,
 # and one more runs in its own network namespace to send real traffic through the tunnel and the NAT.
 set -Eeuo pipefail
-[[ ${1:-} == --i-know ]] || { echo 'This reconfigures the machine. Use only on a disposable one: acceptance-ci.sh --i-know' >&2; exit 2; }
+[[ ${1:-} == --i-know ]] || { echo 'This reconfigures the machine. Use only on a disposable one: acceptance-ci.sh --i-know [1|2]' >&2; exit 2; }
+# After the install and the first client, the checks come in two parts, so CI runs each on a runner of its own:
+# 1 is revocation, the CRL, the ends of sessions and the connection events; 2 is the settings, the network, links
+# and files, certbot, the update and the removal. With no part named, both run, one after the other.
+PART=${2:-all}
+[[ $PART == all || $PART == 1 || $PART == 2 ]] || { echo "No such part: $PART. The parts are 1 and 2." >&2; exit 2; }
+part() { [[ $PART == all || $PART == "$1" ]]; }
 cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.."
 LOG=$(mktemp -d)
 PIDFILE=$LOG/client.pid
@@ -215,6 +221,9 @@ if [[ -n ${SUDO_USER:-} && $SUDO_USER != root ]]; then
 fi
 echo 'PASS: the tool saw the real connection after sharing.'
 
+# ---------- part 1: revocation, the CRL, the ends of sessions and the connection events ----------
+if part 1; then
+
 # Revoked while connected: only this session ends, without restarting OpenVPN for everyone.
 printf '4\naccept1\naccept1\n0\n' | darban | tee "$LOG/revoke.log"
 grep -q 'Active session of accept1 disconnected' "$LOG/revoke.log"
@@ -394,6 +403,16 @@ connect "$PROFILE" "$LOG/events-back.log"; disconnect
 echo 'PASS: a small process limit, script-security 1 or a failed restart keep the lines out, and nothing else changes.'
 
 darban list --all
+fi
+
+# ---------- part 2: the settings, the network, links and files, certbot, the update and the removal ----------
+if part 2; then
+if [[ $PART == 2 ]]; then
+    # Part 1 did not run here: the first client is still connected, and its profile is the one of the install.
+    disconnect
+    cp "$LOG/old.ovpn" "$LOG/accept1.ovpn"
+    PROFILE=$LOG/accept1.ovpn
+fi
 
 # Advanced settings against the real service: a good change is applied, and a broken one is rolled back.
 printf '7\n6\n2\n9.9.9.9\n2\n0\n0\n0\n' | darban
@@ -957,4 +976,5 @@ if nft list table ip darban >/dev/null 2>&1; then echo 'FAIL: the NAT table is s
 if (( USE_UFW )) && ufw status | grep '1194\|tun0' >/dev/null; then echo 'FAIL: the ufw rules are still there.'; exit 1; fi
 ls /root/darban-backup-*.tar.gz
 echo 'PASS: full removal left nothing behind except the backup and the kernel.'
-echo 'All acceptance checks passed.'
+fi
+if [[ $PART == all ]]; then echo 'All acceptance checks passed.'; else echo "All acceptance checks of part $PART passed."; fi
