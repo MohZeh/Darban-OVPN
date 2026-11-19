@@ -309,6 +309,27 @@ profile_preconditions() {
     server_data_ciphers >/dev/null || { warn 'server.conf data-ciphers is repeated or malformed.'; return 1; }
 }
 domain() { [[ -s $DOMAIN_FILE ]] && head -n 1 "$DOMAIN_FILE" || true; }
+own_public_ipv4() {
+    # The public IPv4 addresses on this server's own interfaces, one a line. Behind NAT there are none: the address
+    # the internet sees is not on any of them.
+    local ip
+    while IFS= read -r ip; do
+        if valid_ipv4 "$ip" && ! is_private_ip "$ip"; then printf '%s\n' "$ip"; fi
+    done < <(ip -4 -o addr show scope global 2>/dev/null | awk '{sub(/\/.*/, "", $4); print $4}' || true)
+}
+address_elsewhere() {
+    # address_elsewhere <host>: prints this server's own public IPv4 when <host> is a public IPv4, or a name of one,
+    # that is not one of them. Silent and false when that cannot be told: a private address, a name that does not
+    # resolve, or a server behind NAT.
+    local host=$1 resolved mine
+    resolved=$host
+    if ! valid_ipv4 "$host"; then resolved=$(getent ahostsv4 "$host" 2>/dev/null | awk 'NR==1 {print $1}' || true); fi
+    valid_ipv4 "$resolved" && ! is_private_ip "$resolved" || return 1
+    mine=$(own_public_ipv4)
+    [[ -n $mine ]] || return 1
+    if grep -qxF -- "$resolved" <<<"$mine"; then return 1; fi
+    printf '%s\n' "${mine%%$'\n'*}"
+}
 
 # ---------- dates ----------
 cert_end_epoch() {
@@ -4611,7 +4632,7 @@ network_rules_health() {
     fi
 }
 health() {
-    local version state enabled dco port e crl_err host resolved next last value issue exports pending rows
+    local version state enabled dco port e crl_err host resolved next last value issue exports pending rows mine
     if [[ -n $SERVER_PROBLEM ]]; then
         group 'Server'
         check bad "$SERVER_PROBLEM"
@@ -4716,7 +4737,14 @@ health() {
     host=$(domain)
     if valid_domain "$host"; then
         resolved=$(getent ahostsv4 "$host" 2>/dev/null | awk 'NR==1 {print $1}' || true)
-        if [[ -n $resolved ]]; then check ok "Server address $host $S_ARROW $resolved"; else check warn "Server address $host does not resolve to IPv4"; fi
+        if [[ -z $resolved ]]; then
+            check warn "Server address $host does not resolve to IPv4"
+        elif mine=$(address_elsewhere "$host"); then
+            # As after a restore from another server: profiles made now would connect to that one.
+            check warn "Server address $host $S_ARROW $resolved is not this server, which is $mine $S_ARROW Settings $S_CRUMB 1, then share each client again"
+        else
+            check ok "Server address $host $S_ARROW $resolved"
+        fi
     else
         check bad "Server address not set $S_ARROW Settings $S_CRUMB 1"
     fi
@@ -5664,7 +5692,7 @@ pre_restore_health() {
 restore_from() {
     # darban restore <tar> --ca-fingerprint <sha256> | --ca-from <profile.ovpn>
     local file='' want='' from='' stage id facts got created host version valid revoked crl_state='' unverified=no
-    local now next line tree history
+    local now next line tree history restored_host mine
     local -a stale=()
     while (( $# )); do
         case $1 in
@@ -5751,12 +5779,17 @@ restore_from() {
     kv Version "${version:-unknown}"
     kv 'CA fingerprint' "$(ca_fingerprint_label "$files/pki/ca.crt")"
     kv Clients "$valid valid $S_SEP $revoked revoked"
+    restored_host=$(head -n 1 "$files/darban/domain" 2>/dev/null || true)
+    if valid_domain "$restored_host"; then kv Address "$restored_host"; fi
     if [[ -n $crl_state ]]; then info "$crl_state"; fi
     if [[ -n $RESTORE_REVOKED ]]; then info "The backup has these revoked, and they stay revoked: $(safe_text "$RESTORE_REVOKED")."; fi
     while IFS= read -r line; do [[ -z $line ]] || info "${line#NOTE: }"; done <"$stage/conf.notes"
     info 'server.conf is written again from the template of this tool, with its port, network, routing, DNS, ciphers, keepalive and log detail.'
     if [[ -e $DARBAN_PKI ]]; then info "The CA, clients and server files of this server are replaced. What they are now is kept in $PKI_BACKUP_DIR for $PRE_RESTORE_KEEP_DAYS days, then deleted."; fi
     info 'OpenVPN stays off from the first change until the end, even across a reboot.'
+    if valid_domain "$restored_host" && mine=$(address_elsewhere "$restored_host"); then
+        warn "The backup's server address, $restored_host, is not this server, which is $mine. Profiles made with it connect to the server it came from. After the restore, set this server's address in Settings $S_CRUMB 1, then share each client again."
+    fi
     mapfile -t stale < <(share_rows 2>/dev/null | awk -F '\t' '$1!="orphan" {print $3}' | sort -u)
     if (( ${#stale[@]} )); then info "Links and files kept on this server hold profiles of the CA in use now; after the restore, share those clients again: $(safe_text "${stale[*]}")."; fi
     say

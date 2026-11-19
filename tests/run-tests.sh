@@ -5101,6 +5101,42 @@ test_backups_follow_changes_of_the_ca() {
     has 'a hook that fails is named in Diagnostics' 'A backup hook failed: broken' "$(mgr status)"
 }
 
+fake_addresses() {
+    # fake_addresses <IPv4>...: what `ip -4 -o addr show scope global` lists on this stand-in server. Any other ip
+    # command is the real one.
+    local real address
+    real=$(PATH=/usr/sbin:/usr/bin:/sbin:/bin command -v ip)
+    {
+        printf '#!/usr/bin/env bash\nif [[ "$*" == "-4 -o addr show scope global" ]]; then\n'
+        for address; do printf '    echo "2: eth0    inet %s/24 brd 0.0.0.0 scope global eth0"\n' "$address"; done
+        printf '    exit 0\nfi\nexec %q "$@"\n' "$real"
+    } > "$E/bin/ip"
+    chmod +x "$E/bin/ip"
+}
+
+test_restore_says_when_the_address_is_another_server() {
+    # From the VPS round of v1.0.0: a backup restored on a new server brings the old server's address, so profiles
+    # made after it connect to the old server. The restore says so before it asks, and Diagnostics until it changes.
+    local out fp
+    template_server
+    echo 198.51.100.20 > "$E/cfg/domain"
+    backup_key_set
+    menu '1\nbob\n0\n' >/dev/null
+    (cd "$E" && opened_backup "$E/backup.tar")
+    fp=$(ca_fp)
+    fake_addresses 203.0.113.50
+    out=$(printf '2\n' | bash "$E/manager.sh" restore "$E/backup.tar" --ca-fingerprint "$fp" 2>&1); rc_is 'the restore succeeds' 0 "$?"
+    has 'it shows the address of the backup' 'Address' "$out"
+    has 'and says it is not this server, before it asks' "The backup's server address, 198.51.100.20, is not this server, which is 203.0.113.50." "$out"
+    has 'and what to do' "set this server's address in Settings" "$out"
+    has 'Diagnostics say so until it changes' 'is not this server, which is 203.0.113.50' "$(mgr status)"
+    fake_addresses 198.51.100.20
+    lacks 'an address of this server is fine' 'is not this server' "$(mgr status)"
+    # Behind NAT the public address is on no interface here, so nothing can be told, and nothing is said.
+    fake_addresses 10.0.0.5
+    lacks 'behind NAT nothing is said' 'is not this server' "$(mgr status)"
+}
+
 test_restore_puts_the_ca_back() {
     # D5, C.8, C.12.10, C.13.6 and C.16.5: a restore puts the CA, the clients and the server files of the backup back,
     # with server.conf written again from the template. OpenVPN is off from the first rename to the end. What it
