@@ -612,7 +612,11 @@ choose_subnet
 choose_dns
 choose_firewall
 info "Checking this server${S_ELL}"
+# Timed, but the log is written only after the answer: until then, Cancel leaves nothing behind.
+CHECK_AT=$(date -u '+%H:%M:%S UTC')
+CHECK_START=$SECONDS
 apt_run -qq update >/dev/null
+CHECK_SECONDS=$((SECONDS - CHECK_START))
 plan_kernel
 if (( ASSUME_YES )); then
     say
@@ -643,6 +647,7 @@ fi
 say
 : >>"$SETUP_LOG"
 chmod 600 "$SETUP_LOG"
+printf '== apt update while checking this server: started at %s\n== apt update while checking this server: %s s, exit 0\n' "$CHECK_AT" "$CHECK_SECONDS" >>"$SETUP_LOG"
 run_step 'Preparing the system' add_repository
 if [[ -n $KERNEL_INSTALL ]]; then
     run_step 'Installing OpenVPN and the kernel (a few minutes)' install_packages
