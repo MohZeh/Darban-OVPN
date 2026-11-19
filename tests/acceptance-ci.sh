@@ -575,8 +575,24 @@ url=$(printf '5\naccept1\n1\n1\n0\n' | darban | grep -oE 'https://[^ ]+/l/[0-9a-
 curl -ksf "$url" | grep 'Download profile' >/dev/null
 # Clients that send their request a byte at a time, from one address, must not keep a person elsewhere from opening
 # a link: the unit allows 64 tasks, one thread for each connection.
-python3 tests/slow-clients.py "$url" 80 40 || { echo 'FAIL: slow clients from one address kept the link from opening.'; exit 1; }
-echo 'PASS: slow clients from one address do not keep the link from opening.'
+slow=$(python3 tests/slow-clients.py "$url" 80 40) || { echo "FAIL: slow clients from one address kept the link from opening: $slow"; exit 1; }
+# The page opening proves something only while that address really held its 8 connections.
+[[ $slow == 'held 8 slow connections; the page opened: yes' ]] || { echo "FAIL: the slow clients were not held as they should be: $slow"; exit 1; }
+echo "PASS: slow clients from one address do not keep the link from opening ($slow)."
+# A new link does not restart the service, which would cut a request in progress: one for the first link waits half
+# sent while a second link is made, and then gets its page.
+pid=$(systemctl show -p MainPID --value darban-links.service)
+rm -f "$LOG/go" "$LOG/go.ready"
+python3 tests/held-request.py "$url" "$LOG/go" >"$LOG/held.out" 2>&1 &
+held=$!
+for attempt in $(seq 1 100); do [[ -e $LOG/go.ready ]] && break; sleep 0.1; done
+url2=$(printf '5\naccept1\n1\n1\n0\n' | darban | grep -oE 'https://[^ ]+/l/[0-9a-f]{64}')
+: > "$LOG/go"
+wait "$held" || { echo "FAIL: a new link cut a request in progress: $(head -c 300 "$LOG/held.out")"; exit 1; }
+grep -q 'Download profile' "$LOG/held.out"
+[[ $(systemctl show -p MainPID --value darban-links.service) == "$pid" ]] || { echo 'FAIL: a new link restarted the link service.'; exit 1; }
+curl -ksf "$url2" | grep 'Download profile' >/dev/null
+echo 'PASS: a new link reaches the running link service without a restart, and a request in progress gets its page.'
 
 # The link service sees only what it needs. From inside its mount namespace, the link key and the link files are
 # there, which also shows that nsenter reached it; every path its unit hides, that has something in it here, shows

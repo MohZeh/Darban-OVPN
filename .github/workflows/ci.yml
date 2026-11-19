@@ -98,24 +98,33 @@ jobs:
         run: bash scripts/build-release.sh "$RUNNER_TEMP/release"
 
   test:
-    # Each Ubuntu version and each suite is its own job, so they run side by side and the slowest suite alone
-    # sets the waiting time. One failing does not stop the others.
-    name: Test (Ubuntu ${{ matrix.ubuntu }}, ${{ matrix.suite }})
+    # Each Ubuntu version and each suite is its own job, so they run side by side and the slowest alone sets the
+    # waiting time. One failing does not stop the others. A whole suite took 12 to 17 minutes, so each runs in
+    # parts, every part on a runner of its own: about 4 to 5 minutes each, and together the whole suite.
+    name: Test (Ubuntu ${{ matrix.ubuntu }}, ${{ matrix.suite }}${{ matrix.parts > 1 && format(', part {0} of {1}', matrix.part, matrix.parts) || '' }})
     needs: lint
     if: needs.lint.outputs.code == 'true'
     strategy:
       fail-fast: false
       matrix:
-        ubuntu: ['24.04', '26.04']
-        suite: [stand-in Easy-RSA, real Easy-RSA, real terminal]
-        # The stand-in adds only failure cases Easy-RSA cannot produce, so one Ubuntu version is enough.
-        exclude:
-          - ubuntu: '26.04'
-            suite: stand-in Easy-RSA
+        include:
+          # The stand-in adds only failure cases Easy-RSA cannot produce, so one Ubuntu version is enough.
+          - {ubuntu: '24.04', suite: stand-in Easy-RSA, part: 1, parts: 3}
+          - {ubuntu: '24.04', suite: stand-in Easy-RSA, part: 2, parts: 3}
+          - {ubuntu: '24.04', suite: stand-in Easy-RSA, part: 3, parts: 3}
+          - {ubuntu: '24.04', suite: real Easy-RSA, part: 1, parts: 4}
+          - {ubuntu: '24.04', suite: real Easy-RSA, part: 2, parts: 4}
+          - {ubuntu: '24.04', suite: real Easy-RSA, part: 3, parts: 4}
+          - {ubuntu: '24.04', suite: real Easy-RSA, part: 4, parts: 4}
+          - {ubuntu: '26.04', suite: real Easy-RSA, part: 1, parts: 4}
+          - {ubuntu: '26.04', suite: real Easy-RSA, part: 2, parts: 4}
+          - {ubuntu: '26.04', suite: real Easy-RSA, part: 3, parts: 4}
+          - {ubuntu: '26.04', suite: real Easy-RSA, part: 4, parts: 4}
+          - {ubuntu: '24.04', suite: real terminal, part: 1, parts: 1}
+          - {ubuntu: '26.04', suite: real terminal, part: 1, parts: 1}
     runs-on: ubuntu-${{ matrix.ubuntu }}
-    # A suite takes 9 to 17 minutes. A slow runner has run every test about 1.8 times slower, and 20 minutes
-    # stopped a suite that was passing just before its end.
-    timeout-minutes: 30
+    # A part takes about 5 minutes. A slow runner has run every test about 1.8 times slower.
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -139,11 +148,13 @@ jobs:
         if: matrix.suite == 'stand-in Easy-RSA'
         env:
           DARBAN_TEST_EVIDENCE: ${{ runner.temp }}/evidence
+          DARBAN_TEST_PART: ${{ matrix.part }}/${{ matrix.parts }}
         run: bash tests/run-tests.sh </dev/null
       - name: Tests with the real Easy-RSA
         if: matrix.suite == 'real Easy-RSA'
         env:
           DARBAN_TEST_EVIDENCE: ${{ runner.temp }}/evidence
+          DARBAN_TEST_PART: ${{ matrix.part }}/${{ matrix.parts }}
         run: DARBAN_REAL_EASYRSA=/usr/share/easy-rsa/easyrsa bash tests/run-tests.sh </dev/null
       - name: Real-terminal key tests
         if: matrix.suite == 'real terminal'
@@ -154,7 +165,7 @@ jobs:
         if: failure() && matrix.suite != 'real terminal'
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: evidence-${{ matrix.ubuntu }}-${{ matrix.suite }}
+          name: evidence-${{ matrix.ubuntu }}-${{ matrix.suite }}-part-${{ matrix.part }}-of-${{ matrix.parts }}
           path: ${{ runner.temp }}/evidence
           if-no-files-found: ignore
           retention-days: 7

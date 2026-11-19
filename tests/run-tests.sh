@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 # shellcheck disable=SC2319  # "[[ ... ]]; rc_is ... "$?"" is how these tests read a condition's result.
 # Regression tests for Darban OVPN. Run: bash tests/run-tests.sh [name-filter]
+# DARBAN_TEST_PART=<i>/<n> runs only part i of n: every n-th test of the sorted list, from the i-th on. CI runs
+# the parts side by side, and together they are the whole suite.
 #
 # Each test gets a fresh fake server (see fake-server.sh) and drives the real entry points: the
 # manager's menu and commands, and the CRL maintainer. Only synthetic data under a temp directory.
@@ -11,6 +13,11 @@ set -uo pipefail
 HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 REPO=$(cd "$HERE/.." && pwd)
 FILTER=${1:-}
+PART=${DARBAN_TEST_PART:-1/1}
+if [[ ! $PART =~ ^([1-9][0-9]*)/([1-9][0-9]*)$ ]] || (( BASH_REMATCH[1] > BASH_REMATCH[2] )); then
+    printf 'DARBAN_TEST_PART must be <i>/<n> with 1 <= i <= n, not: %s\n' "$PART" >&2; exit 2
+fi
+PART_INDEX=$(( BASH_REMATCH[1] - 1 )) PARTS=${BASH_REMATCH[2]}
 export MSYS2_ARG_CONV_EXCL='*' LC_ALL=C.UTF-8 NO_COLOR=1
 # The one more try of a failed snap install comes at once.
 export DARBAN_SNAP_RETRY_DELAY=0
@@ -1402,6 +1409,49 @@ test_one_address_cannot_hold_every_connection() {
     out=$(python3 "$REPO/tests/slow-clients.py" "$url" 20 6); rc_is 'the link still opens from another address' 0 "$?"
     has 'one address holds 8 connections, no more' 'held 8 slow connections; the page opened: yes' "$out"
     out=$(web "$url"); has 'once they are gone, that address opens it again' 'Download profile' "$out"
+    stop_links_stub
+}
+
+test_a_new_link_does_not_cut_a_download() {
+    # A new link does not restart a link service that stays: a restart would cut a request in progress. A request
+    # for the first link waits half sent while the second is made, and must then get its page whole. The profile
+    # is small enough to sit in the kernel's buffer before a restart, so a slow download would prove nothing.
+    local a b pid held try out
+    start_links_stub
+    a=$(new_link alice)
+    pid=$(cat "$LINKS_PIDFILE")
+    ok_if 'the service says it serves, and what it runs' grep -qx "$pid" "$E/links/.serving"
+    python3 "$REPO/tests/held-request.py" "$a" "$E/go" >"$E/held.out" 2>&1 &
+    held=$!
+    for (( try = 0; try < 100; try++ )); do [[ -e $E/go.ready ]] && break; sleep 0.1; done
+    b=$(new_link alice)
+    : > "$E/go"
+    wait "$held"; rc_is 'the request in progress gets its answer' 0 "$?"
+    has 'and its whole page' 'Download profile' "$(cat "$E/held.out")"
+    [[ $(cat "$LINKS_PIDFILE") == "$pid" ]] && kill -0 "$pid"; rc_is 'the service was not restarted' 0 "$?"
+    [[ $(link_code "$b") == 200 ]]; rc_is 'and it serves the new link' 0 "$?"
+
+    # It runs a source that is no longer the one installed, as after an update: the next link starts the new one.
+    sed -i '2s/.*/0000000000000000000000000000000000000000000000000000000000000000/' "$E/links/.serving"
+    b=$(new_link alice)
+    [[ $(cat "$LINKS_PIDFILE") != "$pid" ]]; rc_is 'a service that runs another source is restarted' 0 "$?"
+    [[ $(link_code "$b") == 200 ]]; rc_is 'and the link opens' 0 "$?"
+
+    # One that has begun to end has taken .serving back: the next link starts it again, and the link opens.
+    pid=$(cat "$LINKS_PIDFILE")
+    rm -f "$E/links/.serving"
+    b=$(new_link alice)
+    [[ $(cat "$LINKS_PIDFILE") != "$pid" ]]; rc_is 'a service that is ending is started again' 0 "$?"
+    [[ $(link_code "$b") == 200 ]]; rc_is 'and that link opens too' 0 "$?"
+
+    # A service that ends by itself, with no link left, takes .serving back first.
+    pid=$(cat "$LINKS_PIDFILE")
+    rm -f "$E"/links/*.meta
+    for (( try = 0; try < 50; try++ )); do kill -0 "$pid" 2>/dev/null || break; sleep 0.1; done
+    kill -0 "$pid" 2>/dev/null; rc_is 'with no link left, the service ends' 1 "$?"
+    ok_if 'and no longer says it serves' test ! -e "$E/links/.serving"
+    out=$(new_link alice)
+    [[ $(link_code "$out") == 200 ]]; rc_is 'the next link starts it again' 0 "$?"
     stop_links_stub
 }
 
@@ -6386,7 +6436,9 @@ test_the_download_panel_never_reads_a_file_without_a_record() {
 if [[ -n ${RUN_TESTS_EXTRA:-} ]]; then source "$RUN_TESTS_EXTRA"; fi
 mapfile -t TESTS < <(declare -F | awk '$3 ~ /^test_/ {print $3}' | sort)
 SELECTED=0
-for t in "${TESTS[@]}"; do
+for TEST_INDEX in "${!TESTS[@]}"; do
+    t=${TESTS[TEST_INDEX]}
+    (( TEST_INDEX % PARTS == PART_INDEX )) || continue
     [[ -z $FILTER || $t == *"$FILTER"* ]] || continue
     SELECTED=$((SELECTED + 1))
     CURRENT=$t
@@ -6403,6 +6455,7 @@ done
 # A filter that matches no test runs nothing, and must not pass either.
 if (( SELECTED == 0 )); then printf 'No test matches: %s\n' "$FILTER" >&2; exit 1; fi
 RUN_DONE=1
+if (( PARTS > 1 )); then printf '\nPart %d of %d: %d of the %d tests\n' "$((PART_INDEX + 1))" "$PARTS" "$SELECTED" "${#TESTS[@]}"; fi
 printf '\n%d tests, %d passed, %d failed, %d tests skipped here\n' "$SELECTED" "$PASS" "$FAIL" "${#SKIPPED[@]}"
 if (( ${#SKIPPED[@]} )); then printf 'Skipped here:\n'; printf '  %s\n' "${SKIPPED[@]}"; fi
 if (( FAIL > 0 )); then printf 'Failed:\n'; printf '  %s\n' "${FAILED[@]}"; exit 1; fi
