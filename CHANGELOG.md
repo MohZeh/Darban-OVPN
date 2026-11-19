@@ -4,6 +4,27 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## [Unreleased]
 
+## [1.0.1] - 2026-11-20
+
+Fixes and hardening after `v1.0.0`, from its test on a real server and from a review of the code since. A server on `v1.0.0-rc.6` or later reaches it from the menu (Setup › 2) or with `sudo darban update`. Where connection events are already on, as `v1.0.0` turns them on, the update does not restart OpenVPN.
+
+### Added
+- **A restore names a backup of another server.** When the backup's server address is a public IPv4, or a name of one, that is not this server's, the preview of `sudo darban restore` says so before anything changes, and Diagnostics keep saying so after it: the profiles made from then on would send clients to the old server. Change it in Settings › 1, then share each client again. Behind NAT this cannot be told, and nothing is said.
+
+### Changed
+- **The link service sees less, and does less.** Besides what `v1.0.0` hid from it, the SSH host keys, the other private keys under `/etc/ssl/private` and the logs are hidden from it too, and it may make only the system calls of an ordinary service.
+- `/var/log/darban-setup.log` says when each slow part of the install began and how long it took, in lines that start with `==`: the package step, apt, and certbot. A certbot install from the menu is timed in this tool's journal. A slow install can be read with `grep '^==' /var/log/darban-setup.log`.
+
+### Fixed
+- **A new link no longer cuts a download of another link.** Each link restarted the link service, so someone opening a link at that moment got an error and had to try again. A link service that is running now takes a new link as it is, and only a reload brings it a changed certificate.
+- One address could hold every connection of the link service by sending its requests a byte at a time, and then no link opened for anyone. One address now holds at most 8 at a time.
+- **Diagnostics said "VPN clients are kept apart" when `server.conf` has `client-to-client`.** With that line, OpenVPN passes traffic between clients itself, past the firewall rules that keep them apart. Diagnostics now say so, with how to remove it. The setup never writes it.
+- `sudo darban restore --resume` and `--rollback` act only on a journal whose working folder is the one a restore made beside it. A journal that names any other folder is reported as unreadable, with nothing changed.
+- On a public address, the setup no longer waits for the certbot snap when snapd does not answer. The VPN install goes on, and the first link tries again.
+
+### Going back to v1.0.0
+Setup › Restore previous version goes back to `v1.0.0`. A link service of this version still running then ends at the next link, which starts the one of `v1.0.0`.
+
 ## [1.0.0] - 2026-11-18
 
 The first stable release. It replaces `v1.0.0-rc.10`, with the changes from its test on a real server and from the reviews before this release: OpenVPN tells the tool of each connection, a profile kept on the server ends like a link, the CA can be backed up encrypted and restored, the link service sees less, and the busiest screens are simpler. The sections of the release candidates below record the way here. A server on `v1.0.0-rc.6` or later reaches it from the menu (Setup › 2) or with `sudo darban update`. The update restarts OpenVPN once, to turn connection events on, and says so first: connected users drop for a few seconds and reconnect by themselves.

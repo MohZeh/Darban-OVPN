@@ -36,7 +36,7 @@ ssh root@203.0.113.10
 </div>
 
 ```bash
-sudo bash -c 'curl -fsSL https://github.com/MohZeh/Darban-OVPN/releases/download/v1.0.0/get.sh | bash'
+sudo bash -c 'curl -fsSL https://github.com/MohZeh/Darban-OVPN/releases/download/v1.0.1/get.sh | bash'
 ```
 
 <div dir="rtl">
