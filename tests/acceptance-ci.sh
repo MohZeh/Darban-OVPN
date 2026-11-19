@@ -20,6 +20,16 @@ dump() {
     ip netns del "$NS" 2>/dev/null || true
 }
 trap 'echo "FAILED at line $LINENO"; dump' ERR
+setup_times() {
+    # setup_times <label>: how long each slow part of the setup took, in the summary of every run, not only a failed
+    # one, so the weekly runs keep a record of how long installs take. The lines hold labels and times only.
+    local times
+    times=$(grep '^==' /var/log/darban-setup.log 2>/dev/null || true)
+    printf 'Setup times:\n%s\n' "${times:-none recorded}"
+    if [[ -n ${GITHUB_STEP_SUMMARY:-} ]]; then
+        printf '**Setup times, %s**\n\n```\n%s\n```\n' "$1" "${times:-none recorded}" >>"$GITHUB_STEP_SUMMARY"
+    fi
+}
 
 connect() {
     # connect <profile> <log>: 0 when the tunnel comes up within 20 seconds.
@@ -93,6 +103,7 @@ grep -E 'Detected address|could not be detected' "$LOG/setup.log"
 grep -qx setup_complete /etc/darban/.server-setup-started
 if grep -q 'Unpacking\|Setting up' "$LOG/setup.log"; then echo 'FAIL: apt output reached the install screen.'; exit 1; fi
 echo 'PASS: a real install in a real terminal, on a quiet screen.'
+setup_times "Ubuntu $VERSION_ID, acceptance"
 if (( USE_UFW )); then
     ufw status | grep '^1194/udp' >/dev/null
     ufw status | grep 'tun0' >/dev/null
@@ -421,9 +432,18 @@ fi
 # A path with a smaller MTU that drops IP fragments, as many mobile and home networks do: without the TCP
 # size rule a website does not load through the VPN, with it it does. Fragments are dropped before the
 # kernel would put them together again.
-# Redirects are followed: from some runners' addresses the site first answers with a short redirect, which is
-# not the page and would read as a website that did not load.
-website() { ip netns exec "$NS" curl -4 -sS -L --max-redirs 5 -o /dev/null --max-time 20 -w '%{size_download}' https://www.google.com/ 2>/dev/null || true; }
+# Two sources, so a site that answers one runner's address with a short page does not decide it: exactly 300000
+# bytes from Cloudflare's speed test, or Google's page, at least 10000 bytes. Redirects are followed, since from some
+# addresses Google first answers with a short redirect. Prints what arrived; true when either one loaded.
+website() {
+    local fixed page
+    fixed=$(ip netns exec "$NS" curl -4 -sS -o /dev/null --max-time 20 -w '%{size_download}' 'https://speed.cloudflare.com/__down?bytes=300000' 2>/dev/null || true)
+    page=$(ip netns exec "$NS" curl -4 -sS -L --max-redirs 5 -o /dev/null --max-time 20 -w '%{size_download}' https://www.google.com/ 2>/dev/null || true)
+    [[ $fixed =~ ^[0-9]+$ ]] || fixed=0
+    [[ $page =~ ^[0-9]+$ ]] || page=0
+    printf '%s of 300000 bytes from Cloudflare, %s bytes of Google' "$fixed" "$page"
+    (( fixed == 300000 || page >= 10000 ))
+}
 ip link set dt0 mtu 1400
 ip netns exec "$NS" ip link set dt1 mtu 1400
 nft add table ip darbantest
@@ -433,15 +453,17 @@ ip netns exec "$NS" nft add table ip darbantest
 ip netns exec "$NS" nft add chain ip darbantest pre '{ type filter hook prerouting priority -500; }'
 ip netns exec "$NS" nft add rule ip darbantest pre iifname dt1 ip frag-off '&' 0x3fff != 0 drop
 for handle in $(nft -a list chain ip darban forward | awk '/maxseg/ {print $NF}'); do nft delete rule ip darban forward handle "$handle"; done
-without=$(website)
-echo "Without the TCP size rule, on a 1400-byte path that drops fragments: ${without:-0} bytes of a website arrived"
+without_loaded=0
+without=$(website) && without_loaded=1
+echo "Without the TCP size rule, on a 1400-byte path that drops fragments: $without"
 darban status >"$LOG/no-mss.log" 2>&1 || true
 grep -q 'The TCP MSS rule for VPN traffic is missing or different' "$LOG/no-mss.log"
 systemctl restart darban-nat.service
-with=$(website)
-echo "With the rule: ${with:-0} bytes arrived"
-if [[ ! ${with:-0} =~ ^[0-9]+$ ]] || (( ${with:-0} < 10000 )); then echo 'FAIL: a website did not load through the VPN on a path with a smaller MTU.'; exit 1; fi
-if [[ ${without:-0} =~ ^[0-9]+$ ]] && (( ${without:-0} >= 10000 )); then
+with_loaded=0
+with=$(website) && with_loaded=1
+echo "With the rule: $with"
+if (( ! with_loaded )); then echo 'FAIL: a website did not load through the VPN on a path with a smaller MTU.'; exit 1; fi
+if (( without_loaded )); then
     echo 'NOTE: this runner did not lose large packets even without the rule, so only the result with it is judged.'
 fi
 darban status >"$LOG/mss.log" 2>&1
@@ -526,6 +548,10 @@ fi
 # A real temporary link: it can be opened again until the client connects, and then it ends.
 url=$(printf '5\naccept1\n1\n1\n0\n' | darban | grep -oE 'https://[^ ]+/l/[0-9a-f]{64}')
 curl -ksf "$url" | grep 'Download profile' >/dev/null
+# Clients that send their request a byte at a time, from one address, must not keep a person elsewhere from opening
+# a link: the unit allows 64 tasks, one thread for each connection.
+python3 tests/slow-clients.py "$url" 80 40 || { echo 'FAIL: slow clients from one address kept the link from opening.'; exit 1; }
+echo 'PASS: slow clients from one address do not keep the link from opening.'
 
 # The link service sees only what it needs. From inside its mount namespace, the link key and the link files are
 # there, which also shows that nsenter reached it; every path its unit hides, that has something in it here, shows
@@ -536,7 +562,7 @@ inside() { nsenter -t "$pid" -m -- "$@"; }
 inside test -s /etc/darban/link-key.pem
 [[ -n $(inside ls -A /run/darban-links) ]]
 hidden=0
-for path in /etc/openvpn /etc/letsencrypt /var/backups/darban-pki /var/lib/darban /run/darban-events /run/openvpn-server /etc/shadow /etc/gshadow; do
+for path in /etc/openvpn /etc/letsencrypt /var/backups/darban-pki /var/lib/darban /run/darban-events /run/openvpn-server /etc/shadow /etc/gshadow /etc/ssh /etc/ssl/private /var/log; do
     if [[ -d $path && -n $(ls -A "$path") ]]; then
         [[ -z $(inside ls -A "$path" 2>/dev/null) ]] || { echo "FAIL: the link service sees what is in $path."; exit 1; }
     elif [[ -f $path && -s $path ]]; then
@@ -546,11 +572,17 @@ for path in /etc/openvpn /etc/letsencrypt /var/backups/darban-pki /var/lib/darba
     fi
     hidden=$((hidden + 1))
 done
-# /etc/openvpn, /run/openvpn-server, /etc/shadow and /etc/gshadow always have something in them here.
-(( hidden >= 4 )) || { echo "FAIL: only $hidden of the hidden paths could be checked."; exit 1; }
+# /etc/openvpn, /run/openvpn-server, /etc/shadow, /etc/gshadow, /etc/ssh and /var/log always have something in
+# them here.
+(( hidden >= 6 )) || { echo "FAIL: only $hidden of the hidden paths could be checked."; exit 1; }
 families=$(systemctl show -p RestrictAddressFamilies --value darban-links.service)
 [[ $families == *AF_INET* && $families != *AF_UNIX* ]] || { echo "FAIL: the link service may open: $families"; exit 1; }
 echo "PASS: the link service sees the link key and its files, and none of $hidden paths it has no use for, and opens no unix socket."
+[[ $(systemctl show -p SystemCallFilter --value darban-links.service) == *read* ]] || { echo 'FAIL: the link service has no system call filter.'; exit 1; }
+# A number to compare from one run to the next, not a gate: lower means less exposed.
+exposure=$(systemd-analyze security darban-links.service 2>/dev/null | sed -n 's/.*Overall exposure level for [^:]*: *//p' || true)
+echo "systemd-analyze security, darban-links.service: ${exposure:-not reported}"
+if [[ -n ${GITHUB_STEP_SUMMARY:-} ]]; then echo "Link service exposure (systemd-analyze security): ${exposure:-not reported}" >> "$GITHUB_STEP_SUMMARY"; fi
 curl -ksf -H 'Accept-Language: fa-IR,fa;q=0.9' "$url" | grep 'dir="rtl"' >/dev/null
 curl -ksf "$url/file" -o "$LOG/link.ovpn"
 grep -q '<key>' "$LOG/link.ovpn"

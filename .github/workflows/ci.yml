@@ -2,7 +2,10 @@ name: CI
 on:
   push:
     branches: [main]
+  # A draft runs Lint only. The slow tests start when it is marked ready, so pull requests waiting in line are not
+  # tested against a main that the next merge changes anyway. Converting one to a draft cancels its run.
   pull_request:
+    types: [opened, synchronize, reopened, ready_for_review, converted_to_draft]
   # Weekly: OpenVPN's repository and Ubuntu's kernels change without any commit here.
   schedule:
     - cron: '17 3 * * 1'
@@ -34,8 +37,8 @@ jobs:
       pull-requests: read
     outputs:
       # The slow tests are skipped for documentation only, for a push to main whose exact files its pull request
-      # already tested green, and for a manual run that asks for the reboot and arm64 tests only.
-      code: ${{ (steps.tested.outputs.tested == 'true' || inputs.vm_only) && 'false' || steps.scope.outputs.code }}
+      # already tested green, for a manual run that asks for the reboot and arm64 tests only, and for a draft.
+      code: ${{ (steps.tested.outputs.tested == 'true' || inputs.vm_only || github.event.pull_request.draft) && 'false' || steps.scope.outputs.code }}
       tree: ${{ steps.source.outputs.tree }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -117,6 +120,9 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      # A mirror that is down or slow must not decide a test: the fastest one goes first.
+      - name: Fastest apt mirror first
+        run: sudo GITHUB_STEP_SUMMARY="$GITHUB_STEP_SUMMARY" bash scripts/ci-apt-mirrors.sh
       - name: Confirm the Ubuntu version
         env:
           EXPECTED: ${{ matrix.ubuntu }}
@@ -168,6 +174,9 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      # A mirror that is down or slow must not decide a test: the fastest one goes first.
+      - name: Fastest apt mirror first
+        run: sudo GITHUB_STEP_SUMMARY="$GITHUB_STEP_SUMMARY" bash scripts/ci-apt-mirrors.sh
       - name: Confirm the Ubuntu version
         env:
           EXPECTED: ${{ matrix.ubuntu }}
@@ -196,6 +205,9 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      # A mirror that is down or slow must not decide a test: the fastest one goes first.
+      - name: Fastest apt mirror first
+        run: sudo GITHUB_STEP_SUMMARY="$GITHUB_STEP_SUMMARY" bash scripts/ci-apt-mirrors.sh
       - name: The runner must not already have a PKI or server
         run: sudo test ! -e /root/pki && test ! -e /etc/openvpn/server/server.conf
       - name: Real setup on a public address, and its removal
@@ -215,6 +227,9 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      # A mirror that is down or slow must not decide a test: the fastest one goes first.
+      - name: Fastest apt mirror first
+        run: sudo GITHUB_STEP_SUMMARY="$GITHUB_STEP_SUMMARY" bash scripts/ci-apt-mirrors.sh
       - name: The runner must not already have a PKI or server
         run: sudo test ! -e /root/pki && test ! -e /etc/openvpn/server/server.conf
       - name: rc.10 from its release, the update to this code, Restore previous version, and back
@@ -236,6 +251,9 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      # A mirror that is down or slow must not decide a test: the fastest one goes first.
+      - name: Fastest apt mirror first
+        run: sudo GITHUB_STEP_SUMMARY="$GITHUB_STEP_SUMMARY" bash scripts/ci-apt-mirrors.sh
       - name: The runner must not already have a PKI or server
         run: sudo test ! -e /root/pki && test ! -e /etc/openvpn/server/server.conf
       - name: Backup, refused restores, and a restore on a new server
@@ -303,11 +321,17 @@ jobs:
           ARM: ${{ needs.acceptance-arm.result }}
           REBOOT: ${{ needs.reboot.result }}
           VM_ONLY: ${{ inputs.vm_only && 'true' || 'false' }}
+          DRAFT: ${{ github.event.pull_request.draft && 'true' || 'false' }}
           TREE: ${{ needs.lint.outputs.tree }}
         run: |
           echo "Lint: $LINT, Test: $TEST, Acceptance: $ACCEPTANCE, public address: $PUBLIC, from rc.10: $RC10, restore: $RESTORE, arm64: $ARM, reboot: $REBOOT, code changed: $CODE, reboot and arm64 only: $VM_ONLY"
           echo "Tree $TREE" >> "$GITHUB_STEP_SUMMARY"
           test "$LINT" = success
+          # A draft is never a pass: its slow tests did not run, and a skipped required check would count as passed.
+          if [ "$DRAFT" = true ]; then
+            echo 'Draft: the slow tests run when it is marked ready.' | tee -a "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
           if [ "$VM_ONLY" = true ]; then
             # What this run was asked for must have run, not been skipped.
             test "$REBOOT" = success

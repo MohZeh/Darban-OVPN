@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Fast repository checks: file modes, line endings, documentation links, documented commands, the Setup numbers
-the guides give, claims the guides must not make, and the commands, paths and versions both languages share.
+the guides give, claims the guides must not make, the commands, paths and versions both languages share, and shell
+functions that hand back a value in a global but run where a subshell loses it.
 
 Run from anywhere inside the repository: python3 scripts/check-repo.py
 """
@@ -117,6 +118,52 @@ def parity_problems(root, names):
     return problems
 
 
+FUNCTION = re.compile(r'^([a-z_][a-z0-9_]*)\(\)\s*\{')
+# A global set as a statement of its own: NAME=value, then the end of that statement. NAME=value cmd only sets it
+# for cmd, so it is not a value handed back.
+GLOBAL_SET = re.compile(r'''(?:^|[;{(]|&&|\|\||\bthen\b|\bdo\b|\belse\b)\s*([A-Z][A-Z0-9_]{2,})\+?=("[^"]*"|'[^']*'|\$\([^()]*\)|[^\s;|&)]*)(?=\s*($|;|&&|\|\||\}|\)|#))''')
+DECLARED = re.compile(r'\b(?:local|declare|readonly)\s+(?:-[a-zA-Z]+\s+)*([^;|&]+)')
+
+
+def shell_functions(text):
+    """Each function of a shell file, as name -> its lines, for functions that start at the left margin."""
+    found, name, body = {}, None, []
+    for line in text.splitlines():
+        match = FUNCTION.match(line)
+        if name is None and match:
+            name, body = match.group(1), [line]
+            if line.rstrip().endswith('}'):
+                found[name], name = body, None
+            continue
+        if name is not None:
+            body.append(line)
+            if line == '}':
+                found[name], name = body, None
+    return found
+
+
+def subshell_global_problems(root, paths):
+    """A function that hands back a value in a global, such as PICKED or BACKUP_WHY, loses that value without a word
+    when it runs in a subshell: inside $( ), or on either side of a pipe. Only direct calls are found."""
+    texts = {path: (root / path).read_text(encoding='utf-8') for path in paths}
+    setters = {}
+    for text in texts.values():
+        for name, body in shell_functions(text).items():
+            declared = {word.split('=')[0] for line in body for match in DECLARED.finditer(line) for word in match.group(1).split()}
+            names = {m.group(1) for line in body for m in GLOBAL_SET.finditer(line.split(' #', 1)[0])} - declared - {'IFS'}
+            if names:
+                setters[name] = names
+    problems = []
+    for path, text in sorted(texts.items()):
+        for number, line in enumerate(text.splitlines(), 1):
+            code = line.split(' #', 1)[0]
+            for name, names in setters.items():
+                if (re.search(rf'\$\(\s*{name}\b', code) or re.search(rf'(?<!\|)\|\s*{name}\b', code)
+                        or re.match(rf'\s*{name}\b[^|]*(?<!\|)\|(?!\|)', code)):
+                    problems.append(f'{path}:{number}: {name} sets {", ".join(sorted(names))}, which a subshell here loses')
+    return problems
+
+
 def main():
     root = pathlib.Path(git('rev-parse', '--show-toplevel').strip())
     problems = []
@@ -159,6 +206,9 @@ def main():
 
     problems += setup_problems(root, setup_items(root))
     problems += parity_problems(root, guides['en'] & guides['fa'])
+    shell = [p for p in tracked if re.fullmatch(r'(bin/[^/]+|lib/[^/]+\.sh|setup/[^/]+\.sh)', p) and (root / p).is_file()
+             and (p.endswith('.sh') or 'bash' in (root / p).read_text(encoding='utf-8', errors='replace').split('\n', 1)[0])]
+    problems += subshell_global_problems(root, shell)
 
     for problem in problems:
         print(f'ERROR: {problem}', file=sys.stderr)
