@@ -22,7 +22,9 @@ ReadWritePaths=/run/darban-links
 # What this service does not need is not there for it: OpenVPN's keys and server.conf, other certificates, the CA
 # backups, the journal of this tool, the connection events, password hashes, and OpenVPN's management interface,
 # which takes commands. Without server.conf it never asks that interface; the five-minute check does, as root.
-InaccessiblePaths=-/etc/openvpn -/etc/letsencrypt -/var/backups/darban-pki -/var/lib/darban -/run/darban-events -/run/openvpn-server -/etc/shadow -/etc/gshadow
+# The SSH host keys too, which would let someone pose as this server, other private keys under /etc/ssl/private,
+# and the logs, the system journal among them, which hold the same client names as the journal of this tool.
+InaccessiblePaths=-/etc/openvpn -/etc/letsencrypt -/var/backups/darban-pki -/var/lib/darban -/run/darban-events -/run/openvpn-server -/etc/shadow -/etc/gshadow -/etc/ssh -/etc/ssl/private -/var/log
 CapabilityBoundingSet=CAP_NET_BIND_SERVICE
 ProtectKernelTunables=true
 ProtectKernelModules=true
@@ -37,3 +39,6 @@ RestrictRealtime=true
 RestrictSUIDSGID=true
 LockPersonality=true
 SystemCallArchitectures=native
+# Only the system calls of an ordinary service. One outside them fails with EPERM instead of killing the service.
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
