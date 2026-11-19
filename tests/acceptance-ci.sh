@@ -421,9 +421,18 @@ fi
 # A path with a smaller MTU that drops IP fragments, as many mobile and home networks do: without the TCP
 # size rule a website does not load through the VPN, with it it does. Fragments are dropped before the
 # kernel would put them together again.
-# Redirects are followed: from some runners' addresses the site first answers with a short redirect, which is
-# not the page and would read as a website that did not load.
-website() { ip netns exec "$NS" curl -4 -sS -L --max-redirs 5 -o /dev/null --max-time 20 -w '%{size_download}' https://www.google.com/ 2>/dev/null || true; }
+# Two sources, so a site that answers one runner's address with a short page does not decide it: exactly 300000
+# bytes from Cloudflare's speed test, or Google's page, at least 10000 bytes. Redirects are followed, since from some
+# addresses Google first answers with a short redirect. Prints what arrived; true when either one loaded.
+website() {
+    local fixed page
+    fixed=$(ip netns exec "$NS" curl -4 -sS -o /dev/null --max-time 20 -w '%{size_download}' 'https://speed.cloudflare.com/__down?bytes=300000' 2>/dev/null || true)
+    page=$(ip netns exec "$NS" curl -4 -sS -L --max-redirs 5 -o /dev/null --max-time 20 -w '%{size_download}' https://www.google.com/ 2>/dev/null || true)
+    [[ $fixed =~ ^[0-9]+$ ]] || fixed=0
+    [[ $page =~ ^[0-9]+$ ]] || page=0
+    printf '%s of 300000 bytes from Cloudflare, %s bytes of Google' "$fixed" "$page"
+    (( fixed == 300000 || page >= 10000 ))
+}
 ip link set dt0 mtu 1400
 ip netns exec "$NS" ip link set dt1 mtu 1400
 nft add table ip darbantest
@@ -433,15 +442,17 @@ ip netns exec "$NS" nft add table ip darbantest
 ip netns exec "$NS" nft add chain ip darbantest pre '{ type filter hook prerouting priority -500; }'
 ip netns exec "$NS" nft add rule ip darbantest pre iifname dt1 ip frag-off '&' 0x3fff != 0 drop
 for handle in $(nft -a list chain ip darban forward | awk '/maxseg/ {print $NF}'); do nft delete rule ip darban forward handle "$handle"; done
-without=$(website)
-echo "Without the TCP size rule, on a 1400-byte path that drops fragments: ${without:-0} bytes of a website arrived"
+without_loaded=0
+without=$(website) && without_loaded=1
+echo "Without the TCP size rule, on a 1400-byte path that drops fragments: $without"
 darban status >"$LOG/no-mss.log" 2>&1 || true
 grep -q 'The TCP MSS rule for VPN traffic is missing or different' "$LOG/no-mss.log"
 systemctl restart darban-nat.service
-with=$(website)
-echo "With the rule: ${with:-0} bytes arrived"
-if [[ ! ${with:-0} =~ ^[0-9]+$ ]] || (( ${with:-0} < 10000 )); then echo 'FAIL: a website did not load through the VPN on a path with a smaller MTU.'; exit 1; fi
-if [[ ${without:-0} =~ ^[0-9]+$ ]] && (( ${without:-0} >= 10000 )); then
+with_loaded=0
+with=$(website) && with_loaded=1
+echo "With the rule: $with"
+if (( ! with_loaded )); then echo 'FAIL: a website did not load through the VPN on a path with a smaller MTU.'; exit 1; fi
+if (( without_loaded )); then
     echo 'NOTE: this runner did not lose large packets even without the rule, so only the result with it is judged.'
 fi
 darban status >"$LOG/mss.log" 2>&1
