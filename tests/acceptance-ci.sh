@@ -552,6 +552,11 @@ done
 families=$(systemctl show -p RestrictAddressFamilies --value darban-links.service)
 [[ $families == *AF_INET* && $families != *AF_UNIX* ]] || { echo "FAIL: the link service may open: $families"; exit 1; }
 echo "PASS: the link service sees the link key and its files, and none of $hidden paths it has no use for, and opens no unix socket."
+[[ $(systemctl show -p SystemCallFilter --value darban-links.service) == *read* ]] || { echo 'FAIL: the link service has no system call filter.'; exit 1; }
+# A number to compare from one run to the next, not a gate: lower means less exposed.
+exposure=$(systemd-analyze security darban-links.service 2>/dev/null | sed -n 's/.*Overall exposure level for [^:]*: *//p' || true)
+echo "systemd-analyze security, darban-links.service: ${exposure:-not reported}"
+if [[ -n ${GITHUB_STEP_SUMMARY:-} ]]; then echo "Link service exposure (systemd-analyze security): ${exposure:-not reported}" >> "$GITHUB_STEP_SUMMARY"; fi
 curl -ksf -H 'Accept-Language: fa-IR,fa;q=0.9' "$url" | grep 'dir="rtl"' >/dev/null
 curl -ksf "$url/file" -o "$LOG/link.ovpn"
 grep -q '<key>' "$LOG/link.ovpn"
