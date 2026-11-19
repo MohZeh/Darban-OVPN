@@ -3622,6 +3622,16 @@ test_repo_checks_find_problems() {
     printf '\n```\nsudo darban status\n```\n' >>"$dir/docs/en/usage.md"
     printf '\n```\nsudo darban status --verbose\n```\n' >>"$dir/docs/fa/usage.md"
     out=$(check); rc_not0 'a code block that differs fails' "$?"; has 'it names the block' 'code block 1 differs' "$out"
+    cp "$dir/docs/en/usage.md" "$dir/docs/fa/usage.md"
+
+    # A function that hands back a value in a global loses it in a subshell. A prefix such as X=1 cmd, and a local,
+    # are no value handed back.
+    printf 'pick() {\n    PICKED=$1\n}\nshow() {\n    local NAME=x\n}\nv=$(DARBAN_T=1 awk 1)\nw=$(show)\n' >>"$dir/setup/a.sh"
+    out=$(check); rc_is 'a prefix or a local in a subshell passes' 0 "$?"
+    printf 'x=$(pick y)\n' >>"$dir/setup/a.sh"
+    out=$(check); rc_not0 'a function that sets a global, in $( ), fails' "$?"; has 'it names the call' 'setup/a.sh:10: pick sets PICKED' "$out"
+    sed -i '$d' "$dir/setup/a.sh"; printf 'pick z | cat\n' >>"$dir/setup/a.sh"
+    out=$(check); rc_not0 'and on the left of a pipe' "$?"; has 'it names that call' 'setup/a.sh:10: pick sets PICKED' "$out"
 }
 
 # ---------- PR 1: revocation cleanup by certificate, and Remove everything that reports every failure ----------
