@@ -2459,6 +2459,8 @@ test_setup_screen_is_quiet() {
     grep -Eq '^== apt update: [0-9]+ s, exit 0$' "$E/setup.log"; rc_is 'and how long it took' 0 "$?"
     grep -Eq '^== apt install: [0-9]+ s, exit 0$' "$E/setup.log"; rc_is 'the package install is timed too' 0 "$?"
     lacks 'the times stay off the screen' '== apt' "$out"
+    # The update before the question is timed too, and written once the log exists.
+    grep -Eq '^== apt update while checking this server: [0-9]+ s, exit 0$' "$E/setup.log"; rc_is 'the check before the question is timed' 0 "$?"
 
     prepare_blank_server_again
     sed -i '1a echo LAST-WORDS-OF-APT' "$E/bin/systemctl"
@@ -3391,6 +3393,8 @@ test_old_certbot_is_not_used_for_an_ip() {
     out=$(printf '5\nalice\n1\n1\n1\n0\n' | FAKE_SNAP_RC=1 bash "$E/manager.sh" 2>&1)
     if grep -q '^certbot certonly' "$STUB_LOG"; then result 0 'certbot 4.0 is never asked for an IP'; else result 1 'certbot 4.0 is never asked for an IP'; fi
     grep -q 'snap install --classic certbot' "$STUB_LOG"; rc_is 'the Certbot snap is tried instead' 0 "$?"
+    grep -Eq 'certbot from the snap store: [0-9]+ s, exit 1$' "$STUB_LOG"; rc_is 'the journal says how long the failed snap took' 0 "$?"
+    lacks 'and the screen does not' 's, exit 1' "$out"
     has 'a failed install falls back to a working link' "https://203.0.113.9:$LINK_TEST_PORT/l/" "$out"
     menu '6\n1\n2\n0\n' >/dev/null
     # Without snap there is no way to a new enough certbot, so the question is not asked at all.

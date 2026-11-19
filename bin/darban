@@ -1402,16 +1402,25 @@ record_added() {
 install_certbot() {
     # install_certbot <minimum version>: Ubuntu's own package when it is new enough; otherwise the Certbot
     # project's snap. There is no third way: get_trusted_cert does not offer one without snap.
-    local need=$1
-    apt-get -o DPkg::Lock::Timeout=120 -qq update >/dev/null || true
+    # How long each part took goes to the journal (journalctl -t darban), so a slow one shows where the time went.
+    local need=$1 start rc=0
+    start=$SECONDS
+    apt-get -o DPkg::Lock::Timeout=120 -qq update >/dev/null || rc=$?
+    audit "certbot install, apt update: $((SECONDS - start)) s, exit $rc"
+    rc=0
+    start=$SECONDS
     if [[ $need == 0 ]]; then
         info "Installing certbot from Ubuntu${S_ELL}"
-        apt-get -o DPkg::Lock::Timeout=120 -y -q --no-install-recommends install certbot >/dev/null || return 1
+        apt-get -o DPkg::Lock::Timeout=120 -y -q --no-install-recommends install certbot >/dev/null || rc=$?
+        audit "certbot from apt: $((SECONDS - start)) s, exit $rc"
+        (( rc == 0 )) || return 1
         record_added 'package certbot'
     else
         info "Installing certbot from the Certbot project (snap)${S_ELL}"
         # Recorded for removal only when this install put it here; one that was there is only refreshed.
-        darban_snap_install_certbot "$CONFIG_DIR/.server-setup-started" || return 1
+        darban_snap_install_certbot "$CONFIG_DIR/.server-setup-started" || rc=$?
+        audit "certbot from the snap store: $((SECONDS - start)) s, exit $rc"
+        (( rc == 0 )) || return 1
     fi
 }
 get_trusted_cert() {
