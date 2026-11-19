@@ -4639,7 +4639,10 @@ network_rules_health() {
             check ok "NAT for the VPN network $net/24 present"
         fi
     fi
-    if darban_live_isolation_ok "$net"; then
+    # With client-to-client, OpenVPN passes traffic between clients itself, so it never reaches these rules.
+    if awk '$1 == "client-to-client" {found = 1} END {exit !found}' "$DARBAN_SERVER_CONF" 2>/dev/null; then
+        check bad "VPN clients reach each other: server.conf has client-to-client, so OpenVPN passes their traffic itself, past the firewall $S_ARROW remove that line, then: sudo systemctl restart openvpn-server@server"
+    elif darban_live_isolation_ok "$net"; then
         check ok 'VPN clients are kept apart, and away from the cloud metadata service'
     else
         check bad "VPN clients may reach each other, or the cloud metadata service $S_ARROW $fix"

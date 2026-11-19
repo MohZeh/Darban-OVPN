@@ -2652,6 +2652,13 @@ STUB
     out=$(mgr status)
     has 'both live rules pass' 'VPN clients are kept apart' "$out"
     has 'the TCP size rule passes' 'TCP MSS for VPN traffic is limited to 1280 in both directions' "$out"
+    # client-to-client: OpenVPN passes traffic between clients itself, past these rules, though they are there.
+    printf 'client-to-client\n' >> "$SERVER_CONF"
+    out=$(mgr status)
+    has 'client-to-client in server.conf is reported' 'server.conf has client-to-client' "$out"
+    lacks 'and the rules alone do not pass' 'VPN clients are kept apart' "$out"
+    sed -i '/^client-to-client$/d' "$SERVER_CONF"
+    has 'without it, they pass again' 'VPN clients are kept apart' "$(mgr status)"
     : > "$E/live-input"
     has 'a missing rule for connections to the server itself is reported' 'The TCP MSS rule for VPN traffic is missing or different' "$(mgr status)"
     printf '\t\tip saddr 10.8.0.0/24 tcp flags syn tcp option maxseg size > 1280 tcp option maxseg size set 1280\n' > "$E/live-input"
