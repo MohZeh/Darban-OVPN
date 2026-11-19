@@ -11,7 +11,9 @@ server this tool installed, darban's five-minute check does that instead; when t
 there is no interface, the link lasts until it expires. Until then the page and the file can be opened again, so a mistake on the phone costs nothing.
 Opening the page never uses anything up: messengers fetch links for their previews.
 Standard library only. The process ends by itself once no link is left. SIGHUP reads the certificate again:
-new connections get the new one, and a download in progress finishes on the old one.
+new connections get the new one, and a download in progress finishes on the old one. While it runs, .serving
+says so, with the source it runs, so darban adds a link without a restart, which would end a download in
+progress; it takes that back, under the link lock, the moment it decides to end.
 """
 import argparse
 import contextlib
@@ -127,6 +129,19 @@ class Store:
                     self._drop(key)
                     ended.append(meta['name'])
         return ended
+
+    def leave_if_empty(self, serving):
+        """True when no link is left, and then .serving is gone. darban writes a link, then reads .serving under
+        the same lock: either this sees that link and stays, or .serving is gone and darban starts the service."""
+        with self.locked():
+            for entry in os.listdir(self.directory):
+                if entry.endswith('.meta') and self._read(entry[:-len('.meta')]):
+                    return False
+            try:
+                os.unlink(serving)
+            except FileNotFoundError:
+                pass
+            return True
 
     def purge(self):
         """Removes what has expired and returns how many links remain."""
@@ -419,7 +434,7 @@ class Server(http.server.ThreadingHTTPServer):
         pass
 
 
-def watch(server, store, idle_exit, interval, management):
+def watch(server, store, idle_exit, interval, management, serving):
     idle_since = None
     while True:
         time.sleep(interval)
@@ -432,8 +447,10 @@ def watch(server, store, idle_exit, interval, management):
         elif idle_since is None:
             idle_since = time.time()
         elif time.time() - idle_since >= idle_exit:
-            server.shutdown()
-            return
+            if store.leave_if_empty(serving):
+                server.shutdown()
+                return
+            idle_since = None
 
 
 def pair_paths(cert, key):
@@ -473,6 +490,19 @@ def reload_on_hangup(server, cert, key, marker):
         pass
 
 
+def say_serving(serving):
+    """Writes .serving: this process, and the source it runs, so darban counts on it only while that source is
+    the one installed. After an update the next link starts the new one."""
+    source = os.path.realpath(__file__)
+    try:
+        with open(source, 'rb') as handle:
+            digest = hashlib.sha256(handle.read()).hexdigest()
+        with open(serving, 'w', encoding='utf-8') as handle:
+            handle.write(f'{os.getpid()}\n{digest}\n{source}\n')
+    except OSError:
+        pass
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--dir', required=True)
@@ -493,7 +523,9 @@ def main():
     server.context = tls_context(args.cert, args.key)
     reload_on_hangup(server, args.cert, args.key, os.path.join(args.dir, '.reloadable'))
     management = None if events_on(args.server_conf, args.event_script) else management_address(args.server_conf)
-    threading.Thread(target=watch, args=(server, store, args.idle_exit, args.interval, management), daemon=True).start()
+    serving = os.path.join(args.dir, '.serving')
+    say_serving(serving)
+    threading.Thread(target=watch, args=(server, store, args.idle_exit, args.interval, management, serving), daemon=True).start()
     print(f'listening on TCP {args.port}', flush=True)
     server.serve_forever()
     return 0
