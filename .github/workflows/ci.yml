@@ -120,6 +120,9 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      # A mirror that is down or slow must not decide a test: the fastest one goes first.
+      - name: Fastest apt mirror first
+        run: sudo GITHUB_STEP_SUMMARY="$GITHUB_STEP_SUMMARY" bash scripts/ci-apt-mirrors.sh
       - name: Confirm the Ubuntu version
         env:
           EXPECTED: ${{ matrix.ubuntu }}
@@ -171,6 +174,9 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      # A mirror that is down or slow must not decide a test: the fastest one goes first.
+      - name: Fastest apt mirror first
+        run: sudo GITHUB_STEP_SUMMARY="$GITHUB_STEP_SUMMARY" bash scripts/ci-apt-mirrors.sh
       - name: Confirm the Ubuntu version
         env:
           EXPECTED: ${{ matrix.ubuntu }}
@@ -199,6 +205,9 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      # A mirror that is down or slow must not decide a test: the fastest one goes first.
+      - name: Fastest apt mirror first
+        run: sudo GITHUB_STEP_SUMMARY="$GITHUB_STEP_SUMMARY" bash scripts/ci-apt-mirrors.sh
       - name: The runner must not already have a PKI or server
         run: sudo test ! -e /root/pki && test ! -e /etc/openvpn/server/server.conf
       - name: Real setup on a public address, and its removal
@@ -218,6 +227,9 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      # A mirror that is down or slow must not decide a test: the fastest one goes first.
+      - name: Fastest apt mirror first
+        run: sudo GITHUB_STEP_SUMMARY="$GITHUB_STEP_SUMMARY" bash scripts/ci-apt-mirrors.sh
       - name: The runner must not already have a PKI or server
         run: sudo test ! -e /root/pki && test ! -e /etc/openvpn/server/server.conf
       - name: rc.10 from its release, the update to this code, Restore previous version, and back
@@ -239,6 +251,9 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      # A mirror that is down or slow must not decide a test: the fastest one goes first.
+      - name: Fastest apt mirror first
+        run: sudo GITHUB_STEP_SUMMARY="$GITHUB_STEP_SUMMARY" bash scripts/ci-apt-mirrors.sh
       - name: The runner must not already have a PKI or server
         run: sudo test ! -e /root/pki && test ! -e /etc/openvpn/server/server.conf
       - name: Backup, refused restores, and a restore on a new server
