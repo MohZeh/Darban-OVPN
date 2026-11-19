@@ -659,6 +659,7 @@ test_update_from_the_menu() {
     has 'option 1 keeps this version' 'Cancelled; nothing changed' "$out"
     ok_if 'nothing was installed' test ! -e "$MARKER"
 
+    set_installed_version "$(cat "$REPO/VERSION")"
     echo "$(cat "$REPO/VERSION")" > "$RELEASE/VERSION"
     out=$(menu '9\n2\n0\n0\n')
     has 'same version: nothing to do' 'This is the latest version' "$out"
