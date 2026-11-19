@@ -32,14 +32,34 @@ setup_times() {
 }
 
 connect() {
-    # connect <profile> <log>: 0 when the tunnel comes up within 20 seconds.
-    local attempt
-    rm -f "$PIDFILE"
-    openvpn --config "$1" --route-nopull --dev tun9 --daemon --writepid "$PIDFILE" --log "$2" --verb 3
+    # connect <profile> <log> [device pidfile]: 0 when the tunnel comes up within 20 seconds. A second client at
+    # the same time takes another device and pid file.
+    local attempt dev=${3:-tun9} pidfile=${4:-$PIDFILE}
+    rm -f "$pidfile"
+    openvpn --config "$1" --route-nopull --dev "$dev" --daemon --writepid "$pidfile" --log "$2" --verb 3
     for attempt in $(seq 1 20); do
         if grep -q 'Initialization Sequence Completed' "$2"; then return 0; fi
         sleep 1
     done
+    return 1
+}
+refused() {
+    # refused <profile> <log> <server says>: 0 once the server's log says why it refused this client, and the
+    # tunnel never came up; 1 if it came up. Waiting the 20 seconds of connect would prove no more.
+    local attempt since
+    since=$(date +%s)
+    rm -f "$PIDFILE"
+    openvpn --config "$1" --route-nopull --dev tun9 --daemon --writepid "$PIDFILE" --log "$2" --verb 3
+    for attempt in $(seq 1 40); do
+        if grep -q 'Initialization Sequence Completed' "$2"; then return 1; fi
+        if journalctl -u "$UNIT" --since "@$since" --no-pager 2>/dev/null | grep -qi -- "$3"; then
+            sleep 1
+            ! grep -q 'Initialization Sequence Completed' "$2"
+            return
+        fi
+        sleep 0.5
+    done
+    echo "FAIL: in 20 seconds the server neither let this client in nor said: $3"
     return 1
 }
 disconnect() { if [[ -s $PIDFILE ]]; then kill "$(cat "$PIDFILE")" 2>/dev/null || true; sleep 1; fi; }
@@ -201,10 +221,9 @@ grep -q 'Active session of accept1 disconnected' "$LOG/revoke.log"
 echo 'PASS: revoking ends the active session of that client alone.'
 disconnect
 
-if connect "$LOG/old.ovpn" "$LOG/b.log"; then echo 'FAIL: the revoked profile still connects.'; exit 1; fi
-disconnect
 # T68: refused by the CRL that revoke published, and OpenVPN says why.
-journalctl -u "$UNIT" --since '-120s' --no-pager | grep -i 'certificate revoked' >/dev/null
+refused "$LOG/old.ovpn" "$LOG/b.log" 'certificate revoked' || { echo 'FAIL: the revoked profile still connects.'; exit 1; }
+disconnect
 echo 'PASS: the revoked profile was refused.'
 
 printf '1\naccept1\n0\n' | darban
@@ -213,7 +232,7 @@ cp /root/openvpn-clients/accept1.ovpn "$LOG/accept1.ovpn"
 connect "$LOG/accept1.ovpn" "$LOG/c.log"
 echo 'PASS: a new certificate under the same name connects.'
 disconnect
-if connect "$LOG/old.ovpn" "$LOG/d.log"; then echo 'FAIL: the old profile connects after the name was reused.'; exit 1; fi
+refused "$LOG/old.ovpn" "$LOG/d.log" 'certificate revoked' || { echo 'FAIL: the old profile connects after the name was reused.'; exit 1; }
 disconnect
 echo 'PASS: the old profile stays refused after the name was reused.'
 
@@ -234,26 +253,32 @@ echo 'PASS: a CRL OpenVPN cannot read is named, refuses every client, and works 
 # T67 and C.15.1: when the server records the end of a session. It runs client-disconnect when it closes the
 # session, which may be well after the device went away; a kill -9 must still be recorded within 130 seconds.
 PROFILE=$LOG/accept1.ovpn
-session_end() { awk -F= '$1=="session_end" {print $2}' "$LEDGER/accept1" 2>/dev/null || true; }
+session_end() { awk -F= '$1=="session_end" {print $2}' "$LEDGER/${1:-accept1}" 2>/dev/null || true; }
 wait_session_end() {
-    # wait_session_end <value before> <seconds>: prints how long the record took, or fails.
+    # wait_session_end <value before> <seconds> [client]: prints how long the record took, or fails.
     local start=$SECONDS
     while (( SECONDS - start < $2 )); do
-        if [[ -n $(session_end) && $(session_end) != "$1" ]]; then echo $(( SECONDS - start )); return 0; fi
+        if [[ -n $(session_end "${3:-}") && $(session_end "${3:-}") != "$1" ]]; then echo $(( SECONDS - start )); return 0; fi
         sleep 1
     done
     return 1
 }
 # A client killed with kill -9 leaves its in-kernel (DCO) interface behind, and the next client could not take it.
-kill_client() { kill -9 "$(cat "$PIDFILE")"; sleep 1; ip link del tun9 2>/dev/null || true; }
+kill_client() { kill -9 "$(cat "${1:-$PIDFILE}")"; sleep 1; ip link del "${2:-tun9}" 2>/dev/null || true; }
+# A client stopped by SIGTERM and one killed with kill -9 wait for the same timeout of the server, about two
+# minutes, so they wait side by side: two clients, each with its own device.
+printf '1\nt67kill\n0\n' | darban >/dev/null
+cp /root/openvpn-clients/t67kill.ovpn "$LOG/t67kill.ovpn"
 connect "$PROFILE" "$LOG/t67-term.log"; before=$(session_end)
+connect "$LOG/t67kill.ovpn" "$LOG/t67-kill.log" tun8 "$LOG/t67kill.pid"; before_kill=$(session_end t67kill)
 kill -TERM "$(cat "$PIDFILE")"
-took=$(wait_session_end "$before" 150) || { echo 'FAIL: the end of a session after SIGTERM was not recorded in 150 seconds.'; exit 1; }
-echo "T67: client stopped by SIGTERM: the end recorded after ${took} s"
-sleep 1
-connect "$PROFILE" "$LOG/t67-kill.log"; before=$(session_end)
-kill_client
-took=$(wait_session_end "$before" 150) || { echo 'FAIL: the end of a session after kill -9 was not recorded in 150 seconds.'; exit 1; }
+kill_client "$LOG/t67kill.pid" tun8
+wait_session_end "$before" 150 >"$LOG/t67-term.took" || true &
+term_wait=$!
+took=$(wait_session_end "$before_kill" 150 t67kill) || { echo 'FAIL: the end of a session after kill -9 was not recorded in 150 seconds.'; exit 1; }
+wait "$term_wait"
+[[ -s $LOG/t67-term.took ]] || { echo 'FAIL: the end of a session after SIGTERM was not recorded in 150 seconds.'; exit 1; }
+echo "T67: client stopped by SIGTERM: the end recorded after $(cat "$LOG/t67-term.took") s"
 echo "T67: client killed with kill -9: the end recorded after ${took} s"
 if (( took >= 130 )); then echo 'FAIL: the end of a killed session took 130 seconds or more.'; exit 1; fi
 sleep 1
