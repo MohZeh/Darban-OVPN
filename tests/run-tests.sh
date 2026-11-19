@@ -3622,6 +3622,16 @@ test_repo_checks_find_problems() {
     printf '\n```\nsudo darban status\n```\n' >>"$dir/docs/en/usage.md"
     printf '\n```\nsudo darban status --verbose\n```\n' >>"$dir/docs/fa/usage.md"
     out=$(check); rc_not0 'a code block that differs fails' "$?"; has 'it names the block' 'code block 1 differs' "$out"
+    cp "$dir/docs/en/usage.md" "$dir/docs/fa/usage.md"
+
+    # A function that hands back a value in a global loses it in a subshell. A prefix such as X=1 cmd, and a local,
+    # are no value handed back.
+    printf 'pick() {\n    PICKED=$1\n}\nshow() {\n    local NAME=x\n}\nv=$(DARBAN_T=1 awk 1)\nw=$(show)\n' >>"$dir/setup/a.sh"
+    out=$(check); rc_is 'a prefix or a local in a subshell passes' 0 "$?"
+    printf 'x=$(pick y)\n' >>"$dir/setup/a.sh"
+    out=$(check); rc_not0 'a function that sets a global, in $( ), fails' "$?"; has 'it names the call' 'setup/a.sh:10: pick sets PICKED' "$out"
+    sed -i '$d' "$dir/setup/a.sh"; printf 'pick z | cat\n' >>"$dir/setup/a.sh"
+    out=$(check); rc_not0 'and on the left of a pipe' "$?"; has 'it names that call' 'setup/a.sh:10: pick sets PICKED' "$out"
 }
 
 # ---------- PR 1: revocation cleanup by certificate, and Remove everything that reports every failure ----------
@@ -5651,6 +5661,26 @@ test_a_journal_that_cannot_be_read_stops_everything() {
     has 'a change says why' 'A restore is unfinished' "$out"
     [[ $(cat "$PKI/index.txt" "$SERVER_CONF") == "$snapshot" ]]; rc_is 'and nothing changed' 0 "$?"
     has 'Diagnostics name it' 'A restore is unfinished' "$(mgr status)"
+
+    # A journal with a good id whose stage is not the folder a restore makes: neither way deletes that path.
+    mkdir -p "$E/not-a-stage"; echo keep > "$E/not-a-stage/file"
+    printf 'id=abc123
+state=swapped
+stage=%s
+' "$E/not-a-stage" > "$E/varlib/restore.journal"
+    for kind in --resume --rollback; do
+        out=$(restore_run "$kind"); rc_is "$kind refuses a stage it did not make" 1 "$?"
+        has "$kind says to look at that journal" 'cannot be read. Look at it by hand.' "$out"
+        ok_if "$kind leaves that path alone" test -s "$E/not-a-stage/file"
+    done
+    # The same folder name, one level up from the journal, is not it either.
+    mkdir -p "$E/.restore-stage.abcd1234"; echo keep > "$E/.restore-stage.abcd1234/file"
+    printf 'id=abc123
+state=swapped
+stage=%s
+' "$E/varlib/../.restore-stage.abcd1234" > "$E/varlib/restore.journal"
+    out=$(restore_run --rollback); rc_is 'a path that only ends like a stage is refused' 1 "$?"
+    ok_if 'and left alone' test -s "$E/.restore-stage.abcd1234/file"
 }
 
 test_a_restore_killed_from_outside_is_finished_by_resume() {

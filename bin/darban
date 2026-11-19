@@ -5206,6 +5206,13 @@ journal_write() {
     mv -f -- "$temp" "$DARBAN_RESTORE_JOURNAL" || { rm -f -- "$temp"; return 1; }
     sync -- "${DARBAN_RESTORE_JOURNAL%/*}" 2>/dev/null || sync
 }
+journal_stage_ok() {
+    # The stage of a restore is the folder mktemp made beside the journal, and a rollback or cleanup deletes it. A
+    # journal naming any other path is not one this tool wrote, so nothing in it is acted on.
+    local stage dir=${DARBAN_RESTORE_JOURNAL%/*}/.restore-stage.
+    stage=$(journal_value stage)
+    [[ -z $stage ]] || { [[ $stage == "$dir"* ]] && [[ ${stage#"$dir"} =~ ^[A-Za-z0-9]{8}$ ]]; }
+}
 journal_state_rank() { case $1 in staged) echo 1 ;; swapping) echo 2 ;; swapped) echo 3 ;; starting) echo 4 ;; committed) echo 5 ;; cleanup) echo 6 ;; *) echo 0 ;; esac; }
 restore_committed() { (( $(journal_state_rank "$(journal_value state)") >= 5 )); }
 restore_failpoint() {
@@ -5509,7 +5516,7 @@ restore_rollback() {
         return 1
     fi
     id=$(journal_value id)
-    [[ $id =~ ^[0-9a-zA-Z]+$ ]] || { ca_unlock; urgent "The restore journal $DARBAN_RESTORE_JOURNAL cannot be read. Look at it by hand."; return 1; }
+    [[ $id =~ ^[0-9a-zA-Z]+$ ]] && journal_stage_ok || { ca_unlock; urgent "The restore journal $DARBAN_RESTORE_JOURNAL cannot be read. Look at it by hand."; return 1; }
     critical_begin
     from=$(journal_value undo_from)
     if [[ -z $from ]]; then
@@ -5586,7 +5593,7 @@ restore_resume() {
         ca_unlock; fail "Not finished: another restore, of the backup of $(journal_value created), began while this waited. Nothing was changed; run this again to finish that one."; return 1
     fi
     id=$(journal_value id)
-    [[ $id =~ ^[0-9a-zA-Z]+$ ]] || { ca_unlock; urgent "The restore journal $DARBAN_RESTORE_JOURNAL cannot be read. Look at it by hand."; return 1; }
+    [[ $id =~ ^[0-9a-zA-Z]+$ ]] && journal_stage_ok || { ca_unlock; urgent "The restore journal $DARBAN_RESTORE_JOURNAL cannot be read. Look at it by hand."; return 1; }
     if [[ $(journal_value state) == undoing ]]; then
         ca_unlock
         urgent 'A rollback of this restore is unfinished, so it is not finished forward. Finish the rollback: sudo darban restore --rollback'
