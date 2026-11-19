@@ -548,6 +548,10 @@ fi
 # A real temporary link: it can be opened again until the client connects, and then it ends.
 url=$(printf '5\naccept1\n1\n1\n0\n' | darban | grep -oE 'https://[^ ]+/l/[0-9a-f]{64}')
 curl -ksf "$url" | grep 'Download profile' >/dev/null
+# Clients that send their request a byte at a time, from one address, must not keep a person elsewhere from opening
+# a link: the unit allows 64 tasks, one thread for each connection.
+python3 tests/slow-clients.py "$url" 80 40 || { echo 'FAIL: slow clients from one address kept the link from opening.'; exit 1; }
+echo 'PASS: slow clients from one address do not keep the link from opening.'
 
 # The link service sees only what it needs. From inside its mount namespace, the link key and the link files are
 # there, which also shows that nsenter reached it; every path its unit hides, that has something in it here, shows

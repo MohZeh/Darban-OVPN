@@ -372,6 +372,36 @@ class Handler(http.server.BaseHTTPRequestHandler):
 class Server(http.server.ThreadingHTTPServer):
     daemon_threads = True
     context = None
+    # Each connection has a thread of its own, and the unit allows 64 tasks. A client that sends its request a byte at
+    # a time keeps its thread, so without a limit one address could hold them all and no link would open for anyone.
+    per_address = 8
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.open_from = {}
+        self.counted = {}
+        self.count_lock = threading.Lock()
+
+    def verify_request(self, request, client_address):
+        address = client_address[0]
+        with self.count_lock:
+            if self.open_from.get(address, 0) >= self.per_address:
+                return False
+            self.open_from[address] = self.open_from.get(address, 0) + 1
+            self.counted[id(request)] = address
+        return True
+
+    def shutdown_request(self, request):
+        # Also called for a connection verify_request refused, which was never counted.
+        with self.count_lock:
+            address = self.counted.pop(id(request), None)
+            if address is not None:
+                left = self.open_from.get(address, 1) - 1
+                if left > 0:
+                    self.open_from[address] = left
+                else:
+                    self.open_from.pop(address, None)
+        super().shutdown_request(request)
 
     def get_request(self):
         # Each connection is wrapped with the certificate of the moment, so a reload reaches the next one. The
