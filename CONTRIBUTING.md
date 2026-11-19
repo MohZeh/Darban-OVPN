@@ -33,6 +33,7 @@ Pass part of a test name to run a subset: `bash tests/run-tests.sh temporary_lin
 - Run `bash scripts/lint.sh`. It needs [ShellCheck](https://www.shellcheck.net/) and checks scripts, file modes and documentation links.
 - Update the guides in both `docs/en` and `docs/fa`, and `CHANGELOG.md`, when behavior changes.
 - Keep a pull request to one purpose.
+- A draft pull request runs Lint only, and its **CI result** stays red. The slow tests start when it is marked ready for review.
 - Never include real keys, profiles, addresses or tokens, including in test data.
 
 ## Design rules
