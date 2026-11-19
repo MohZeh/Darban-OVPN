@@ -86,7 +86,9 @@ if [[ $VERSION_ID == 24.04 ]]; then setup_args+=(--install-kernel); fi
     printf '[5/5] Starting OpenVPN\n'
     printf 'OpenVPN is running on UDP 1194\n'
 } > "$LOG/setup.keys"
-in_terminal setup 600 bash setup/server-setup.sh "${setup_args[@]}"
+# 20 minutes: on 24.04 the download is about 187 MB since the 7.0 HWE kernel (its modules package went
+# from 42 MB to 167 MB), and a runner's mirror does not always send that within 10.
+in_terminal setup 1200 bash setup/server-setup.sh "${setup_args[@]}"
 grep -E 'Detected address|could not be detected' "$LOG/setup.log"
 grep -qx setup_complete /etc/darban/.server-setup-started
 if grep -q 'Unpacking\|Setting up' "$LOG/setup.log"; then echo 'FAIL: apt output reached the install screen.'; exit 1; fi
