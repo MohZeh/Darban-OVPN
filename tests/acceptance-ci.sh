@@ -20,6 +20,16 @@ dump() {
     ip netns del "$NS" 2>/dev/null || true
 }
 trap 'echo "FAILED at line $LINENO"; dump' ERR
+setup_times() {
+    # setup_times <label>: how long each slow part of the setup took, in the summary of every run, not only a failed
+    # one, so the weekly runs keep a record of how long installs take. The lines hold labels and times only.
+    local times
+    times=$(grep '^==' /var/log/darban-setup.log 2>/dev/null || true)
+    printf 'Setup times:\n%s\n' "${times:-none recorded}"
+    if [[ -n ${GITHUB_STEP_SUMMARY:-} ]]; then
+        printf '**Setup times, %s**\n\n```\n%s\n```\n' "$1" "${times:-none recorded}" >>"$GITHUB_STEP_SUMMARY"
+    fi
+}
 
 connect() {
     # connect <profile> <log>: 0 when the tunnel comes up within 20 seconds.
@@ -93,6 +103,7 @@ grep -E 'Detected address|could not be detected' "$LOG/setup.log"
 grep -qx setup_complete /etc/darban/.server-setup-started
 if grep -q 'Unpacking\|Setting up' "$LOG/setup.log"; then echo 'FAIL: apt output reached the install screen.'; exit 1; fi
 echo 'PASS: a real install in a real terminal, on a quiet screen.'
+setup_times "Ubuntu $VERSION_ID, acceptance"
 if (( USE_UFW )); then
     ufw status | grep '^1194/udp' >/dev/null
     ufw status | grep 'tun0' >/dev/null

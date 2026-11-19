@@ -9,10 +9,21 @@ MARKER=/etc/darban/.server-setup-started
 # A documentation address: public to the tool, so it takes the public path, and nothing answers on it.
 HOST=203.0.113.10
 trap 'echo "FAILED at line $LINENO"; tail -n 40 /var/log/darban-setup.log 2>/dev/null || true' ERR
+setup_times() {
+    # setup_times <label>: how long each slow part of the setup took, in the summary of every run, not only a failed
+    # one, so the weekly runs keep a record of how long installs take. The lines hold labels and times only.
+    local times
+    times=$(grep '^==' /var/log/darban-setup.log 2>/dev/null || true)
+    printf 'Setup times:\n%s\n' "${times:-none recorded}"
+    if [[ -n ${GITHUB_STEP_SUMMARY:-} ]]; then
+        printf '**Setup times, %s**\n\n```\n%s\n```\n' "$1" "${times:-none recorded}" >>"$GITHUB_STEP_SUMMARY"
+    fi
+}
 
 bash setup/server-setup.sh --yes --host "$HOST" --port 1194
 grep -qx setup_complete "$MARKER"
 echo "PASS: the setup on a public IP address finished."
+setup_times "Ubuntu $(. /etc/os-release && echo "$VERSION_ID"), public address, with certbot"
 
 # certbot 5.3 or newer is needed for an IP address; Ubuntu's is older, so it comes from the snap.
 if command -v snap >/dev/null; then
