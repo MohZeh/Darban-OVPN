@@ -62,7 +62,7 @@ sudo bash -c 'set -o pipefail; curl -fsSL https://github.com/MohZeh/Darban-OVPN/
 - If the running kernel has no `ovpn` module, installs `linux-image-virtual-hwe-24.04` or `linux-image-virtual-hwe-26.04`, matching the system, without recommended packages. If apt plans firmware or graphics packages, the setup stops. A container needs no kernel.
 - Creates a CA in `/root/pki` and a server certificate valid for 10 years.
 - Writes `/etc/openvpn/server/server.conf`, enables IPv4 forwarding, and adds NAT for the VPN only, in its own nftables table.
-- Keeps clients apart: they cannot reach each other, or the cloud provider's metadata service at `169.254.169.254`, through the server. They can still reach other private networks the server reaches.
+- Keeps clients apart: they cannot reach each other, or the cloud provider's metadata service at `169.254.169.254`, through the server. They can still reach other private networks the server reaches. A `client-to-client` line added to `server.conf` would let OpenVPN pass traffic between clients itself, past these rules, so Diagnostics report it.
 - Limits TCP MSS for VPN traffic to 1280 in both directions, only for connections that announce a larger one: traffic through the server, and connections to the server itself, such as a temporary link opened on a device that is already connected.
 - Starts OpenVPN, and writes details to `/var/log/darban-setup.log`.
 - Turns on [connection events](#connection-events), with one more restart of OpenVPN, before any client exists.
