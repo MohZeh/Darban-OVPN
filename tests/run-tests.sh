@@ -1393,6 +1393,18 @@ stop_links_stub() {
 web() { /usr/bin/curl -ks --max-time 10 "$@"; }
 new_link() { menu "5\n${1:-alice}\n1\n1\n0\n" | grep -oE 'https://[^ ]+/l/[0-9a-f]{64}'; }
 
+test_one_address_cannot_hold_every_connection() {
+    # Slow clients from one address keep a thread each. The link service takes only 8 at a time from one address,
+    # so a person elsewhere still opens the link. The acceptance test checks the same under the unit's task limit.
+    local url out
+    start_links_stub
+    url=$(new_link)
+    out=$(python3 "$REPO/tests/slow-clients.py" "$url" 20 6); rc_is 'the link still opens from another address' 0 "$?"
+    has 'one address holds 8 connections, no more' 'held 8 slow connections; the page opened: yes' "$out"
+    out=$(web "$url"); has 'once they are gone, that address opens it again' 'Download profile' "$out"
+    stop_links_stub
+}
+
 test_temporary_link_end_to_end() {
     local url base out head code
     start_links_stub
