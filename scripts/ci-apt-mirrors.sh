@@ -26,9 +26,10 @@ mapfile -t mirrors < <({ awk '{print $1}' "$LIST"; printf '%s\n' http://mirrors.
 work=$(mktemp -d)
 trap 'rm -rf -- "$work"' EXIT
 for i in "${!mirrors[@]}"; do
-    # Contents-amd64.gz is tens of megabytes on every full mirror, at the same path.
+    # Contents-amd64.gz is tens of megabytes on every full mirror, at the same path. The line ends in a newline:
+    # without one, read below fails, and every mirror would count as one that did not answer.
     curl -sS -r "0-$((BYTES - 1))" -o /dev/null --connect-timeout 3 --max-time 5 \
-        -w '%{http_code} %{size_download} %{speed_download}' "${mirrors[i]}dists/$codename/Contents-amd64.gz" \
+        -w '%{http_code} %{size_download} %{speed_download}\n' "${mirrors[i]}dists/$codename/Contents-amd64.gz" \
         >"$work/$i" 2>/dev/null &
 done
 wait
