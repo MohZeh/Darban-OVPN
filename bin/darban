@@ -2204,10 +2204,29 @@ put_link_cert_in_service() {
     fail "The link service answers with neither certificate, so open links may not open. Restart it: $(cmd sudo systemctl restart darban-links.service), and see $(cmd journalctl -u darban-links.service -n 20 --no-pager)"
     return 1
 }
+link_service_stays() {
+    # Read under the link lock, after a link was written: the running service says in .serving that it has not
+    # begun to end, so it serves that link, and that it runs the source installed now. It takes .serving back
+    # under the same lock when it decides to end.
+    local pid='' sum='' source=''
+    systemctl is-active --quiet darban-links.service 2>/dev/null || return 1
+    { IFS= read -r pid && IFS= read -r sum && IFS= read -r source; } 2>/dev/null <"$LINK_DIR/.serving" || return 1
+    [[ $pid =~ ^[1-9][0-9]*$ && $pid == "$(systemctl show -p MainPID --value darban-links.service 2>/dev/null)" ]] || return 1
+    valid_abs_path "$source" && [[ $sum =~ ^[0-9a-f]{64}$ && $(sha256sum -- "$source" 2>/dev/null) == "$sum "* ]]
+}
 start_link_service() {
-    local attempt
+    # start_link_service <host>: the link service runs, and serves the links written. One that stays, on the same
+    # port, reads each link when it is asked for, so it is not restarted: that would end a download in progress.
+    # A reload brings it a certificate that changed, and it counts once the service answers with it. Anything else
+    # is restarted.
+    local attempt running=''
+    running=$(awk -F= '$1 == "LINK_PORT" {print $2; exit}' "$LINK_ENV" 2>/dev/null) || running=''
     printf 'LINK_HOST=%s\nLINK_PORT=%s\n' "$1" "$LINK_PORT" >"$LINK_ENV" || return 1
     chmod 600 "$LINK_ENV" || return 1
+    if [[ $running == "$LINK_PORT" ]] && links_locked link_service_stays && systemctl reload darban-links.service 2>/dev/null \
+        && link_service_serves "$(cert_fingerprint "$LINK_CERT")"; then
+        return 0
+    fi
     systemctl restart darban-links.service || return 1
     for attempt in 1 2 3 4 5 6; do
         if tcp_port_open "$LINK_PORT"; then return 0; fi

@@ -1412,6 +1412,49 @@ test_one_address_cannot_hold_every_connection() {
     stop_links_stub
 }
 
+test_a_new_link_does_not_cut_a_download() {
+    # A new link does not restart a link service that stays: a restart would cut a request in progress. A request
+    # for the first link waits half sent while the second is made, and must then get its page whole. The profile
+    # is small enough to sit in the kernel's buffer before a restart, so a slow download would prove nothing.
+    local a b pid held try out
+    start_links_stub
+    a=$(new_link alice)
+    pid=$(cat "$LINKS_PIDFILE")
+    ok_if 'the service says it serves, and what it runs' grep -qx "$pid" "$E/links/.serving"
+    python3 "$REPO/tests/held-request.py" "$a" "$E/go" >"$E/held.out" 2>&1 &
+    held=$!
+    for (( try = 0; try < 100; try++ )); do [[ -e $E/go.ready ]] && break; sleep 0.1; done
+    b=$(new_link alice)
+    : > "$E/go"
+    wait "$held"; rc_is 'the request in progress gets its answer' 0 "$?"
+    has 'and its whole page' 'Download profile' "$(cat "$E/held.out")"
+    [[ $(cat "$LINKS_PIDFILE") == "$pid" ]] && kill -0 "$pid"; rc_is 'the service was not restarted' 0 "$?"
+    [[ $(link_code "$b") == 200 ]]; rc_is 'and it serves the new link' 0 "$?"
+
+    # It runs a source that is no longer the one installed, as after an update: the next link starts the new one.
+    sed -i '2s/.*/0000000000000000000000000000000000000000000000000000000000000000/' "$E/links/.serving"
+    b=$(new_link alice)
+    [[ $(cat "$LINKS_PIDFILE") != "$pid" ]]; rc_is 'a service that runs another source is restarted' 0 "$?"
+    [[ $(link_code "$b") == 200 ]]; rc_is 'and the link opens' 0 "$?"
+
+    # One that has begun to end has taken .serving back: the next link starts it again, and the link opens.
+    pid=$(cat "$LINKS_PIDFILE")
+    rm -f "$E/links/.serving"
+    b=$(new_link alice)
+    [[ $(cat "$LINKS_PIDFILE") != "$pid" ]]; rc_is 'a service that is ending is started again' 0 "$?"
+    [[ $(link_code "$b") == 200 ]]; rc_is 'and that link opens too' 0 "$?"
+
+    # A service that ends by itself, with no link left, takes .serving back first.
+    pid=$(cat "$LINKS_PIDFILE")
+    rm -f "$E"/links/*.meta
+    for (( try = 0; try < 50; try++ )); do kill -0 "$pid" 2>/dev/null || break; sleep 0.1; done
+    kill -0 "$pid" 2>/dev/null; rc_is 'with no link left, the service ends' 1 "$?"
+    ok_if 'and no longer says it serves' test ! -e "$E/links/.serving"
+    out=$(new_link alice)
+    [[ $(link_code "$out") == 200 ]]; rc_is 'the next link starts it again' 0 "$?"
+    stop_links_stub
+}
+
 test_temporary_link_end_to_end() {
     local url base out head code
     start_links_stub
