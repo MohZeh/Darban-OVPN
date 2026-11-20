@@ -474,7 +474,7 @@ echo 'PASS: real traffic and DNS go through the tunnel and the NAT.'
 reaches() { ip netns exec "$NS" timeout 10 bash -c 'exec 3<>/dev/tcp/9.9.9.9/443' 2>/dev/null; }
 reached_before=0
 if reaches; then reached_before=1; fi
-printf '7\n7\n2\n9.9.9.9\n0\n0\n0\n' | darban | tee "$LOG/block.log"
+printf '7\n7\n3\n9.9.9.9\n0\n0\n0\n' | darban | tee "$LOG/block.log"
 grep -q 'Blocked: 9.9.9.9/32' "$LOG/block.log"
 nft list set ip darban blocked | grep -q '9\.9\.9\.9'
 # The rules as the kernel lists them, for the log: Diagnostics must recognize this form.
@@ -484,7 +484,7 @@ grep -q 'Blocked destinations are refused: 1 range (1 address of your own)' "$LO
 started=$SECONDS
 if reaches; then echo 'FAIL: a blocked address was reached through the VPN.'; exit 1; fi
 if (( reached_before && SECONDS - started > 5 )); then echo 'FAIL: a blocked address was not refused at once; the client waited.'; exit 1; fi
-printf '7\n7\n3\n1\n0\n0\n0\n' | darban | tee "$LOG/unblock.log"
+printf '7\n7\n4\n1\n0\n0\n0\n' | darban | tee "$LOG/unblock.log"
 grep -q 'Unblocked: 9.9.9.9/32' "$LOG/unblock.log"
 if (( ! reached_before )); then
     echo 'NOTE: this runner could not reach 9.9.9.9:443 through the VPN at all, so only the rules are judged.'
@@ -493,7 +493,7 @@ elif reaches; then
 else
     echo 'FAIL: an address that was unblocked is still not reached through the VPN.'; exit 1
 fi
-# Iranian sites outside the VPN, with a real OpenVPN 2 client: after its next connection, an address of Iran goes
+# The sites of a country outside the VPN, with a real OpenVPN 2 client: after its next connection, an address of Iran goes
 # through the client's own network, and any other through the tunnel. The list of Iran is the real one: a runner
 # that cannot download it skips this, and says so.
 ns_reconnect() {
@@ -508,10 +508,10 @@ ns_reconnect() {
     done
     return 1
 }
-printf '7\n7\n1\n2\n0\n0\n0\n' | darban | tee "$LOG/iran.log"
-if grep -q 'Blocked: Iranian addresses' "$LOG/iran.log"; then
-    printf '7\n7\n5\n2\n0\n0\n0\n' | darban | tee "$LOG/direct.log"
-    grep -q 'Saved: Iranian sites outside the VPN, on' "$LOG/direct.log"
+printf '7\n7\n1\n1\n2\n0\n0\n0\n' | darban | tee "$LOG/iran.log"
+if grep -q 'Saved: blocked countries Iran' "$LOG/iran.log"; then
+    printf '7\n7\n2\n2\n0\n0\n0\n' | darban | tee "$LOG/direct.log"
+    grep -q 'Saved: their sites outside the VPN' "$LOG/direct.log"
     iran_ip=$(awk 'NR == 2 {print $3}' /etc/openvpn/server/darban-direct.routes)
     ns_reconnect
     ip netns exec "$NS" ip route get "$iran_ip" | tee "$LOG/route-iran.txt"
@@ -519,16 +519,16 @@ if grep -q 'Blocked: Iranian addresses' "$LOG/iran.log"; then
     grep -q 'dev dt1' "$LOG/route-iran.txt"
     ip netns exec "$NS" ip route get 1.1.1.1 | grep 'dev tun' >/dev/null
     darban status >"$LOG/direct-status.log" 2>&1 || true
-    grep -q 'Iranian sites go outside the VPN' "$LOG/direct-status.log"
-    # Back as it was: Iran off takes the routes along, and the next connection has none.
-    printf '7\n7\n1\n2\n0\n0\n0\n' | darban | tee "$LOG/iran-off.log"
-    grep -q 'Iranian addresses are no longer blocked' "$LOG/iran-off.log"
-    if [[ -e /etc/openvpn/server/darban-direct.routes ]]; then echo 'FAIL: the routes stayed after Iran was turned off.'; exit 1; fi
+    grep -q 'Their sites go outside the VPN' "$LOG/direct-status.log"
+    # Back as it was: no country takes the routes along, and the next connection has none.
+    printf '7\n7\n1\n1\n2\n0\n0\n0\n' | darban | tee "$LOG/iran-off.log"
+    grep -q 'Saved: no country is blocked now.' "$LOG/iran-off.log"
+    if [[ -e /etc/openvpn/server/darban-direct.routes || -e /etc/openvpn/server/darban-direct-small.routes ]]; then echo 'FAIL: the routes stayed after the countries were turned off.'; exit 1; fi
     ns_reconnect
     ip netns exec "$NS" ip route get "$iran_ip" | grep 'dev tun' >/dev/null
-    echo 'PASS: with Iranian sites outside the VPN, a real client sends Iran through its own network, and nothing else.'
+    echo 'PASS: with the sites of Iran outside the VPN, a real client sends Iran through its own network, and nothing else.'
 else
-    echo 'NOTE: this runner could not download the list of Iran, so Iranian sites outside the VPN were not judged.'
+    echo 'NOTE: this runner could not download the list of Iran, so sites outside the VPN were not judged.'
     printf '7\n7\n0\n0\n0\n' | darban >/dev/null || true
 fi
 if modinfo -k "$(uname -r)" ovpn >/dev/null 2>&1; then

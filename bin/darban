@@ -29,8 +29,8 @@ BACKUP_HOOK_SECONDS=120
 RESTORE_WARN=/var/lib/darban/restore-unverified
 BACKUP_PY=$DARBAN_LIB/backup.py
 GEO_PY=$DARBAN_LIB/geolist.py
-# The lists of Settings > Blocked destinations: the ranges of Iran and of Iranian CDNs, made each day from public
-# GeoIP data. A folder; geolist.py adds the names of the files.
+# The lists of Settings > Blocked destinations: the ranges of each country, and of Iranian CDNs, made each day from
+# public GeoIP data. A folder; geolist.py adds the names of the files.
 GEO_SOURCE=https://raw.githubusercontent.com/Chocolate4U/Iran-v2ray-rules/release/
 # Variables for the tests only (R18-16). Unset, they change nothing. Only root runs this tool, and sudo's env_reset
 # drops them, so only a root shell that sets them itself can use them; that shell could change the files anyway.
@@ -75,13 +75,24 @@ LE_DIR=/etc/letsencrypt
 # Each link certificate Let's Encrypt issued here, so the weekly limit is known before asking. Kept with it.
 LINK_CERT_LOG=/var/lib/darban/link-certificates.log
 CONFIG_FILE=$CONFIG_DIR/config
-# Blocked destinations: what NAT loads (lib/common.sh reads it), the last good list of Iran, and its date and size.
+# Blocked destinations: what NAT loads (lib/common.sh reads it), and the folder of the last good list of each country,
+# <code>.v4, with its date and size in <code>.info.
 DARBAN_BLOCKED=$CONFIG_DIR/blocked.v4
-IRAN_LIST=$CONFIG_DIR/iran.v4
-IRAN_LIST_INFO=$CONFIG_DIR/iran.v4.info
-# The routes that send Iran outside the tunnel; bin/darban-ovpn-event gives them at each connection, as OpenVPN's
-# user, so they live beside server.conf, not in the folder only root can read.
+GEO_DIR=$CONFIG_DIR/geo
+# The routes that send those countries outside the tunnel; bin/darban-ovpn-event gives them at each connection, as
+# OpenVPN's user, so they live beside server.conf, not in the folder only root can read. The small file is for
+# OpenVPN 3 before 3.11.1, which refuses pushed options of more than 256 KiB; how much of each country the large one
+# holds is in direct.info.
 DIRECT_ROUTES=$DARBAN_SERVER_DIR/darban-direct.routes
+DIRECT_ROUTES_SMALL=$DARBAN_SERVER_DIR/darban-direct-small.routes
+DIRECT_INFO=$CONFIG_DIR/geo/direct.info
+# Nine tenths of what OpenVPN 3 counts at most, 786432 bytes from 3.11.1 and 262144 before, so the other pushed
+# options still fit.
+DIRECT_BUDGET=707788
+DIRECT_BUDGET_SMALL=235929
+# The countries the menu offers by number; any other is typed as its two-letter code.
+COUNTRY_CHOICES='ir af ru cn tr by tm'
+COUNTRIES_MAX=10
 # The lines this tool added to server.conf for connection events, so their removal takes only those.
 EVENT_LINES_FILE=$CONFIG_DIR/.event-lines
 # The owner's age public key for backups, and the programs that get each new backup (v1.1 delivers them).
@@ -107,11 +118,13 @@ LINK_HOURS=''
 SHARE_ID_IN_PROFILE=no
 # The menu looks for a new release when it starts, at most once an hour; no turns that off.
 UPDATE_CHECK=yes
-# Blocked destinations: yes blocks the ranges of Iran; BLOCK_EXTRA holds the owner's own ranges, space separated.
-BLOCK_IRAN=no
+# Blocked destinations: the countries whose ranges are blocked, as two-letter codes, and the owner's own ranges, each
+# space separated. Before other countries came, BLOCK_IRAN=yes stood for the first, and is still read.
+BLOCK_COUNTRIES=''
 BLOCK_EXTRA=''
-# Iranian sites outside the VPN: no, yes, or no-android, which gives the routes to every client but Android phones.
-IRAN_DIRECT=no
+# Their sites outside the VPN: no, yes, or no-android, which gives the routes to every client but Android phones.
+# IRAN_DIRECT is its older name, and is still read.
+COUNTRY_DIRECT=no
 # The owner's own list stays short enough to read in the menu.
 BLOCK_EXTRA_MAX=200
 CONFIG_ISSUES=()
@@ -211,11 +224,11 @@ menu_action() {
 
 # ---------- configuration and server facts ----------
 load_config() {
-    local key value
+    local key value old_iran='' old_direct='' direct=''
     # The defaults first: the menu reads the file again after each action, and a setting returned to its
     # default has no line left in the file.
     DOWNLOAD_SSH_HOST='' DOWNLOAD_SSH_PORT=22 DOWNLOAD_SSH_USER=root CLIENT_CERT_DAYS='' LINK_PORT='' LINK_HOURS=''
-    UPDATE_CHECK=yes SHARE_ID_IN_PROFILE=no BLOCK_IRAN=no BLOCK_EXTRA='' IRAN_DIRECT=no
+    UPDATE_CHECK=yes SHARE_ID_IN_PROFILE=no BLOCK_COUNTRIES='' BLOCK_EXTRA='' COUNTRY_DIRECT=no
     CONFIG_ISSUES=()
     [[ -f $CONFIG_FILE ]] || { CONFIG_ISSUES+=("$CONFIG_FILE is missing; download commands are disabled."); return 0; }
     # Parsed as data, never sourced.
@@ -230,9 +243,11 @@ load_config() {
             LINK_HOURS) LINK_HOURS=$value ;;
             UPDATE_CHECK) UPDATE_CHECK=$value ;;
             SHARE_ID_IN_PROFILE) SHARE_ID_IN_PROFILE=$value ;;
-            BLOCK_IRAN) BLOCK_IRAN=$value ;;
+            BLOCK_COUNTRIES) BLOCK_COUNTRIES=$value ;;
             BLOCK_EXTRA) BLOCK_EXTRA=$value ;;
-            IRAN_DIRECT) IRAN_DIRECT=$value ;;
+            COUNTRY_DIRECT) direct=$value ;;
+            BLOCK_IRAN) old_iran=$value ;;
+            IRAN_DIRECT) old_direct=$value ;;
             *) CONFIG_ISSUES+=("Unknown setting ignored in $CONFIG_FILE: $key") ;;
         esac
     done <"$CONFIG_FILE"
@@ -261,11 +276,14 @@ load_config() {
     if [[ $SHARE_ID_IN_PROFILE != yes && $SHARE_ID_IN_PROFILE != no ]]; then
         CONFIG_ISSUES+=("Invalid SHARE_ID_IN_PROFILE in $CONFIG_FILE; using no."); SHARE_ID_IN_PROFILE=no
     fi
-    if [[ $BLOCK_IRAN != yes && $BLOCK_IRAN != no ]]; then
-        CONFIG_ISSUES+=("Invalid BLOCK_IRAN in $CONFIG_FILE; using no."); BLOCK_IRAN=no
+    # The names from before other countries came, until the next save writes the new ones.
+    if [[ -z $BLOCK_COUNTRIES && $old_iran == yes ]]; then BLOCK_COUNTRIES=ir; fi
+    COUNTRY_DIRECT=${direct:-${old_direct:-no}}
+    if [[ -n $BLOCK_COUNTRIES && ! $BLOCK_COUNTRIES =~ ^[a-z]{2}(\ [a-z]{2}){0,9}$ ]]; then
+        CONFIG_ISSUES+=("Invalid BLOCK_COUNTRIES in $CONFIG_FILE; no country is blocked."); BLOCK_COUNTRIES=''
     fi
-    if [[ $IRAN_DIRECT != yes && $IRAN_DIRECT != no && $IRAN_DIRECT != no-android ]]; then
-        CONFIG_ISSUES+=("Invalid IRAN_DIRECT in $CONFIG_FILE; using no."); IRAN_DIRECT=no
+    if [[ $COUNTRY_DIRECT != yes && $COUNTRY_DIRECT != no && $COUNTRY_DIRECT != no-android ]]; then
+        CONFIG_ISSUES+=("Invalid COUNTRY_DIRECT in $CONFIG_FILE; using no."); COUNTRY_DIRECT=no
     fi
     # Only the form of a range is checked here; geolist.py checks what each one is when the rules are written.
     if [[ -n $BLOCK_EXTRA && ! $BLOCK_EXTRA =~ ^([0-9]{1,3}(\.[0-9]{1,3}){3}/[0-9]{1,2})(\ [0-9]{1,3}(\.[0-9]{1,3}){3}/[0-9]{1,2})*$ ]]; then
@@ -4132,16 +4150,16 @@ save_config() {
     temp=$(mktemp "$CONFIG_DIR/.config.XXXXXXXX") || return 1
     darban_tmp_register "$temp"
     if [[ -f $CONFIG_FILE ]]; then
-        awk -F= '$1!="DOWNLOAD_SSH_HOST" && $1!="DOWNLOAD_SSH_PORT" && $1!="DOWNLOAD_SSH_USER" && $1!="CLIENT_CERT_DAYS" && $1!="LINK_PORT" && $1!="LINK_HOURS" && $1!="UPDATE_CHECK" && $1!="BLOCK_IRAN" && $1!="BLOCK_EXTRA" && $1!="IRAN_DIRECT"' "$CONFIG_FILE" >"$temp" || return 1
+        awk -F= '$1!="DOWNLOAD_SSH_HOST" && $1!="DOWNLOAD_SSH_PORT" && $1!="DOWNLOAD_SSH_USER" && $1!="CLIENT_CERT_DAYS" && $1!="LINK_PORT" && $1!="LINK_HOURS" && $1!="UPDATE_CHECK" && $1!="BLOCK_IRAN" && $1!="BLOCK_EXTRA" && $1!="IRAN_DIRECT" && $1!="BLOCK_COUNTRIES" && $1!="COUNTRY_DIRECT"' "$CONFIG_FILE" >"$temp" || return 1
     fi
     printf 'DOWNLOAD_SSH_HOST=%s\nDOWNLOAD_SSH_PORT=%s\nDOWNLOAD_SSH_USER=%s\n' "$DOWNLOAD_SSH_HOST" "$DOWNLOAD_SSH_PORT" "$DOWNLOAD_SSH_USER" >>"$temp" || return 1
     if [[ -n $CLIENT_CERT_DAYS ]]; then printf 'CLIENT_CERT_DAYS=%s\n' "$CLIENT_CERT_DAYS" >>"$temp" || return 1; fi
     if [[ -n $LINK_PORT ]]; then printf 'LINK_PORT=%s\n' "$LINK_PORT" >>"$temp" || return 1; fi
     if [[ -n $LINK_HOURS ]]; then printf 'LINK_HOURS=%s\n' "$LINK_HOURS" >>"$temp" || return 1; fi
     if [[ $UPDATE_CHECK == no ]]; then printf 'UPDATE_CHECK=no\n' >>"$temp" || return 1; fi
-    if [[ $BLOCK_IRAN == yes ]]; then printf 'BLOCK_IRAN=yes\n' >>"$temp" || return 1; fi
+    if [[ -n $BLOCK_COUNTRIES ]]; then printf 'BLOCK_COUNTRIES=%s\n' "$BLOCK_COUNTRIES" >>"$temp" || return 1; fi
     if [[ -n $BLOCK_EXTRA ]]; then printf 'BLOCK_EXTRA=%s\n' "$BLOCK_EXTRA" >>"$temp" || return 1; fi
-    if [[ $IRAN_DIRECT != no ]]; then printf 'IRAN_DIRECT=%s\n' "$IRAN_DIRECT" >>"$temp" || return 1; fi
+    if [[ $COUNTRY_DIRECT != no ]]; then printf 'COUNTRY_DIRECT=%s\n' "$COUNTRY_DIRECT" >>"$temp" || return 1; fi
     chmod 600 "$temp" && mv -f -- "$temp" "$CONFIG_FILE" || return 1
     if (( ! held )); then ca_unlock; fi
 }
@@ -5021,26 +5039,58 @@ settings_menu() {
     done
 }
 # ---------- blocked destinations ----------
-# VPN clients cannot reach these addresses through this server, so those sites and services never see its address.
-# The ranges are written into nat.nft itself (darban_nat_rules), so they load at boot with NAT and follow a new VPN
-# network. Nothing restarts: the rules apply at once, to connections already open too.
+# VPN clients cannot reach these addresses through this server, so those sites and services never see its address:
+# the ranges of the countries chosen, and the owner's own. The ranges are written into nat.nft itself
+# (darban_nat_rules), so they load at boot with NAT and follow a new VPN network. Nothing restarts: the rules apply at
+# once, to connections already open too. The sites of those countries can go outside the VPN instead, through routes
+# that bin/darban-ovpn-event gives each client when it connects.
 GEO_WHY=''
 address_label() { if (( $1 == 1 )); then printf '1 address'; else printf '%d addresses' "$1"; fi; }
 blocked_extra_count() { local words; read -ra words <<<"$BLOCK_EXTRA"; printf '%d' "${#words[@]}"; }
-iran_list_value() { awk -v k="$1" '$1==k {print $2}' "$IRAN_LIST_INFO" 2>/dev/null; }
-iran_list_label() {
-    local date ranges
-    date=$(iran_list_value date) ranges=$(iran_list_value ranges)
-    if [[ -s $IRAN_LIST && -n $date && -n $ranges ]]; then printf '%s ranges, %s' "$ranges" "$date"; else printf 'not downloaded'; fi
+country_name() {
+    case $1 in
+        ir) printf Iran ;; af) printf Afghanistan ;; ru) printf Russia ;; cn) printf China ;; tr) printf Turkey ;;
+        by) printf Belarus ;; tm) printf Turkmenistan ;; *) printf '%s' "${1^^}" ;;
+    esac
+}
+country_names() {
+    local cc out=''
+    for cc in $1; do out+="${out:+, }$(country_name "$cc")"; done
+    printf '%s' "${out:-none}"
+}
+country_list() { printf '%s/%s.v4' "$GEO_DIR" "$1"; }
+country_value() { awk -v k="$2" '$1==k {print $2}' "$GEO_DIR/$1.info" 2>/dev/null; }
+mode_label() {
+    case $COUNTRY_DIRECT in yes) printf 'outside the VPN' ;; no-android) printf 'outside the VPN, not for Android' ;; *) printf blocked ;; esac
+}
+lists_label() {
+    # The oldest list of the countries chosen, or what is missing.
+    local cc date oldest=''
+    [[ -n $BLOCK_COUNTRIES ]] || { printf 'no country chosen'; return 0; }
+    for cc in $BLOCK_COUNTRIES; do
+        date=$(country_value "$cc" date)
+        if [[ -z $date || ! -s $(country_list "$cc") ]]; then printf '%s not downloaded' "$(country_name "$cc")"; return 0; fi
+        if [[ -z $oldest || $date < $oldest ]]; then oldest=$date; fi
+    done
+    printf '%s' "$oldest"
 }
 blocked_summary() {
-    local extra
+    local extra parts=''
     extra=$(blocked_extra_count)
-    if [[ $BLOCK_IRAN == yes ]] && (( extra )); then printf 'Iran, and %s of your own' "$(address_label "$extra")"
-    elif [[ $BLOCK_IRAN == yes && $IRAN_DIRECT != no ]]; then printf 'Iran, outside the VPN'
-    elif [[ $BLOCK_IRAN == yes ]]; then printf 'Iran'
-    elif (( extra )); then printf '%s of your own' "$(address_label "$extra")"
-    else printf 'none'; fi
+    if [[ -n $BLOCK_COUNTRIES ]]; then
+        parts=$(country_names "$BLOCK_COUNTRIES")
+        if [[ $COUNTRY_DIRECT != no ]]; then parts+=', outside the VPN'; fi
+    fi
+    if (( extra )); then parts+="${parts:+, and }$(address_label "$extra") of your own"; fi
+    printf '%s' "${parts:-none}"
+}
+geo_migrate() {
+    # The list of Iran from before other countries came, where it lived then.
+    if [[ -s $CONFIG_DIR/iran.v4 && ! -e $GEO_DIR/ir.v4 ]]; then
+        install -d -m 700 "$GEO_DIR" && mv -f -- "$CONFIG_DIR/iran.v4" "$GEO_DIR/ir.v4" || return 1
+        if [[ -f $CONFIG_DIR/iran.v4.info ]]; then mv -f -- "$CONFIG_DIR/iran.v4.info" "$GEO_DIR/ir.info" || return 1; fi
+    fi
+    return 0
 }
 valid_block_entry() { [[ $1 =~ ^[0-9]{1,3}(\.[0-9]{1,3}){3}(/[0-9]{1,2})?$ ]] && python3 -I "$GEO_PY" entry "$1" >/dev/null 2>&1; }
 blocked_needs_full_tunnel() {
@@ -5051,7 +5101,7 @@ blocked_needs_full_tunnel() {
 blocked_apply() {
     # The list of blocked ranges from the settings in memory, then NAT from it, checked by nft and loaded in one
     # transaction. When anything fails, the rules that ran and both files stay as they were. Needs the lock.
-    local nat=$CONFIG_DIR/nat.nft net iface list='' block_new nat_new nat_old block_old had_block=0
+    local nat=$CONFIG_DIR/nat.nft net iface cc lists=() block_new nat_new nat_old block_old had_block=0
     if [[ ! -f $nat ]]; then
         fail 'NAT on this server was not set up by this tool, so it cannot block destinations. Nothing was changed.'
         return 1
@@ -5062,10 +5112,10 @@ blocked_apply() {
         fail 'server.conf has no single /24 VPN network, or NAT names no outgoing interface. Nothing was changed.'
         return 1
     fi
-    if [[ $BLOCK_IRAN == yes ]]; then
-        [[ -s $IRAN_LIST ]] || { fail 'The list of Iran is not on this server. Nothing was changed.'; return 1; }
-        list=$IRAN_LIST
-    fi
+    for cc in $BLOCK_COUNTRIES; do
+        [[ -s $(country_list "$cc") ]] || { fail "The list of $(country_name "$cc") is not on this server. Nothing was changed."; return 1; }
+        lists+=(--list "$(country_list "$cc")")
+    done
     block_new=$(mktemp "$CONFIG_DIR/.blocked.XXXXXXXX") || return 1
     darban_tmp_register "$block_new"
     nat_new=$(mktemp "$CONFIG_DIR/.nat.XXXXXXXX") || return 1
@@ -5075,7 +5125,7 @@ blocked_apply() {
     block_old=$(mktemp) || return 1
     darban_tmp_register "$block_old"
     # With no range left, geolist.py removes the file it was given.
-    if ! python3 -I "$GEO_PY" merge --out "$block_new" ${list:+--list "$list"} --extra "$BLOCK_EXTRA" >/dev/null; then
+    if ! python3 -I "$GEO_PY" merge --out "$block_new" "${lists[@]}" --extra "$BLOCK_EXTRA" >/dev/null; then
         fail 'Could not write the list of blocked destinations. Nothing was changed.'
         return 1
     fi
@@ -5097,142 +5147,203 @@ blocked_apply() {
     critical_end
 }
 blocked_commit() {
-    # blocked_commit <yes|no> <own ranges> [no|yes|no-android]: the rules from these settings, then the settings
-    # saved, then the routes for Iranian sites outside the VPN. A save that fails takes the rules back, so the file
-    # and the kernel never disagree. Without Iran blocked, nothing goes outside the VPN either.
-    local old_iran=$BLOCK_IRAN old_extra=$BLOCK_EXTRA old_direct=$IRAN_DIRECT
+    # blocked_commit <countries> <own ranges> [no|yes|no-android]: the rules from these settings, then the settings
+    # saved, then the routes for their sites outside the VPN. A save that fails takes the rules back, so the file and
+    # the kernel never disagree. Without a country, nothing goes outside the VPN either.
+    local old_countries=$BLOCK_COUNTRIES old_extra=$BLOCK_EXTRA old_direct=$COUNTRY_DIRECT
     ca_lock || return 1
-    BLOCK_IRAN=$1 BLOCK_EXTRA=$2 IRAN_DIRECT=${3:-$IRAN_DIRECT}
-    if [[ $BLOCK_IRAN != yes ]]; then IRAN_DIRECT=no; fi
-    if ! blocked_apply; then BLOCK_IRAN=$old_iran BLOCK_EXTRA=$old_extra IRAN_DIRECT=$old_direct; return 1; fi
+    BLOCK_COUNTRIES=$1 BLOCK_EXTRA=$2 COUNTRY_DIRECT=${3:-$COUNTRY_DIRECT}
+    if [[ -z $BLOCK_COUNTRIES ]]; then COUNTRY_DIRECT=no; fi
+    if ! blocked_apply; then BLOCK_COUNTRIES=$old_countries BLOCK_EXTRA=$old_extra COUNTRY_DIRECT=$old_direct; return 1; fi
     if ! save_config; then
-        BLOCK_IRAN=$old_iran BLOCK_EXTRA=$old_extra IRAN_DIRECT=$old_direct
+        BLOCK_COUNTRIES=$old_countries BLOCK_EXTRA=$old_extra COUNTRY_DIRECT=$old_direct
         blocked_apply || true
         fail 'The setting could not be saved, so the previous rules were put back.'
         return 1
     fi
     direct_write
 }
-direct_label() {
-    case $IRAN_DIRECT in yes) printf on ;; no-android) printf 'on, not for Android' ;; *) printf off ;; esac
-}
 direct_write() {
-    # The routes file from the list of Iran and the setting in memory, replaced in one step; gone when it is off.
-    # Clients get it when they next connect.
-    local android=yes
-    if [[ $BLOCK_IRAN != yes || $IRAN_DIRECT == no ]]; then rm -f -- "$DIRECT_ROUTES"; return 0; fi
-    if [[ $IRAN_DIRECT == no-android ]]; then android=no; fi
-    if ! python3 -I "$GEO_PY" routes --list "$IRAN_LIST" --out "$DIRECT_ROUTES" --android "$android" >/dev/null; then
-        fail "Could not write the routes for Iranian sites to $DIRECT_ROUTES; see: sudo darban status"
+    # The two routes files from the lists and the setting in memory, each replaced in one step; gone when it is off.
+    # Clients get them when they next connect.
+    local android=yes cc lists=() out info
+    if [[ -z $BLOCK_COUNTRIES || $COUNTRY_DIRECT == no ]]; then
+        rm -f -- "$DIRECT_ROUTES" "$DIRECT_ROUTES_SMALL" "$DIRECT_INFO"
+        return 0
+    fi
+    if [[ $COUNTRY_DIRECT == no-android ]]; then android=no; fi
+    for cc in $BLOCK_COUNTRIES; do lists+=(--list "$(country_list "$cc")"); done
+    if ! python3 -I "$GEO_PY" routes "${lists[@]}" --out "$DIRECT_ROUTES_SMALL" --android "$android" --budget "$DIRECT_BUDGET_SMALL" >/dev/null \
+        || ! out=$(python3 -I "$GEO_PY" routes "${lists[@]}" --out "$DIRECT_ROUTES" --android "$android" --budget "$DIRECT_BUDGET"); then
+        fail "Could not write the routes for their sites to $DIRECT_ROUTES; see: sudo darban status"
         return 1
     fi
+    # One line for each country: its code, its ranges, how many go outside the VPN, and the share of its addresses.
+    info=$(mktemp "$GEO_DIR/.direct.XXXXXXXX") || return 1
+    darban_tmp_register "$info"
+    sed -n 's#^list=.*/\([a-z][a-z]\)\.v4 ranges=\([0-9]*\) sent=\([0-9]*\) share=\([0-9.]*\)$#\1 \2 \3 \4#p' <<<"$out" >"$info" \
+        && chmod 600 "$info" && mv -f -- "$info" "$DIRECT_INFO"
 }
-iran_list_fetch() {
-    # A new list of Iran in place, or the last one kept: geolist.py replaces it only when every check passes.
-    # Runs without the lock: it may wait for the network, and the file changes in one step.
+direct_coverage() {
+    # A line for each country that does not fit whole: the rest of it stays blocked.
+    local cc ranges sent share
+    while read -r cc ranges sent share; do
+        [[ $cc =~ ^[a-z]{2}$ && $ranges =~ ^[0-9]+$ && $sent =~ ^[0-9]+$ ]] || continue
+        if (( sent < ranges )); then
+            bullet "$(country_name "$cc"): the largest $sent of its $ranges ranges, $share% of its addresses, go outside the VPN; the rest stays blocked"
+        fi
+    done 2>/dev/null <"$DIRECT_INFO" || true
+}
+country_fetch() {
+    # country_fetch <code>: a new list of that country in place, or the last one kept: geolist.py replaces it only
+    # when every check passes. Runs without the lock: it may wait for the network, and the file changes in one step.
     local out rc=0 ranges info
-    out=$(python3 -I "$GEO_PY" fetch --source "$GEO_SOURCE" --out "$IRAN_LIST" 2>&1) || rc=$?
+    install -d -m 700 "$GEO_DIR" || return 1
+    out=$(python3 -I "$GEO_PY" fetch --source "$GEO_SOURCE" --country "$1" --out "$(country_list "$1")" 2>&1) || rc=$?
     if (( rc != 0 )); then
         GEO_WHY=$(tail -n 1 <<<"$out")
         GEO_WHY=$(safe_text "${GEO_WHY:-the download failed}")
         return 1
     fi
     ranges=$(sed -n 's/^ranges=\([0-9]*\) .*/\1/p' <<<"$out")
-    info=$(mktemp "$CONFIG_DIR/.iran-info.XXXXXXXX") || return 1
+    info=$(mktemp "$GEO_DIR/.info.XXXXXXXX") || return 1
     darban_tmp_register "$info"
-    printf 'date %s\nranges %s\n' "$(date -u +%Y-%m-%d)" "${ranges:-0}" >"$info" && chmod 600 "$info" && mv -f -- "$info" "$IRAN_LIST_INFO"
+    printf 'date %s\nranges %s\n' "$(date -u +%Y-%m-%d)" "${ranges:-0}" >"$info" && chmod 600 "$info" && mv -f -- "$info" "$GEO_DIR/$1.info"
 }
 draw_blocked() {
     clear_screen
     title_bar "Settings $S_CRUMB Blocked destinations"
     printf ' %sVPN clients cannot reach these through this server, so they never see its address. Changes apply at once, without a restart.%s\n' "$C_DIM" "$C_RESET" || true
-    menu_item 1 "$(printf '%-30s %s' 'Iranian addresses' "$([[ $BLOCK_IRAN == yes ]] && printf blocked || printf 'not blocked')")"
-    menu_item 2 "$(printf '%-30s %s' 'Block an address' "$(address_label "$(blocked_extra_count)") of your own")"
-    menu_item 3 'Unblock an address'
-    menu_item 4 "$(printf '%-30s %s' 'Update the list of Iran' "$(iran_list_label)")"
-    menu_item 5 "$(printf '%-30s %s' 'Iranian sites outside the VPN' "$(direct_label)")"
+    menu_item 1 "$(printf '%-24s %s' 'Countries' "$(country_names "$BLOCK_COUNTRIES")")"
+    menu_item 2 "$(printf '%-24s %s' 'Their sites' "$(mode_label)")"
+    menu_item 3 "$(printf '%-24s %s' 'Block an address' "$(address_label "$(blocked_extra_count)") of your own")"
+    menu_item 4 'Unblock an address'
+    menu_item 5 "$(printf '%-24s %s' 'Update the lists' "$(lists_label)")"
     menu_item 0 'Back'
 }
 blocked_menu() {
     local redraw=1
+    geo_migrate || true
     while :; do
         if (( redraw )); then draw_blocked || true; fi
         redraw=1
         ask 'Choose [0-5, Enter = back]: ' || return 0
         case $REPLY in
-            1) menu_action 'Iranian addresses' set_block_iran ;;
-            2) menu_action 'Block an address' block_address ;;
-            3) menu_action 'Unblock an address' unblock_address ;;
-            4) menu_action 'Update the list of Iran' update_iran_list ;;
-            5) menu_action 'Iranian sites outside the VPN' set_iran_direct ;;
+            1) menu_action 'Countries' set_countries ;;
+            2) menu_action 'Their sites' set_country_mode ;;
+            3) menu_action 'Block an address' block_address ;;
+            4) menu_action 'Unblock an address' unblock_address ;;
+            5) menu_action 'Update the lists' update_lists ;;
             0|'') return 0 ;;
             *) warn "Unknown option \"$REPLY\". Enter a number from 0 to 5."; redraw=0 ;;
         esac
     done
 }
-valid_direct_choice() { [[ $1 =~ ^[1-3]$ ]]; }
-set_iran_direct() {
-    local choice
-    kv Now "$(direct_label)"
-    info "Iranian sites and apps then open while the VPN is connected: the client sends Iranian addresses through its own internet, outside the tunnel. They see the user's own address, as without the VPN, and never this server's."
-    bullet 'clients get it when they next connect; nothing restarts'
-    bullet 'OpenVPN Connect with an OpenVPN 3 core of 3.11.1 or newer, such as 3.7.3 on Android and 3.9.0 on Windows, and OpenVPN 2 take the routes; an older app gets none, and for it Iranian addresses stay blocked'
-    bullet 'Android 12 and older were not tested with so many routes; choose 3 if Android users cannot connect'
+valid_country_tokens() {
+    local token
+    [[ -n $1 ]] || return 1
+    for token in $1; do [[ $token =~ ^[1-7]$ || $token =~ ^[A-Za-z]{2}$ ]] || return 1; done
+}
+set_countries() {
+    local cc i=0 mark ranges token choices new parts added=() kept=()
+    read -ra choices <<<"$COUNTRY_CHOICES"
+    info "VPN clients cannot reach the addresses of these countries through this server, so their sites never see its address. Choose the countries your users live in. Item 2 decides whether their sites are blocked or go outside the VPN."
     say
-    say "  ${C_KEY}1${C_RESET}  Off"
-    say "  ${C_KEY}2${C_RESET}  On, for every device"
-    say "  ${C_KEY}3${C_RESET}  On, except Android phones"
+    for cc in "${choices[@]}"; do
+        i=$((i + 1))
+        mark='[ ]'
+        if [[ " $BLOCK_COUNTRIES " == *" $cc "* ]]; then mark='[x]'; fi
+        ranges=$(country_value "$cc" ranges)
+        say "  $C_KEY$i$C_RESET  $mark $(printf '%-14s' "$(country_name "$cc")") ${ranges:+$ranges ranges}"
+    done
+    for cc in $BLOCK_COUNTRIES; do
+        [[ " $COUNTRY_CHOICES " == *" $cc "* ]] || say "     [x] $(printf '%-14s' "$(country_name "$cc")") $(country_value "$cc" ranges) ranges"
+    done
+    say
+    prompt_valid 'Numbers or two-letter country codes to turn on or off, such as 2 3 or kz (Enter = cancel): ' valid_country_tokens \
+        'Enter numbers from the list, or two-letter country codes such as kz, separated by spaces.' || return 0
+    new=" $BLOCK_COUNTRIES "
+    for token in $REPLY; do
+        if [[ $token =~ ^[1-7]$ ]]; then cc=${choices[token - 1]}; else cc=${token,,}; fi
+        if [[ $new == *" $cc "* ]]; then new=${new/ $cc / }; else new+="$cc "; fi
+    done
+    read -ra parts <<<"$new"
+    new="${parts[*]}"
+    if [[ $new == "$BLOCK_COUNTRIES" ]]; then info 'Same as now; nothing changed.'; return 0; fi
+    if (( ${#parts[@]} > COUNTRIES_MAX )); then fail "At most $COUNTRIES_MAX countries can be blocked. Nothing was changed."; return 1; fi
+    if [[ -n $new ]]; then blocked_needs_full_tunnel || return 0; fi
+    kv Now "$(country_names "$BLOCK_COUNTRIES")"
+    kv New "$(country_names "$new")"
+    if [[ -n $new ]]; then
+        if [[ $COUNTRY_DIRECT == no ]]; then
+            bullet 'their sites and apps do not open while the VPN is connected; item 2 can send them outside the VPN instead'
+        else
+            bullet 'their sites go outside the VPN, for every client that can take the routes, when it next connects'
+        fi
+        bullet 'the lists come from github.com/Chocolate4U/Iran-v2ray-rules, made each day from public GeoIP data, and are updated every day'
+    fi
+    if [[ -z $new && $COUNTRY_DIRECT != no ]]; then bullet 'their sites outside the VPN (item 2) turns off too'; fi
+    bullet 'no restart: it applies at once'
+    say
+    confirm_choice 'Apply this change?' 'No, keep them as they are' 'Apply' caution || { cancelled; return 0; }
+    for cc in "${parts[@]}"; do
+        if [[ " $BLOCK_COUNTRIES " == *" $cc "* ]]; then kept+=("$cc"); continue; fi
+        info "Downloading the list of $(country_name "$cc")..."
+        if country_fetch "$cc"; then
+            kept+=("$cc")
+        elif [[ -s $(country_list "$cc") ]]; then
+            warn "A new list of $(country_name "$cc") could not be downloaded: $GEO_WHY. The one from $(country_value "$cc" date) is used."
+            kept+=("$cc")
+        else
+            warn "The list of $(country_name "$cc") could not be downloaded: $GEO_WHY. It is left out."
+        fi
+    done
+    new="${kept[*]}"
+    if [[ $new == "$BLOCK_COUNTRIES" ]]; then fail 'Nothing was changed.'; return 1; fi
+    blocked_commit "$new" "$BLOCK_EXTRA" || return 1
+    if [[ -n $BLOCK_COUNTRIES ]]; then
+        if ! systemctl enable --now darban-geo.timer >/dev/null 2>&1; then
+            warn 'The daily update of the lists did not start, so they stay as they are now. See: systemctl status darban-geo.timer'
+        fi
+    else
+        systemctl disable --now darban-geo.timer >/dev/null 2>&1 || true
+    fi
+    audit "blocked destinations: countries $(country_names "$BLOCK_COUNTRIES")"
+    if [[ -z $BLOCK_COUNTRIES ]]; then ok 'Saved: no country is blocked now.'; return 0; fi
+    ok "Saved: blocked countries $(country_names "$BLOCK_COUNTRIES"). Applied at once."
+    for cc in $BLOCK_COUNTRIES; do bullet "$(country_name "$cc"): $(country_value "$cc" ranges) ranges"; done
+    if [[ $COUNTRY_DIRECT != no ]]; then direct_coverage; fi
+}
+valid_direct_choice() { [[ $1 =~ ^[1-3]$ ]]; }
+set_country_mode() {
+    local choice
+    kv Now "$(mode_label)"
+    info "What happens to the sites of the countries of item 1. Either way they never see this server's address."
+    say
+    say "  ${C_KEY}1${C_RESET}  Blocked: they do not open while the VPN is connected"
+    say "  ${C_KEY}2${C_RESET}  Outside the VPN: they open, through the user's own internet"
+    say "  ${C_KEY}3${C_RESET}  Outside the VPN, except Android phones"
+    say
+    bullet 'outside the VPN reaches each client when it next connects; nothing restarts'
+    bullet 'OpenVPN 2, and OpenVPN Connect with an OpenVPN 3 core of 3.11.1 or newer, such as 3.7.3 on Android and 3.9.0 on Windows, take the whole list; an older app takes a shorter one, and the rest stays blocked for it'
+    bullet 'Android 12 and older were not tested with so many routes; choose 3 if Android users cannot connect'
     say
     prompt_valid 'Choose 1-3 (Enter = cancel): ' valid_direct_choice 'Enter 1, 2 or 3.' || return 0
     case $REPLY in 1) choice=no ;; 2) choice=yes ;; *) choice=no-android ;; esac
-    if [[ $choice == "$IRAN_DIRECT" ]]; then info 'Same as now; nothing changed.'; return 0; fi
+    if [[ $choice == "$COUNTRY_DIRECT" ]]; then info 'Same as now; nothing changed.'; return 0; fi
     if [[ $choice != no ]]; then
+        if [[ -z $BLOCK_COUNTRIES ]]; then info 'Choose the countries first (item 1).'; return 0; fi
         blocked_needs_full_tunnel || return 0
-        if [[ $BLOCK_IRAN != yes ]]; then
-            info "Turn on item 1 first, Iranian addresses: a device that does not take the routes then still cannot reach Iran through this server."
-            return 0
-        fi
         if ! events_lines_on; then
             fail 'Connection events are off, so OpenVPN does not run the script that gives clients the routes. Nothing was changed; see: sudo darban status'
             return 1
         fi
     fi
-    blocked_commit "$BLOCK_IRAN" "$BLOCK_EXTRA" "$choice" || return 1
-    audit "blocked destinations: Iranian sites outside the VPN $(direct_label)"
-    ok "Saved: Iranian sites outside the VPN, $(direct_label). Clients get it when they next connect."
-}
-set_block_iran() {
-    if [[ $BLOCK_IRAN == yes ]]; then
-        kv Now blocked
-        bullet 'VPN clients reach Iranian addresses through this server again, and those sites see its address'
-        if [[ $IRAN_DIRECT != no ]]; then bullet 'Iranian sites outside the VPN (item 5) turns off too'; fi
-        say
-        confirm_choice 'Stop blocking Iranian addresses?' 'No, keep them blocked' 'Stop blocking them' caution || { cancelled; return 0; }
-        blocked_commit no "$BLOCK_EXTRA" no || return 1
-        systemctl disable --now darban-geo.timer >/dev/null 2>&1 || true
-        audit 'blocked destinations: Iranian addresses no longer blocked'
-        ok 'Iranian addresses are no longer blocked.'
-        return 0
-    fi
-    blocked_needs_full_tunnel || return 0
-    kv Now 'not blocked'
-    info "VPN clients cannot reach addresses in Iran through this server. Iranian sites and services then never see this server's address, so they cannot report it."
-    bullet 'Iranian sites and apps do not open while the VPN is connected; users disconnect it for them'
-    bullet 'the list, about 2,100 ranges of Iran and of Iranian CDNs, comes from github.com/Chocolate4U/Iran-v2ray-rules and is updated every day'
-    bullet 'no restart: it applies at once, to connections already open too'
-    say
-    confirm_choice 'Block Iranian addresses?' 'No, keep them reachable' 'Block them' caution || { cancelled; return 0; }
-    info 'Downloading the list of Iran...'
-    if ! iran_list_fetch; then
-        if [[ ! -s $IRAN_LIST ]]; then fail "The list of Iran could not be downloaded: $GEO_WHY. Nothing was changed."; return 1; fi
-        warn "A new list could not be downloaded: $GEO_WHY. The one from $(iran_list_value date) is used."
-    fi
-    blocked_commit yes "$BLOCK_EXTRA" || return 1
-    if ! systemctl enable --now darban-geo.timer >/dev/null 2>&1; then
-        warn 'The daily update of the list did not start, so the list stays as it is now. See: systemctl status darban-geo.timer'
-    fi
-    audit "blocked destinations: Iranian addresses blocked, $(iran_list_value ranges) ranges"
-    ok "Blocked: Iranian addresses, $(iran_list_value ranges) ranges. Applied at once."
+    blocked_commit "$BLOCK_COUNTRIES" "$BLOCK_EXTRA" "$choice" || return 1
+    audit "blocked destinations: their sites $(mode_label)"
+    if [[ $choice == no ]]; then ok 'Saved: their sites are blocked.'; return 0; fi
+    ok "Saved: their sites $(mode_label). Clients get it when they next connect."
+    direct_coverage
 }
 block_address() {
     local entry count
@@ -5246,7 +5357,7 @@ block_address() {
         'Enter a public IPv4 address, or a range of them no larger than /8, such as 203.0.114.0/24.' || return 0
     entry=$(python3 -I "$GEO_PY" entry "$REPLY") || return 1
     if [[ " $BLOCK_EXTRA " == *" $entry "* ]]; then info "$entry is already blocked; nothing changed."; return 0; fi
-    blocked_commit "$BLOCK_IRAN" "${BLOCK_EXTRA:+$BLOCK_EXTRA }$entry" || return 1
+    blocked_commit "$BLOCK_COUNTRIES" "${BLOCK_EXTRA:+$BLOCK_EXTRA }$entry" || return 1
     audit "blocked destinations: $entry blocked"
     ok "Blocked: $entry. Applied at once."
 }
@@ -5262,66 +5373,76 @@ unblock_address() {
     prompt_valid "Choose 1-${#words[@]} to unblock (Enter = cancel): " valid_unblock_choice "Enter a number from 1 to ${#words[@]}." || return 0
     entry=${words[10#$REPLY - 1]}
     for i in "${!words[@]}"; do (( i == 10#$REPLY - 1 )) || kept+=("${words[i]}"); done
-    blocked_commit "$BLOCK_IRAN" "${kept[*]}" || return 1
+    blocked_commit "$BLOCK_COUNTRIES" "${kept[*]}" || return 1
     audit "blocked destinations: $entry unblocked"
     ok "Unblocked: $entry. Applied at once."
 }
-update_iran_list() {
+update_lists() {
     # Also what darban-geo.timer runs each day, through "darban geo-update".
-    if [[ $BLOCK_IRAN != yes ]]; then
-        info 'Iranian addresses are not blocked, so the list is not used. Item 1 turns it on.'
+    local cc failed=0 summary=''
+    geo_migrate || true
+    if [[ -z $BLOCK_COUNTRIES ]]; then
+        info 'No country is blocked, so no list is used. Item 1 chooses them.'
         # The owner's own ranges are written and loaded again, as after a restore, which brings the settings only.
         if [[ -n $BLOCK_EXTRA ]]; then
-            blocked_commit no "$BLOCK_EXTRA" || return 1
+            blocked_commit '' "$BLOCK_EXTRA" || return 1
             ok 'Your own addresses are loaded again.'
         fi
         return 0
     fi
-    info 'Downloading the list of Iran...'
-    if ! iran_list_fetch; then
-        fail "The list of Iran was not updated: $GEO_WHY. The one from $(iran_list_value date) stays in use."
-        audit "blocked destinations: the list of Iran was not updated: $GEO_WHY"
-        return 1
-    fi
-    blocked_commit yes "$BLOCK_EXTRA" || return 1
-    ok "The list of Iran is up to date: $(iran_list_value ranges) ranges."
+    for cc in $BLOCK_COUNTRIES; do
+        info "Downloading the list of $(country_name "$cc")..."
+        if ! country_fetch "$cc"; then
+            failed=1
+            fail "The list of $(country_name "$cc") was not updated: $GEO_WHY. The one from $(country_value "$cc" date) stays in use."
+            audit "blocked destinations: the list of $(country_name "$cc") was not updated: $GEO_WHY"
+        fi
+    done
+    blocked_commit "$BLOCK_COUNTRIES" "$BLOCK_EXTRA" || return 1
+    (( ! failed )) || return 1
+    for cc in $BLOCK_COUNTRIES; do summary+="${summary:+, }$(country_name "$cc") $(country_value "$cc" ranges) ranges"; done
+    ok "The lists are up to date: $summary."
 }
 blocked_health() {
     # blocked_health <VPN network>: the rules that refuse blocked destinations run, and hold what the file says.
-    local want live date age
-    [[ $BLOCK_IRAN == yes || -n $BLOCK_EXTRA || -s $DARBAN_BLOCKED ]] || return 0
+    local want live cc date age oldest='' name=''
+    [[ -n $BLOCK_COUNTRIES || -n $BLOCK_EXTRA || -s $DARBAN_BLOCKED ]] || return 0
     if ! darban_live_blocked_ok "$1"; then
         check bad "Blocked destinations are not refused: their rules are not loaded $S_ARROW sudo systemctl restart darban-nat.service"
         return 0
     fi
     want=$(grep -c . "$DARBAN_BLOCKED" 2>/dev/null) || want=0
     live=$(darban_live_blocked_count) || live=0
-    if (( want == 0 )) && [[ $BLOCK_IRAN == yes || -n $BLOCK_EXTRA ]]; then
+    if (( want == 0 )) && [[ -n $BLOCK_COUNTRIES || -n $BLOCK_EXTRA ]]; then
         # As after a restore: it brings the settings, not the lists.
-        check bad "Settings block $(blocked_summary), but no list of them is loaded $S_ARROW sudo darban, then Settings > Blocked destinations > 4"
+        check bad "Settings block $(blocked_summary), but no list of them is loaded $S_ARROW sudo darban, then Settings > Blocked destinations > 5"
     elif (( want > 0 && live == 0 )); then
         check bad "Blocked destinations are not refused: the loaded list is empty $S_ARROW sudo systemctl restart darban-nat.service"
     else
         check ok "Blocked destinations are refused: $want $( (( want == 1 )) && printf range || printf ranges) ($(blocked_summary))"
     fi
-    [[ $BLOCK_IRAN == yes ]] || return 0
-    date=$(iran_list_value date)
-    age=$(( ($(date -u +%s) - $(date -u -d "${date:-1970-01-01}" +%s 2>/dev/null || echo 0)) / 86400 ))
+    [[ -n $BLOCK_COUNTRIES ]] || return 0
+    for cc in $BLOCK_COUNTRIES; do
+        date=$(country_value "$cc" date)
+        if [[ -z $oldest || ${date:-0000} < $oldest ]]; then oldest=${date:-0000}; name=$(country_name "$cc"); fi
+    done
+    [[ $oldest != 0000 ]] || oldest=1970-01-01
+    age=$(( ($(date -u +%s) - $(date -u -d "$oldest" +%s 2>/dev/null || echo 0)) / 86400 ))
     if (( age > 7 )); then
-        check warn "The list of Iran is $age days old: its daily update fails $S_ARROW sudo systemctl status darban-geo.service"
+        check warn "The list of $name is $age days old: its daily update fails $S_ARROW sudo systemctl status darban-geo.service"
     elif ! systemctl is-active --quiet darban-geo.timer 2>/dev/null; then
-        check warn "The daily update of the list of Iran is off $S_ARROW sudo systemctl enable --now darban-geo.timer"
+        check warn "The daily update of the lists of countries is off $S_ARROW sudo systemctl enable --now darban-geo.timer"
     fi
-    [[ $IRAN_DIRECT != no ]] || return 0
+    [[ $COUNTRY_DIRECT != no ]] || return 0
     want=$(grep -c '^push "route ' "$DIRECT_ROUTES" 2>/dev/null) || want=0
-    if (( want == 0 )); then
-        check bad "Iranian sites outside the VPN is on, but its routes are not on this server, so every client sends Iran through the VPN, where it is blocked $S_ARROW sudo darban, then Settings > Blocked destinations > 4"
+    if (( want == 0 )) || [[ ! -s $DIRECT_ROUTES_SMALL ]]; then
+        check bad "Their sites should go outside the VPN, but the routes are not on this server, so every client sends them through the VPN, where they are blocked $S_ARROW sudo darban, then Settings > Blocked destinations > 5"
     elif ! events_lines_on; then
-        check bad "Iranian sites outside the VPN is on, but connection events are off, so no client gets its routes $S_ARROW see Connection events below"
-    elif [[ $IRAN_DIRECT == no-android ]]; then
-        check ok "Iranian sites go outside the VPN: $want routes, given at connection to every client that can take them but Android phones"
+        check bad "Their sites should go outside the VPN, but connection events are off, so no client gets the routes $S_ARROW see Connection events below"
+    elif [[ $COUNTRY_DIRECT == no-android ]]; then
+        check ok "Their sites go outside the VPN: $want routes, given at connection to every client that can take them but Android phones"
     else
-        check ok "Iranian sites go outside the VPN: $want routes, given at connection to every client that can take them"
+        check ok "Their sites go outside the VPN: $want routes, given at connection to every client that can take them"
     fi
 }
 # ---------- backup and restore of the CA ----------
@@ -6472,11 +6593,11 @@ main() {
                 load_config
                 run_action backup_command "${2:-daily}"
                 exit "$ACTION_RC" ;;
-            # For systemd only: the daily update of the list of Iran, for Settings > Blocked destinations.
+            # For systemd only: the daily update of the lists of countries, for Settings > Blocked destinations.
             geo-update)
                 darban_require_root || exit 1
                 load_config
-                run_action update_iran_list
+                run_action update_lists
                 exit "$ACTION_RC" ;;
             # It takes the rest of the line as its own.
             restore) cmd=restore; shift; RESTORE_ARGS=("$@"); break ;;
