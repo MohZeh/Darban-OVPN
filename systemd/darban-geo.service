@@ -1,5 +1,5 @@
 [Unit]
-Description=Darban OVPN daily lists of countries, for blocked destinations
+Description=Darban OVPN daily lists of countries and of names, for blocked destinations
 # Started by darban-geo.timer, which Settings > Blocked destinations turns on and off.
 Wants=network-online.target
 After=network-online.target
@@ -9,7 +9,8 @@ Type=oneshot
 User=root
 Group=root
 ExecStart=/usr/local/sbin/darban geo-update
-TimeoutStartSec=10min
+# Iranian sites abroad asks the upstream DNS for every name of Iran once a week: a few minutes.
+TimeoutStartSec=30min
 UMask=0077
 NoNewPrivileges=true
 PrivateTmp=true

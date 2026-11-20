@@ -580,6 +580,15 @@ ip netns exec "$NS" python3 -I "$LOG/ask.py" 192.0.2.53
 darban status >"$LOG/dns-status.log" 2>&1 || true
 grep -q "DNS on this server answers on $dns_gateway" "$LOG/dns-status.log"
 if grep -q 'Clients can still use another DNS' "$LOG/dns-status.log"; then echo 'FAIL: Diagnostics do not see the rules that send DNS here.'; exit 1; fi
+# A name of the owner's own: the real Unbound answers "no such name" for it, and answers again once it is removed.
+printf '7\n8\n7\nexample.com\n0\n0\n0\n' | darban | tee "$LOG/name-block.log"
+grep -q 'Blocked: example.com.' "$LOG/name-block.log"
+answer=$(ip netns exec "$NS" python3 -I "$LOG/ask.py" "$dns_gateway" || true)
+if [[ $answer != 'rcode 3, 0 answers' ]]; then echo "FAIL: a blocked name was answered: $answer"; exit 1; fi
+printf '7\n8\n7\n1\n0\n0\n0\n' | darban | tee "$LOG/name-unblock.log"
+grep -q 'Removed: example.com.' "$LOG/name-unblock.log"
+ip netns exec "$NS" python3 -I "$LOG/ask.py" "$dns_gateway"
+echo 'PASS: a blocked name answers "no such name" through the real Unbound, and answers again once removed.'
 printf '7\n8\n3\n2\n0\n0\n0\n' | darban | tee "$LOG/dns-tls.log"
 grep -q 'Applied: DNS over TLS on' "$LOG/dns-tls.log"
 ip netns exec "$NS" python3 -I "$LOG/ask.py" "$dns_gateway"

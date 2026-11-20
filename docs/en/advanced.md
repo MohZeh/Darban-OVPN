@@ -185,10 +185,16 @@ Only IPv4 goes through the VPN, so only IPv4 is blocked. In a split tunnel no tr
 | 3 | DNS over TLS | This server asks the upstream DNS over TLS, port 853, so the network of the server's provider cannot read or change its questions. Only with the four DNS of the list, whose certificates are checked by name |
 | 4 | Clients must use it | DNS a client sends to any other server is answered by this one, and DNS over TLS from clients is refused. DNS over HTTPS cannot be told from other web traffic and still passes; Firefox is told to keep its own off. On by default |
 | 5 | DNSSEC check | Answers of signed names are checked, so a forged one is refused. On by default |
+| 6 | Name lists | Each on or off: **Iranian sites hosted abroad**, **Ads and trackers** (about 92,000 names) and **Malware and phishing** (about 17,000), from the same source as the lists of countries. See below |
+| 7 | Names you block | A name such as `example.com`, with every name under it; a number removes one. Up to 200 |
+| 8 | Names you allow | A name that always passes, with every name under it, even when a list blocks it, for a site a list blocks by mistake. Up to 200 |
+| 9 | Update the name lists | `darban-geo.timer` also does this every day |
 
 While Unbound is down, clients cannot open any name. A drop-in, `/etc/systemd/system/unbound.service.d/darban.conf`, starts it again at once, and **Diagnostics** name it when it does not run, when clients are told another DNS, and when the rules that send DNS here are not loaded. The tool's file is `/etc/unbound/unbound.conf.d/darban.conf`; anything else of Unbound is left as it is. With ufw active, the rule `ufw allow in on tun0 to any port 53` is added. A new VPN network moves all of it to the new address.
 
-A restore onto a server that does not run it tells clients the upstream DNS instead, and says so. The settings are `DNS_SERVER`, `DNS_UPSTREAM`, `DNS_TLS`, `DNS_FORCE` and `DNS_DNSSEC` in `/etc/darban/config`.
+**Blocked names.** Unbound answers "no such name" for each blocked name, from a zone of response policy, `/etc/unbound/darban.rpz`. Clients reach none of those sites through this server, so they never see its address. **Iranian sites hosted abroad** are the names of Iran's list whose every address lies outside Iran: about one Iranian site in five, which neither blocking addresses nor sending Iran outside the VPN reaches. The server asks the upstream DNS for every name of Iran's list to find them, once a week, which takes a few minutes. A client that uses DNS over HTTPS, or a DNS of its own while item 4 is off, does not ask this server, and passes. Names chosen while DNS on this server is off apply once it is on.
+
+A restore onto a server that does not run it tells clients the upstream DNS instead, and says so. The settings are `DNS_SERVER`, `DNS_UPSTREAM`, `DNS_TLS`, `DNS_FORCE`, `DNS_DNSSEC`, `NAME_LISTS`, `NAMES_BLOCK` and `NAMES_ALLOW` in `/etc/darban/config`.
 
 ## Firewall ports
 

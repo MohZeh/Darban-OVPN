@@ -204,6 +204,7 @@ sed -e "s#^source /usr/local/lib/darban/#source $E/lib/#" -e "s#^OUT_DIR=.*#OUT_
     -e "s#^LE_DIR=.*#LE_DIR=$E/le#" -e "s#^LINK_CERT_LOG=.*#LINK_CERT_LOG=$E/varlib/link-certificates.log#" \
     -e "s#^GEO_SOURCE=.*#GEO_SOURCE=file://$E/geo-src/#" -e "s#^UNBOUND_DIR=.*#UNBOUND_DIR=$E/unbound#" \
     -e "s#^UNBOUND_ROOT_KEY=.*#UNBOUND_ROOT_KEY=$E/varlib/unbound/root.key#" -e "s#^DNS_ROOT_DATA=.*#DNS_ROOT_DATA=$E/dns-root.key#" \
+    -e "s#^UNBOUND_RPZ=.*#UNBOUND_RPZ=$E/unbound-zone/darban.rpz#" -e "s#^NAMES_DNS_PORT=.*#NAMES_DNS_PORT=15353#" \
     -e "s#^EVENT_SCRIPT=.*#EVENT_SCRIPT=$E/libexec/darban-ovpn-event#" -e "s#^EVENT_DIR=.*#EVENT_DIR=$E/events#" \
     -e "s#^LEDGER_DIR=.*#LEDGER_DIR=$E/varlib/clients#" \
     -e "s#^PKI_BACKUP_DIR=.*#PKI_BACKUP_DIR=$E/pki-backups#" -e "s#^RESTORE_WARN=.*#RESTORE_WARN=$E/varlib/restore-unverified#" \
