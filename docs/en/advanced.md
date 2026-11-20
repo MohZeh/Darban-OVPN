@@ -157,19 +157,22 @@ The menu looks for a new release when it starts, at most once an hour, by asking
 
 | # | Item | Notes |
 |---|---|---|
-| 1 | Iranian addresses | About 2,100 ranges of Iran and of Iranian CDNs (ArvanCloud, Derak, IranServer, ParsPack), from [Chocolate4U/Iran-v2ray-rules](https://github.com/Chocolate4U/Iran-v2ray-rules), the list that panels such as 3x-ui use as `geoip:ir`. Iranian sites and apps do not open while the VPN is connected; users disconnect it for them |
-| 2 | Block an address | A public IPv4 address, or a range no larger than `/8`, such as `203.0.114.0/24`; up to 200 |
-| 3 | Unblock an address | One of your own, from a numbered list |
-| 4 | Update the list of Iran | `darban-geo.timer` also does this every day. A list that looks wrong, such as one with less than half the ranges of the last, is refused, and the last good one stays in use |
-| 5 | Iranian sites outside the VPN | Off; on for every device; or on except Android phones. Needs item 1 and connection events. See below |
+| 1 | Countries | The countries your users live in, up to 10. The list offers Iran, Afghanistan, Russia, China, Turkey, Belarus and Turkmenistan by number; type the two-letter code of any other, such as `kz`. Numbers and codes turn a country on or off |
+| 2 | Their sites | **Blocked**: they do not open while the VPN is connected. **Outside the VPN**: they open, through the user's own internet. **Outside the VPN, except Android phones**. See below |
+| 3 | Block an address | A public IPv4 address, or a range no larger than `/8`, such as `203.0.114.0/24`; up to 200 |
+| 4 | Unblock an address | One of your own, from a numbered list |
+| 5 | Update the lists | `darban-geo.timer` also does this every day. A list that looks wrong, such as one with less than half the ranges of the last, is refused, and the last good one stays in use |
 
-**Iranian sites outside the VPN.** Blocking keeps the server's address hidden, but Iranian sites then do not open while the VPN is connected. With item 5, each client that connects also gets the list of Iran as routes outside the tunnel: it sends Iranian addresses through its own internet, so those sites open, see the user's own address as without the VPN, and never see this server's. The routes are given by the script of connection events, from `/etc/openvpn/server/darban-direct.routes`, so a new list reaches each client at its next connection, without a restart.
+The lists come from [Chocolate4U/Iran-v2ray-rules](https://github.com/Chocolate4U/Iran-v2ray-rules), made each day from public GeoIP data; the list of Iran is the one panels such as 3x-ui use as `geoip:ir`, with the ranges of Iranian CDNs (ArvanCloud, Derak, IranServer, ParsPack) added.
 
-- Only clients that can take the whole list get it: OpenVPN 2, and OpenVPN 3 from `3.11.1`, which OpenVPN Connect `3.7.3` on Android and `3.9.0` on Windows have. An older OpenVPN 3 refuses a connection whose options pass 256 KiB, so it gets no routes, and for it Iranian addresses stay blocked: the server's address still never shows.
-- Tested on Android 13 or newer and on Windows: the connection took 3 to 7 seconds, and no traffic to Iran passed the server. Android 12 and older, which turn the list into many more routes, and iOS were not tested. If Android users cannot connect, choose **on except Android phones**.
-- An Iranian site hosted outside Iran, about one in five, is not in the list, and still goes through the VPN.
+**Their sites outside the VPN.** Blocking keeps the server's address hidden, but those sites then do not open while the VPN is connected. Outside the VPN, each client that connects also gets the ranges of the countries as routes outside the tunnel: it sends them through its own internet, so those sites open, see the user's own address as without the VPN, and never see this server's. Connection events must be on: their script gives the routes, from `/etc/openvpn/server/darban-direct.routes`, so a new list reaches each client at its next connection, without a restart.
 
-Only IPv4 goes through the VPN, so only IPv4 is blocked. In a split tunnel no traffic to the internet passes this server, so nothing is blocked there. The ranges are written into `/etc/darban/nat.nft` itself, so they load at boot with NAT and stay when the VPN network changes. **Diagnostics** show how many ranges are refused, and warn when the list of Iran is more than a week old. The settings are `BLOCK_IRAN=yes`, `BLOCK_EXTRA` and `IRAN_DIRECT` in `/etc/darban/config`.
+- OpenVPN 3 counts the options a server pushes, and refuses a connection above 256 KiB before `3.11.1` and 768 KiB from then. So there are two lists: OpenVPN 2 and OpenVPN 3 from `3.11.1`, which OpenVPN Connect `3.7.3` on Android and `3.9.0` on Windows have, get `darban-direct.routes`; an older OpenVPN 3 gets `darban-direct-small.routes`. Any other client gets none. Each list takes the largest ranges first, while they fit.
+- What a list cannot hold stays blocked for that client, so the server's address still never shows; those sites just do not open. Iran (about 2,100 ranges) fits whole for new apps. Russia (about 12,900) and China (about 7,300) do not: the largest ranges go, about 91% of Russia's addresses and 99.8% of China's, and the menu says so.
+- Tested with Iran on Android 13 or newer and on Windows: the connection took 3 to 7 seconds, and no traffic to Iran passed the server. Android 12 and older, which turn a list into many more routes, and iOS were not tested. If Android users cannot connect, choose **outside the VPN, except Android phones**.
+- A site of the country hosted elsewhere, about one Iranian site in five, is not in the list, and still goes through the VPN.
+
+Only IPv4 goes through the VPN, so only IPv4 is blocked. In a split tunnel no traffic to the internet passes this server, so nothing is blocked there. The ranges are written into `/etc/darban/nat.nft` itself, so they load at boot with NAT and stay when the VPN network changes. **Diagnostics** show how many ranges are refused, and warn when a list is more than a week old. The settings are `BLOCK_COUNTRIES`, `COUNTRY_DIRECT` and `BLOCK_EXTRA` in `/etc/darban/config`, and the lists are in `/etc/darban/geo`.
 
 ## Firewall ports
 
@@ -286,7 +289,7 @@ The backup that **Remove everything** offers is a `.tar.gz` file in `/root`, rea
 | **Setup › Uninstall this tool only** | The tool, its timers, open links, the units and queue of connection events, and this tool's hook in certbot's renewal file | OpenVPN, PKI, CRL, `server.conf`, profiles, settings, the link certificate from Let's Encrypt, which certbot goes on renewing, and the event script with its lines in `server.conf`, so OpenVPN needs no restart |
 | **Setup › Remove everything** | The tool, OpenVPN, CA, profiles, NAT, connection events and the record of when clients were seen, the repository, the packages and the certbot the setup added | The link certificate it got from Let's Encrypt, unless you choose to delete it, so a new install here uses it without a new request; the Virtual HWE kernel unless you choose otherwise, the optional backup, and what was there before: other files in the profile folder, `ufw` rules, and repository files, which are put back |
 
-**After Uninstall, nothing renews the CRL.** Renew it yourself before it expires, or OpenVPN may refuse clients. Blocked destinations stay blocked, since they are part of NAT, but the list of Iran is no longer updated.
+**After Uninstall, nothing renews the CRL.** Renew it yourself before it expires, or OpenVPN may refuse clients. Blocked destinations stay blocked, since they are part of NAT, but their lists are no longer updated.
 
 **After Remove everything, every `.ovpn` file stops working,** even if you install OpenVPN again. Only restoring the backup brings the old CA, and with it the old profiles, back. Copies on devices are not deleted; they just cannot connect. A backup is offered first and is the default. This option works only on a server the setup created. Packages are removed only if the setup added them and nothing else needs them. The running kernel is never removed. Closing ports in your provider's firewall is up to you.
 

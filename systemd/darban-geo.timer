@@ -1,5 +1,5 @@
 [Unit]
-Description=Darban OVPN daily update of the list of Iran
+Description=Darban OVPN daily update of the lists of countries
 
 [Timer]
 # The list is made each day at about 13:30 UTC.

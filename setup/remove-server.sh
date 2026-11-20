@@ -201,7 +201,7 @@ for file in "${apt_saved[@]}"; do
 done
 # Only what the setup and the tool created: another file there belongs to someone else.
 try rm -f -- "$SERVER_DIR"/server.conf "$SERVER_DIR"/server.conf.darban-*backup.* "$SERVER_DIR"/ca.crt "$SERVER_DIR"/server.crt \
-    "$SERVER_DIR"/server.key "$SERVER_DIR"/crl.pem "$SERVER_DIR"/tls-crypt.key "$SERVER_DIR"/.darban-* "$SERVER_DIR"/darban-direct.routes
+    "$SERVER_DIR"/server.key "$SERVER_DIR"/crl.pem "$SERVER_DIR"/tls-crypt.key "$SERVER_DIR"/.darban-* "$SERVER_DIR"/darban-direct.routes "$SERVER_DIR"/darban-direct-small.routes
 if [[ -d $SERVER_DIR ]] && ! rmdir -- "$SERVER_DIR" 2>/dev/null; then
     KEPT_FILES=$SERVER_DIR
 fi

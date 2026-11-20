@@ -8,22 +8,24 @@
 # full, read-only, or a value from OpenVPN that does not look right. Installed as /usr/local/libexec/darban-ovpn-event,
 # outside the tool's own folder, so removing the tool never leaves server.conf naming a script that is gone.
 #
-# At a connection it also gives the client the routes of Settings > Blocked destinations > Iranian sites outside
-# the VPN, so its traffic to Iran goes through its own internet. Those lines go into the file OpenVPN names as $1.
+# At a connection it also gives the client the routes of Settings > Blocked destinations > Their sites, outside the
+# VPN, so its traffic to those countries goes through its own internet. Those lines go into the file OpenVPN names
+# as $1.
 queue=/run/darban-events
 direct=/etc/openvpn/server/darban-direct.routes
+direct_small=/etc/openvpn/server/darban-direct-small.routes
 direct_routes() {
-    # direct_routes <file OpenVPN reads>: the routes, to a client that can take them. Only root can write the list,
+    # direct_routes <file OpenVPN reads>: the routes, to a client that can take them. Only root can write the lists,
     # and still only lines shaped as one route each are passed on, so nothing else ever reaches a client.
-    local version=${IV_VER-} lines line out=''
-    # OpenVPN 3, as in OpenVPN Connect, refuses a connection whose options pass 256 KiB before 3.11.1, and the whole
-    # list counts more. OpenVPN 2 has no such limit. Any other client gets nothing.
+    local version=${IV_VER-} file=$direct lines line out=''
+    # OpenVPN 3, as in OpenVPN Connect, refuses a connection whose options pass 256 KiB before 3.11.1, and 768 KiB from
+    # then; the two lists are made to fit each. OpenVPN 2 has no such limit. Any other client gets nothing.
     if [[ $version =~ ^3\.([0-9]{1,3})(\.([0-9]{1,3}))? ]]; then
-        (( 10#${BASH_REMATCH[1]} > 11 || (10#${BASH_REMATCH[1]} == 11 && 10#${BASH_REMATCH[3]:-0} >= 1) )) || return 0
+        (( 10#${BASH_REMATCH[1]} > 11 || (10#${BASH_REMATCH[1]} == 11 && 10#${BASH_REMATCH[3]:-0} >= 1) )) || file=$direct_small
     elif [[ ! $version =~ ^2\.[0-9] ]]; then
         return 0
     fi
-    mapfile -t lines <"$direct" 2>/dev/null || return 0
+    mapfile -t lines 2>/dev/null <"$file" || return 0
     [[ ${lines[0]-} =~ ^#\ darban-direct\ 1\ android=(yes|no)$ ]] || return 0
     if [[ ${BASH_REMATCH[1]} == no && ${IV_PLAT-} == android ]]; then return 0; fi
     for line in "${lines[@]:1}"; do
@@ -31,7 +33,7 @@ direct_routes() {
     done
     printf '%s' "$out" 2>/dev/null >>"$1"
 }
-if [[ ${script_type-} == client-connect && -n ${1-} && -r $direct ]]; then direct_routes "$1"; fi
+if [[ ${script_type-} == client-connect && -n ${1-} ]]; then direct_routes "$1"; fi
 # Written last by the job that makes the folders inside the tmpfs: without it, nothing lands on /run itself.
 [[ -e $queue/.mounted ]] || exit 0
 case ${script_type-} in

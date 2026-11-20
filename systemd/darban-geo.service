@@ -1,5 +1,5 @@
 [Unit]
-Description=Darban OVPN daily list of Iran, for blocked destinations
+Description=Darban OVPN daily lists of countries, for blocked destinations
 # Started by darban-geo.timer, which Settings > Blocked destinations turns on and off.
 Wants=network-online.target
 After=network-online.target

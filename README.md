@@ -57,7 +57,7 @@ sudo darban
 - Daily CRL renewal, with protection against a restored old CA database silently un-revoking clients
 - Advanced settings for routing, DNS, network, ciphers and keepalive, with automatic rollback
 - TCP MSS for VPN traffic is limited, so websites also open on networks that drop split packets
-- Blocked destinations: VPN clients cannot reach Iranian addresses, or addresses you choose, through the server, so those sites never see its address; Iranian sites can go outside the VPN instead, so they still open
+- Blocked destinations: VPN clients cannot reach the addresses of chosen countries, such as Iran, Russia or China, or addresses you choose, through the server, so those sites never see its address; the sites of those countries can go outside the VPN instead, so they still open
 - Update notice in the menu, update and restore from inside the tool
 - A setup that stops half way continues on the next run, or can be undone
 - Diagnostics, updates and removal keep working on a broken server

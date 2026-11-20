@@ -1321,15 +1321,16 @@ test_advanced_settings_are_applied_and_rolled_back() {
 }
 
 geo_source() {
-    # geo_source <count>: a list of Iran with <count> public /24 ranges that do not touch, where the tool downloads it,
-    # with a comment, an IPv6 range and a private one, which are left out, and one CDN list of the five.
-    local i
+    # geo_source <count> [country] [first byte]: a list of a country, Iran unless named, with <count> public /24 ranges
+    # that do not touch, in 37.0.0.0/8 unless another first byte is given, where the tool downloads it, with a comment,
+    # an IPv6 range and a private one, which are left out. Iran also gets one of its five CDN lists.
+    local i cc=${2:-ir} first=${3:-37}
     mkdir -p "$E/geo-src/text"
     {
         printf '# a comment\n2001:db8::/32\n10.0.0.0/8\n'
-        for (( i = 0; i < $1; i++ )); do printf '37.%d.%d.0/24\n' $(( i / 125 + 1 )) $(( (i % 125) * 2 )); done
-    } > "$E/geo-src/text/ir.txt"
-    printf '185.143.232.0/22\n' > "$E/geo-src/text/arvancloud.txt"
+        for (( i = 0; i < $1; i++ )); do printf '%d.%d.%d.0/24\n' "$first" $(( i / 125 + 1 )) $(( (i % 125) * 2 )); done
+    } > "$E/geo-src/text/$cc.txt"
+    if [[ $cc == ir ]]; then printf '185.143.232.0/22\n' > "$E/geo-src/text/arvancloud.txt"; fi
 }
 
 test_blocked_destinations_are_applied_and_kept() {
@@ -1339,14 +1340,16 @@ test_blocked_destinations_are_applied_and_kept() {
     out=$(menu '7\n0\n0\n')
     has 'Settings offers blocked destinations' "$(printf '%-24s %s' 'Blocked destinations' none)" "$out"
 
-    out=$(menu '7\n7\n1\n1\n0\n0\n0\n')
-    has 'option 1 keeps Iran reachable' 'Cancelled; nothing changed' "$out"
-    if grep -q '^BLOCK_IRAN=' "$E/cfg/config"; then result 0 'nothing is saved after No'; else result 1 'nothing is saved after No'; fi
+    out=$(menu '7\n7\n1\n1\n1\n0\n0\n0\n')
+    has 'the list offers Iran' 'Iran' "$out"
+    has 'option 1 keeps the countries as they are' 'Cancelled; nothing changed' "$out"
+    if grep -q '^BLOCK_COUNTRIES=' "$E/cfg/config"; then result 0 'nothing is saved after No'; else result 1 'nothing is saved after No'; fi
     : > "$STUB_LOG"
-    out=$(menu '7\n7\n1\n2\n0\n0\n0\n')
+    out=$(menu '7\n7\n1\n1\n2\n0\n0\n0\n')
     # 600 ranges of Iran and one of a CDN; the comment, the IPv6 range and the private range are left out.
-    has 'Iran is blocked' 'Blocked: Iranian addresses, 601 ranges' "$out"
-    grep -q '^BLOCK_IRAN=yes$' "$E/cfg/config"; rc_is 'the setting is saved' 0 "$?"
+    has 'Iran is blocked' 'Saved: blocked countries Iran. Applied at once.' "$out"
+    has 'its size is said' 'Iran: 601 ranges' "$out"
+    grep -q '^BLOCK_COUNTRIES=ir$' "$E/cfg/config"; rc_is 'the setting is saved' 0 "$?"
     grep -q '37\.1\.0\.0/24' "$nat"; rc_is 'NAT holds the ranges of Iran' 0 "$?"
     grep -q '185\.143\.232\.0/22' "$nat"; rc_is 'NAT holds the ranges of the CDN' 0 "$?"
     if grep -q '10\.0\.0\.0/8' "$nat"; then result 0 'a private range is left out'; else result 1 'a private range is left out'; fi
@@ -1354,13 +1357,15 @@ test_blocked_destinations_are_applied_and_kept() {
     grep -q 'nft -f' "$STUB_LOG"; rc_is 'the rules are loaded' 0 "$?"
     grep -q 'systemctl enable --now darban-geo.timer' "$STUB_LOG"; rc_is 'the daily update starts' 0 "$?"
     if grep -q 'systemctl restart' "$STUB_LOG"; then result 0 'nothing restarts'; else result 1 'nothing restarts'; fi
-    has 'the menu shows the list' '601 ranges' "$(menu '7\n7\n0\n0\n0\n')"
+    out=$(menu '7\n7\n0\n0\n0\n')
+    has 'the menu shows the country' "$(printf '%-24s %s' Countries Iran)" "$out"
+    has 'and the lists' "$(printf '%-24s %s' 'Update the lists' "$(date -u +%Y-%m-%d)")" "$out"
 
     # A broken list replaces neither the good one nor the rules, in the menu or in the daily job.
     geo_source 20
     cp "$nat" "$E/nat.before"
-    out=$(menu '7\n7\n4\n0\n0\n0\n')
-    has 'a list that is too short is refused' 'too few for the ranges of Iran' "$out"
+    out=$(menu '7\n7\n5\n0\n0\n0\n')
+    has 'a list that shrank by more than half is refused' 'less than half of the 601 of the last one' "$out"
     has 'the last list stays' 'stays in use' "$out"
     cmp -s "$nat" "$E/nat.before"; rc_is 'NAT is unchanged after a refused list' 0 "$?"
     out=$(mgr geo-update); rc_not0 'the daily job fails on a refused list' "$?"
@@ -1370,32 +1375,45 @@ test_blocked_destinations_are_applied_and_kept() {
     has 'it says the last list stays' 'stays in use' "$out"
     geo_source 600
     out=$(mgr geo-update); rc_is 'the daily job updates the list' 0 "$?"
-    has 'it says so' 'The list of Iran is up to date: 601 ranges' "$out"
+    has 'it says so' 'The lists are up to date: Iran 601 ranges' "$out"
+
+    # A second country by its code, and one there is no list for.
+    geo_source 300 af 46
+    out=$(menu '7\n7\n1\naf\n2\n0\n0\n0\n')
+    has 'a country is added by its code' 'Saved: blocked countries Iran, Afghanistan. Applied at once.' "$out"
+    grep -q '^BLOCK_COUNTRIES=ir af$' "$E/cfg/config"; rc_is 'both are saved' 0 "$?"
+    out=$(menu '7\n7\n1\nzz\n2\n0\n0\n0\n')
+    has 'a country without a list is left out' 'It is left out' "$out"
+    has 'and nothing changes' 'Nothing was changed' "$out"
+    out=$(menu '7\n7\n1\nfoo\n\n0\n0\n0\n')
+    has 'a word that is no code is asked again' 'Enter numbers from the list, or two-letter country codes' "$out"
+    out=$(menu '7\n7\n1\n2\n2\n0\n0\n0\n')
+    has 'a number turns a country off' 'Saved: blocked countries Iran. Applied at once.' "$out"
 
     # The owner's own addresses.
-    out=$(menu '7\n7\n2\n10.1.2.3\n\n0\n0\n0\n')
+    out=$(menu '7\n7\n3\n10.1.2.3\n\n0\n0\n0\n')
     has 'a private address is asked again' 'Enter a public IPv4 address' "$out"
-    out=$(menu '7\n7\n2\n1.2.3.4\n0\n0\n0\n')
+    out=$(menu '7\n7\n3\n1.2.3.4\n0\n0\n0\n')
     has 'an address is blocked' 'Blocked: 1.2.3.4/32' "$out"
-    out=$(menu '7\n7\n2\n1.2.3.4\n0\n0\n0\n')
+    out=$(menu '7\n7\n3\n1.2.3.4\n0\n0\n0\n')
     has 'the same address is not added twice' 'already blocked' "$out"
-    out=$(menu '7\n7\n2\n9.9.9.7/24\n0\n0\n0\n')
+    out=$(menu '7\n7\n3\n9.9.9.7/24\n0\n0\n0\n')
     has 'a range is written as its network' 'Blocked: 9.9.9.0/24' "$out"
-    grep -q '^BLOCK_EXTRA=1.2.3.4/32 9.9.9.0/24$' "$E/cfg/config"; rc_is 'both are saved' 0 "$?"
+    grep -q '^BLOCK_EXTRA=1.2.3.4/32 9.9.9.0/24$' "$E/cfg/config"; rc_is 'both addresses are saved' 0 "$?"
     grep -q '1\.2\.3\.4/32' "$nat"; rc_is 'NAT holds an address of your own' 0 "$?"
     has 'Settings shows both kinds' 'Iran, and 2 addresses of your own' "$(menu '7\n0\n0\n')"
-    out=$(menu '7\n7\n3\n1\n0\n0\n0\n')
+    out=$(menu '7\n7\n4\n1\n0\n0\n0\n')
     has 'an address is unblocked' 'Unblocked: 1.2.3.4/32' "$out"
     if grep -q '1\.2\.3\.4/32' "$nat"; then result 0 'NAT no longer holds it'; else result 1 'NAT no longer holds it'; fi
 
-    # Iran off: the timer stops, and the owner's own range stays blocked.
+    # No country: the timer stops, and the owner's own range stays blocked.
     : > "$STUB_LOG"
-    out=$(menu '7\n7\n1\n2\n0\n0\n0\n')
-    has 'Iran is no longer blocked' 'Iranian addresses are no longer blocked' "$out"
+    out=$(menu '7\n7\n1\n1\n2\n0\n0\n0\n')
+    has 'no country is blocked' 'Saved: no country is blocked now.' "$out"
     if grep -q '37\.1\.0\.0/24' "$nat"; then result 0 'NAT no longer holds Iran'; else result 1 'NAT no longer holds Iran'; fi
     grep -q '9\.9\.9\.0/24' "$nat"; rc_is 'the own range stays' 0 "$?"
     grep -q 'systemctl disable --now darban-geo.timer' "$STUB_LOG"; rc_is 'the daily update stops' 0 "$?"
-    out=$(mgr geo-update); rc_is 'without Iran, the job only loads your own addresses again' 0 "$?"
+    out=$(mgr geo-update); rc_is 'without a country, the job only loads your own addresses again' 0 "$?"
     has 'it says so' 'Your own addresses are loaded again' "$out"
 
     # A new VPN network keeps the blocked ranges, and the rules follow it.
@@ -1413,57 +1431,96 @@ test_blocked_destinations_are_applied_and_kept() {
     # In a split tunnel nothing passes this server, so nothing is asked.
     out=$(menu '7\n6\n1\n2\n0\n0\n0\n')
     has 'split tunnel is applied' 'Applied: split tunnel' "$out"
-    out=$(menu '7\n7\n2\n0\n0\n0\n')
+    out=$(menu '7\n7\n3\n0\n0\n0\n')
     has 'a split tunnel is explained' 'In a split tunnel' "$out"
 }
 
-test_iranian_sites_go_outside_the_vpn() {
-    local out routes=$E/server/darban-direct.routes file=$E/client.conf
+test_blocked_destinations_read_the_settings_of_iran_alone() {
+    # The names from before other countries came are read, and the next save writes the new ones; the list of Iran
+    # moves into the folder of the lists.
+    local out
     built_server
     geo_source 600
-    out=$(menu '7\n7\n5\n2\n0\n0\n0\n')
-    has 'Iran must be blocked first' 'Turn on item 1 first' "$out"
-    if grep -q '^IRAN_DIRECT=' "$E/cfg/config"; then result 0 'nothing is saved then'; else result 1 'nothing is saved then'; fi
-    menu '7\n7\n1\n2\n0\n0\n0\n' >/dev/null
-    out=$(menu '7\n7\n5\n2\n0\n0\n0\n')
+    menu '7\n7\n1\n1\n2\n0\n0\n0\n' >/dev/null
+    mkdir -p "$E/old" && mv "$E/cfg/geo/ir.v4" "$E/cfg/iran.v4" && mv "$E/cfg/geo/ir.info" "$E/cfg/iran.v4.info"
+    sed -i 's/^BLOCK_COUNTRIES=ir$/BLOCK_IRAN=yes/' "$E/cfg/config"
+    printf 'IRAN_DIRECT=no-android\n' >> "$E/cfg/config"
+    out=$(menu '7\n0\n0\n')
+    has 'Iran is still blocked, outside the VPN' "Iran"', outside the VPN' "$out"
+    lacks 'and nothing is called unknown' 'Unknown setting' "$out"
+    out=$(menu '7\n7\n0\n0\n0\n')
+    ok_if 'the list moved into its folder' test -s "$E/cfg/geo/ir.v4"
+    ok_if 'and its date too' test -s "$E/cfg/geo/ir.info"
+    out=$(menu '7\n7\n3\n1.2.3.4\n0\n0\n0\n')
+    grep -q '^BLOCK_COUNTRIES=ir$' "$E/cfg/config"; rc_is 'a save writes the new name' 0 "$?"
+    grep -q '^COUNTRY_DIRECT=no-android$' "$E/cfg/config"; rc_is 'of both settings' 0 "$?"
+    if grep -q '^BLOCK_IRAN=\|^IRAN_DIRECT=' "$E/cfg/config"; then result 0 'and drops the old ones'; else result 1 'and drops the old ones'; fi
+}
+
+test_country_sites_go_outside_the_vpn() {
+    local out routes=$E/server/darban-direct.routes small=$E/server/darban-direct-small.routes file=$E/client.conf
+    built_server
+    geo_source 600
+    out=$(menu '7\n7\n2\n2\n0\n0\n0\n')
+    has 'countries come first' 'Choose the countries first (item 1)' "$out"
+    if grep -q '^COUNTRY_DIRECT=' "$E/cfg/config"; then result 0 'nothing is saved then'; else result 1 'nothing is saved then'; fi
+    menu '7\n7\n1\n1\n2\n0\n0\n0\n' >/dev/null
+    out=$(menu '7\n7\n2\n2\n0\n0\n0\n')
     has 'connection events are needed' 'Connection events are off' "$out"
     ok_if 'no routes without them' test ! -e "$routes"
 
     events_here
-    out=$(menu '7\n7\n5\n2\n0\n0\n0\n')
-    has 'it is on' 'Saved: Iranian sites outside the VPN, on' "$out"
-    grep -q '^IRAN_DIRECT=yes$' "$E/cfg/config"; rc_is 'the setting is saved' 0 "$?"
+    out=$(menu '7\n7\n2\n2\n0\n0\n0\n')
+    has 'it is on' 'Saved: their sites outside the VPN. Clients get it when they next connect.' "$out"
+    grep -q '^COUNTRY_DIRECT=yes$' "$E/cfg/config"; rc_is 'the setting is saved' 0 "$?"
     rc_is 'the routes file starts with its mark' '# darban-direct 1 android=yes' "$(head -n 1 "$routes")"
     grep -qx 'push "route 37.1.0.0 255.255.255.0 net_gateway"' "$routes"; rc_is 'a range of Iran is a route outside the tunnel' 0 "$?"
     rc_is 'every range of the list is a route' 601 "$(grep -c '^push "route ' "$routes")"
+    rc_is 'and in the small file too, as they fit' 601 "$(grep -c '^push "route ' "$small")"
     rc_is 'OpenVPN user can read it' 644 "$(stat -c %a "$routes")"
+    rc_is 'and the small one' 644 "$(stat -c %a "$small")"
     : > "$file"; connect_into "$file" IV_VER=2.6.12
     rc_is 'a client that connects gets them all' 601 "$(grep -c '^push "route ' "$file")"
-    has 'Settings shows it' 'Iran, outside the VPN' "$(menu '7\n0\n0\n')"
-    has 'the menu shows it' "$(printf '%-30s %s' 'Iranian sites outside the VPN' on)" "$(menu '7\n7\n0\n0\n0\n')"
+    has 'Settings shows it' "Iran"', outside the VPN' "$(menu '7\n0\n0\n')"
+    has 'the menu shows it' "$(printf '%-24s %s' 'Their sites' 'outside the VPN')" "$(menu '7\n7\n0\n0\n0\n')"
 
-    out=$(menu '7\n7\n5\n3\n0\n0\n0\n')
-    has 'Android can be left out' 'Saved: Iranian sites outside the VPN, on, not for Android' "$out"
+    out=$(menu '7\n7\n2\n3\n0\n0\n0\n')
+    has 'Android can be left out' 'Saved: their sites outside the VPN, not for Android' "$out"
     rc_is 'the file says so' '# darban-direct 1 android=no' "$(head -n 1 "$routes")"
-    out=$(menu '7\n7\n5\n3\n0\n0\n0\n')
+    out=$(menu '7\n7\n2\n3\n0\n0\n0\n')
     has 'the same choice changes nothing' 'Same as now; nothing changed' "$out"
-    out=$(menu '7\n7\n5\n7\n\n0\n0\n0\n')
+    out=$(menu '7\n7\n2\n7\n\n0\n0\n0\n')
     has 'another answer is asked again' 'Enter 1, 2 or 3.' "$out"
 
-    # A new list writes new routes.
-    geo_source 700
-    out=$(menu '7\n7\n4\n0\n0\n0\n')
-    has 'the list is updated' 'The list of Iran is up to date: 701 ranges' "$out"
-    rc_is 'and the routes follow it' 701 "$(grep -c '^push "route ' "$routes")"
+    # A longer list: the small file keeps the largest ranges that fit 256 KiB, for older apps.
+    geo_source 2000
+    out=$(menu '7\n7\n5\n0\n0\n0\n')
+    has 'the list is updated' 'The lists are up to date: Iran 2001 ranges' "$out"
+    rc_is 'the routes follow it' 2001 "$(grep -c '^push "route ' "$routes")"
+    local fit
+    fit=$(grep -c '^push "route ' "$small")
+    ok_if 'the small file holds fewer, as many as fit' test "$fit" -gt 1000 -a "$fit" -lt 2001
+    grep -qx 'push "route 185.143.232.0 255.255.252.0 net_gateway"' "$small"; rc_is 'the largest range comes first' 0 "$?"
+    : > "$file"; connect_into "$file" IV_VER=3.10.6 IV_PLAT=win
+    rc_is 'an older OpenVPN 3 gets the small file' "$fit" "$(grep -c '^push "route ' "$file")"
 
-    out=$(menu '7\n7\n5\n1\n0\n0\n0\n')
-    has 'it can be turned off' 'Saved: Iranian sites outside the VPN, off' "$out"
+    # A country too large for the limit of new apps: the largest ranges go, the rest stays blocked, and it is said.
+    geo_source 4500 ru 46
+    out=$(menu '7\n7\n1\nru\n2\n0\n0\n0\n')
+    has 'a large country is added' 'Saved: blocked countries Iran, Russia' "$out"
+    has 'what does not fit is said' 'Russia: the largest' "$out"
+    has 'and that the rest stays blocked' 'the rest stays blocked' "$out"
+    menu '7\n7\n1\nru\n2\n0\n0\n0\n' >/dev/null
+
+    out=$(menu '7\n7\n2\n1\n0\n0\n0\n')
+    has 'it can be turned off' 'Saved: their sites are blocked.' "$out"
     ok_if 'the routes are gone' test ! -e "$routes"
-    menu '7\n7\n5\n2\n0\n0\n0\n' >/dev/null
-    out=$(menu '7\n7\n1\n2\n0\n0\n0\n')
-    has 'turning Iran off says it takes this along' 'turns off too' "$out"
-    ok_if 'the routes go with Iran' test ! -e "$routes"
-    if grep -q '^IRAN_DIRECT=' "$E/cfg/config"; then result 0 'and the setting too'; else result 1 'and the setting too'; fi
+    ok_if 'and the small ones' test ! -e "$small"
+    menu '7\n7\n2\n2\n0\n0\n0\n' >/dev/null
+    out=$(menu '7\n7\n1\n1\n2\n0\n0\n0\n')
+    has 'turning the last country off says it takes this along' 'turns off too' "$out"
+    ok_if 'the routes go with the countries' test ! -e "$routes"
+    if grep -q '^COUNTRY_DIRECT=' "$E/cfg/config"; then result 0 'and the setting too'; else result 1 'and the setting too'; fi
 }
 
 test_advanced_network_needs_nat_from_this_tool() {
@@ -2854,7 +2911,7 @@ STUB
 
 test_diagnostics_check_blocked_destinations() {
     # The live rules and the live set, from a stand-in for nft that answers from files.
-    local out
+    local out rules
     printf 'server 10.8.0.0 255.255.255.0\n' >> "$SERVER_CONF"
     cat > "$E/bin/nft" <<'STUB'
 #!/usr/bin/env bash
@@ -2866,11 +2923,12 @@ case "$*" in
 esac
 STUB
     chmod +x "$E/bin/nft"
+    rules='\t\tip saddr 10.8.0.0/24 ip daddr @blocked ip protocol tcp reject with tcp reset\n\t\tip saddr 10.8.0.0/24 ip daddr @blocked reject with icmp admin-prohibited\n'
     out=$(mgr status)
     lacks 'nothing is said while nothing is blocked' 'Blocked destinations' "$out"
     printf 'BLOCK_EXTRA=9.9.9.0/24 1.2.3.4/32\n' >> "$E/cfg/config"
     printf '1.2.3.4/32\n9.9.9.0/24\n' > "$E/cfg/blocked.v4"
-    printf '\t\tip saddr 10.8.0.0/24 ip daddr @blocked ip protocol tcp reject with tcp reset\n\t\tip saddr 10.8.0.0/24 ip daddr @blocked reject with icmp admin-prohibited\n' > "$E/live-forward"
+    printf "$rules" > "$E/live-forward"
     printf 'table ip darban {\n\tset blocked {\n\t\ttype ipv4_addr\n\t\tflags interval\n\t\telements = { 1.2.3.4,\n\t\t\t     9.9.9.0/24 }\n\t}\n}\n' > "$E/live-set"
     out=$(mgr status)
     has 'the rules and the list are seen' 'Blocked destinations are refused: 2 ranges (2 addresses of your own)' "$out"
@@ -2879,22 +2937,25 @@ STUB
     : > "$E/live-forward"
     has 'missing rules are named' 'their rules are not loaded' "$(mgr status)"
     # A restore brings the settings, not the lists.
-    printf '\t\tip saddr 10.8.0.0/24 ip daddr @blocked ip protocol tcp reject with tcp reset\n\t\tip saddr 10.8.0.0/24 ip daddr @blocked reject with icmp admin-prohibited\n' > "$E/live-forward"
+    printf "$rules" > "$E/live-forward"
     rm -f "$E/cfg/blocked.v4"
     has 'settings without a list are named' 'but no list of them is loaded' "$(mgr status)"
-    # A list of Iran that its daily update no longer renews.
-    printf '\t\tip saddr 10.8.0.0/24 ip daddr @blocked ip protocol tcp reject with tcp reset\n\t\tip saddr 10.8.0.0/24 ip daddr @blocked reject with icmp admin-prohibited\n' > "$E/live-forward"
-    printf 'BLOCK_IRAN=yes\n' >> "$E/cfg/config"
-    printf 'date 2026-01-01\nranges 2100\n' > "$E/cfg/iran.v4.info"
-    printf '37.1.0.0/24\n' > "$E/cfg/iran.v4"
-    has 'an old list of Iran is named' 'days old: its daily update fails' "$(mgr status)"
-    # Iranian sites outside the VPN: its routes, and the script that gives them.
-    printf 'IRAN_DIRECT=yes\n' >> "$E/cfg/config"
-    has 'missing routes are named' 'its routes are not on this server' "$(mgr status)"
-    printf '# darban-direct 1 android=yes\npush "route 37.1.0.0 255.255.255.0 net_gateway"\npush "route 37.1.2.0 255.255.255.0 net_gateway"\n' > "$E/server/darban-direct.routes"
+    # A list of a country that its daily update no longer renews.
+    printf 'BLOCK_COUNTRIES=ir af\n' >> "$E/cfg/config"
+    mkdir -p "$E/cfg/geo"
+    printf 'date %s\nranges 2100\n' "$(date -u +%Y-%m-%d)" > "$E/cfg/geo/ir.info"
+    printf 'date 2026-01-01\nranges 243\n' > "$E/cfg/geo/af.info"
+    printf '37.1.0.0/24\n' > "$E/cfg/geo/ir.v4"; printf '37.2.0.0/24\n' > "$E/cfg/geo/af.v4"
+    has 'the oldest list is named' 'The list of Afghanistan is' "$(mgr status)"
+    # Their sites outside the VPN: the routes, and the script that gives them.
+    printf 'COUNTRY_DIRECT=yes\n' >> "$E/cfg/config"
+    has 'missing routes are named' 'but the routes are not on this server' "$(mgr status)"
+    printf '# darban-direct 1 android=yes\npush "route 37.1.0.0 255.255.255.0 net_gateway"\npush "route 37.2.0.0 255.255.255.0 net_gateway"\n' > "$E/server/darban-direct.routes"
+    has 'a missing small file is named too' 'but the routes are not on this server' "$(mgr status)"
+    cp "$E/server/darban-direct.routes" "$E/server/darban-direct-small.routes"
     has 'routes without connection events are named' 'but connection events are off' "$(mgr status)"
     events_here
-    has 'routes that reach clients are seen' 'Iranian sites go outside the VPN: 2 routes' "$(mgr status)"
+    has 'routes that reach clients are seen' 'Their sites go outside the VPN: 2 routes' "$(mgr status)"
 }
 
 test_live_rule_checks_read_all_of_nft() {
@@ -4431,8 +4492,8 @@ connect_into() {
     shift
     env -i PATH="$PATH" script_type=client-connect common_name=alice trusted_ip=198.51.100.7 "$@" bash "$E/libexec/darban-ovpn-event" "$file"
 }
-test_event_script_gives_the_routes_of_iran() {
-    local file=$E/client.conf routes=$E/server/darban-direct.routes version
+test_event_script_gives_the_routes_of_countries() {
+    local file=$E/client.conf routes=$E/server/darban-direct.routes small=$E/server/darban-direct-small.routes version
     given() { : > "$file"; connect_into "$file" "$@"; }
     routes_given() { grep -c '^push "route ' "$file"; }
     printf '# darban-direct 1 android=yes\npush "route 2.176.0.0 255.240.0.0 net_gateway"\npush "dhcp-option DNS 198.51.100.66"\npush "route 5.160.0.0 255.255.0.0 net_gateway"\n' > "$routes"
@@ -4446,8 +4507,11 @@ test_event_script_gives_the_routes_of_iran() {
     done
     for version in 3.11 3.11.0 3.10.6 3.7; do
         given IV_VER=$version
-        rc_is "OpenVPN 3 $version, with the small limit, gets none" 0 "$(routes_given)"
+        rc_is "OpenVPN 3 $version, with the small limit and no small file, gets none" 0 "$(routes_given)"
     done
+    printf '# darban-direct 1 android=yes\npush "route 2.176.0.0 255.240.0.0 net_gateway"\n' > "$small"
+    given IV_VER=3.10.6; rc_is 'OpenVPN 3 3.10.6 gets the small file' 1 "$(routes_given)"
+    given IV_VER=3.11.8; rc_is 'and 3.11.8 still the whole one' 2 "$(routes_given)"
     given; rc_is 'a client that says no version gets none' 0 "$(routes_given)"
     sed -i 's/android=yes/android=no/' "$routes"
     given IV_VER=3.11.8 IV_PLAT=android; rc_is 'without Android, an Android phone gets none' 0 "$(routes_given)"
@@ -4458,7 +4522,7 @@ test_event_script_gives_the_routes_of_iran() {
     env -i PATH="$PATH" script_type=client-disconnect common_name=alice IV_VER=2.6.12 bash "$E/libexec/darban-ovpn-event" "$file"
     rc_is 'the end of a session: 0' 0 "$?"
     rc_is 'and it gives nothing' 0 "$(routes_given)"
-    rm -f "$routes"
+    rm -f "$routes" "$small"
     given IV_VER=2.6.12; rc_is 'no routes file: 0' 0 "$?"
     connect_into "$E/no-such-folder/client.conf" IV_VER=2.6.12; rc_is 'a file it cannot write: 0' 0 "$?"
 }

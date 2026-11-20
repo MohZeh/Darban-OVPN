@@ -1,36 +1,37 @@
 #!/usr/bin/env python3
 """Darban OVPN lists of blocked destinations: the IPv4 ranges VPN clients cannot reach through this server.
 
-  geolist.py fetch --source <url> --out <file>
-      Downloads the ranges of Iran and of the Iranian CDNs from <url> (a folder, ending in /), checks them and
-      writes them, merged, one range per line. The file is replaced only when the new list passes every check;
-      otherwise it stays as it was. Prints ranges=<n> addresses=<n>. Exit 2, with the reason, when it is refused.
-  geolist.py merge --out <file> [--list <file>] [--extra "<range> ..."]
-      Writes the ranges of the list and the extra ones, merged, one per line; removes <file> when there are none.
+  geolist.py fetch --source <url> --country <code> --out <file>
+      Downloads the ranges of one country from <url> (a folder, ending in /), with those of the Iranian CDNs for
+      Iran, checks them and writes them, merged, one range per line. The file is replaced only when the new list
+      passes every check; otherwise it stays as it was. Prints ranges=<n> addresses=<n>. Exit 2, with the reason,
+      when it is refused.
+  geolist.py merge --out <file> [--list <file>]... [--extra "<range> ..."]
+      Writes the ranges of the lists and the extra ones, merged, one per line; removes <file> when there are none.
       Prints ranges=<n>.
   geolist.py entry <address or range>
       Prints the range a typed address stands for, such as 203.0.114.0/24. Exit 2, with the reason, when it
       cannot be blocked.
-  geolist.py routes --list <file> --out <file> --android <yes|no>
-      Writes the ranges of the list as OpenVPN options that send them outside the tunnel, one
+  geolist.py routes --list <file>... --out <file> --android <yes|no> --budget <bytes>
+      Writes the ranges of the lists as OpenVPN options that send them outside the tunnel, one
       push "route <network> <mask> net_gateway" per line, after a first line that says whether Android phones get
-      them. Readable by all: OpenVPN's own user reads it at each connection. Prints routes=<n>.
+      them. The largest ranges come first, while they fit the budget, counted as OpenVPN 3 counts pushed options.
+      Readable by all: OpenVPN's own user reads it at each connection. Prints, for each list,
+      list=<file> ranges=<n> sent=<n> share=<percent of its addresses>, then routes=<n>.
 
 Everything downloaded is data: each line must be an address range, and nothing else in it is used.
 """
 import argparse
 import ipaddress
 import os
+import re
 import sys
 import tempfile
 import urllib.request
 
-# The ranges of Iran, and those of the Iranian CDNs, some of which are outside Iran.
-FILES = ('text/ir.txt', 'text/arvancloud.txt', 'text/derakcloud.txt', 'text/iranserver.txt', 'text/parspack.txt')
-REQUIRED = 'text/ir.txt'
+# The ranges of Iranian CDNs, some of which are outside Iran, go with the list of Iran.
+EXTRA_FILES = {'ir': ('text/arvancloud.txt', 'text/derakcloud.txt', 'text/iranserver.txt', 'text/parspack.txt')}
 MAX_BYTES = 5 * 1024 * 1024
-# A list of Iran has about 2,100 ranges. Far fewer means a broken or wrong file, not a smaller country.
-MIN_RANGES = 500
 # A list may shrink from one day to the next, but not to less than half.
 MIN_SHARE_OF_LAST = 0.5
 # Lines that are not a range, such as a header, are allowed up to this share of the list.
@@ -103,43 +104,45 @@ def write_lines(path, lines, mode=0o600):
         raise
 
 
-def write_ranges(path, ranges):
-    write_lines(path, ranges)
-
-
 def fetch(args):
-    found = []
-    for name in FILES:
+    if not re.fullmatch(r'[a-z]{2}', args.country):
+        raise Refused('%s is not a two-letter country code' % args.country)
+    main = 'text/%s.txt' % args.country
+    try:
+        found = parse(download(args.source + main), main)
+    except Refused:
+        raise
+    except Exception as error:
+        raise Refused('could not download %s: %s' % (main, error))
+    for name in EXTRA_FILES.get(args.country, ()):
         try:
-            text = download(args.source + name)
+            found += parse(download(args.source + name), name)
         except Refused:
             raise
         except Exception as error:
-            if name == REQUIRED:
-                raise Refused('could not download %s: %s' % (name, error))
-            # The CDN lists are small extras; the list of Iran stands without them.
+            # The CDN lists are small extras; the list of the country stands without them.
             print('note: %s was not downloaded: %s' % (name, error), file=sys.stderr)
-            continue
-        found += parse(text, name)
     ranges = list(ipaddress.collapse_addresses(found))
-    if len(ranges) < MIN_RANGES:
-        raise Refused('the list has only %d ranges, too few for the ranges of Iran' % len(ranges))
+    if not ranges:
+        raise Refused('the list of %s has no address range' % args.country.upper())
     last = read_ranges(args.out)
     if last and len(ranges) < len(last) * MIN_SHARE_OF_LAST:
         raise Refused('the new list has %d ranges, less than half of the %d of the last one' % (len(ranges), len(last)))
-    write_ranges(args.out, ranges)
+    write_lines(args.out, ranges)
     print('ranges=%d addresses=%d' % (len(ranges), sum(n.num_addresses for n in ranges)))
 
 
 def merge(args):
-    found = read_ranges(args.list)
+    found = []
+    for path in args.list or ():
+        found += read_ranges(path)
     for word in (args.extra or '').split():
         net = ipaddress.IPv4Network(word, strict=False)
         if blockable(net):
             found.append(net)
     ranges = list(ipaddress.collapse_addresses(found))
     if ranges:
-        write_ranges(args.out, ranges)
+        write_lines(args.out, ranges)
     elif os.path.exists(args.out):
         os.unlink(args.out)
     print('ranges=%d' % len(ranges))
@@ -157,14 +160,36 @@ def entry(args):
     print(net)
 
 
+def route_cost(net):
+    """What OpenVPN 3 counts for one pushed route: 64 bytes for the option, 16 for each word, and the words."""
+    words = ('route', str(net.network_address), str(net.netmask), 'net_gateway')
+    return 64 + sum(16 + len(word) for word in words)
+
+
 def routes(args):
-    ranges = read_ranges(args.list)
-    if not ranges:
-        raise Refused('the list of Iran is empty')
+    lists = [(path, read_ranges(path)) for path in args.list]
+    if not any(ranges for _, ranges in lists):
+        raise Refused('the lists are empty')
+    # The largest ranges of all the lists first: they carry the most addresses for the same cost.
+    every = sorted(((net, path) for path, ranges in lists for net in ranges),
+                   key=lambda item: (-item[0].num_addresses, int(item[0].network_address)))
+    chosen, spent, seen = [], 0, set()
+    for net, path in every:
+        # A range two lists share, such as a CDN in two countries, goes once, counted for the first.
+        if net in seen or spent + route_cost(net) > args.budget:
+            continue
+        seen.add(net)
+        chosen.append((net, path))
+        spent += route_cost(net)
     lines = ['# darban-direct 1 android=%s' % args.android]
-    lines += ['push "route %s %s net_gateway"' % (n.network_address, n.netmask) for n in ranges]
+    lines += ['push "route %s %s net_gateway"' % (net.network_address, net.netmask) for net, _ in chosen]
     write_lines(args.out, lines, 0o644)
-    print('routes=%d' % len(ranges))
+    for path, ranges in lists:
+        sent = [net for net, origin in chosen if origin == path]
+        total = sum(n.num_addresses for n in ranges)
+        share = 100.0 * sum(n.num_addresses for n in sent) / total if total else 0.0
+        print('list=%s ranges=%d sent=%d share=%.1f' % (path, len(ranges), len(sent), share))
+    print('routes=%d' % len(chosen))
 
 
 def main():
@@ -172,17 +197,19 @@ def main():
     commands = parser.add_subparsers(dest='command', required=True)
     one = commands.add_parser('fetch')
     one.add_argument('--source', required=True)
+    one.add_argument('--country', required=True)
     one.add_argument('--out', required=True)
     two = commands.add_parser('merge')
     two.add_argument('--out', required=True)
-    two.add_argument('--list')
+    two.add_argument('--list', action='append')
     two.add_argument('--extra')
     three = commands.add_parser('entry')
     three.add_argument('value')
     four = commands.add_parser('routes')
-    four.add_argument('--list', required=True)
+    four.add_argument('--list', required=True, action='append')
     four.add_argument('--out', required=True)
     four.add_argument('--android', required=True, choices=('yes', 'no'))
+    four.add_argument('--budget', required=True, type=int)
     args = parser.parse_args()
     try:
         {'fetch': fetch, 'merge': merge, 'entry': entry, 'routes': routes}[args.command](args)
