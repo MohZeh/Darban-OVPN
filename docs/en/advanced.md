@@ -76,7 +76,7 @@ The address comes from the network interface. Behind NAT, it is looked up with `
 | VPN port | A random free UDP port from 1024 to 1999, never 1194 |
 | VPN network | First free `/24` from `10.8.0.0` |
 | Routing | All client IPv4 traffic |
-| Client DNS | `1.1.1.1`, `8.8.8.8` |
+| Client DNS | `1.1.1.1`, `9.9.9.9` |
 
 ## A server that already runs OpenVPN
 
@@ -126,7 +126,7 @@ Open **Settings › Advanced**. Items marked `*` (1 to 6, and the OpenVPN port i
 | # | Setting | Notes |
 |---|---|---|
 | 1 | Traffic routing | **Full tunnel** sends all client IPv4 traffic through the server, and IPv6 goes directly, outside the VPN; **split tunnel** only the VPN network. Switching to full adds default DNS if none is set. The server needs NAT for the full tunnel |
-| 2 | DNS for clients | One or two IPv4 addresses, or one from the list: Cloudflare, Google, Quad9 (blocks known malicious sites), AdGuard (blocks ads and trackers). Not used in a split tunnel, where clients keep their own |
+| 2 | DNS for clients | One or two IPv4 addresses, or one from the list: Cloudflare, Google (tells the DNS of each site asked for the first three parts of this server's address), Quad9 (blocks known malicious sites), AdGuard (blocks ads and trackers). Not used in a split tunnel, where clients keep their own |
 | 3 | VPN network | A private `/24` ending in `.0`, not overlapping an existing route; the tool suggests a free one. NAT follows the change. Refused if this tool did not create the NAT. Fixed addresses from `client-config-dir` or `ifconfig-pool-persist` are not updated |
 | 4 | Data ciphers | `AES-256-GCM`, `AES-128-GCM`, `CHACHA20-POLY1305`, separated by colons, or one of three ready lists. Others would turn DCO off. Clients with no cipher in common must get a new profile |
 | 5 | Keepalive | Ping interval and timeout in seconds, or one from the list: normal `10 60`, mobile networks `20 120`, quicker `5 30`. The timeout must be at least twice the interval |

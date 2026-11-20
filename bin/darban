@@ -40,7 +40,7 @@ BACKUP_PY=$DARBAN_LIB/backup.py
 # Each run of the worker takes at most this many events, or this many seconds; the path unit starts it again.
 EVENT_MAX=500
 EVENT_SECONDS=60
-DEFAULT_CLIENT_DNS='1.1.1.1 8.8.8.8'
+DEFAULT_CLIENT_DNS='1.1.1.1 9.9.9.9'
 CONF_TEMP=''
 OUT_DIR=/root/openvpn-clients
 CONFIG_DIR=/etc/darban
@@ -3939,10 +3939,12 @@ set_dns() {
     current=$(conf_dns)
     kv Current "${current:-none pushed}"
     info 'The DNS servers clients use for names while connected. Any of these works; the last two also block some sites.'
-    show_presets 'Cloudflare' '1.1.1.1 1.0.0.1' 'Google' '8.8.8.8 8.8.4.4' \
+    # Google passes the first three parts of the address that asks, here this server's, on to each site's DNS
+    # (EDNS Client Subnet). Cloudflare and Quad9 on these addresses do not.
+    show_presets 'Cloudflare' '1.1.1.1 1.0.0.1' "Google, tells each site's DNS part of this server's address" '8.8.8.8 8.8.4.4' \
         'Quad9, blocks known malicious sites' '9.9.9.9 149.112.112.112' 'AdGuard, blocks ads and trackers' '94.140.14.14 94.140.15.15'
     say
-    prompt_valid "Choose 1-${#PRESETS[@]}, or type one or two IPv4 addresses (Enter = cancel): " valid_dns_choice 'Enter a number from the list, or one or two IPv4 addresses, such as 1.1.1.1 8.8.8.8.' || return 0
+    prompt_valid "Choose 1-${#PRESETS[@]}, or type one or two IPv4 addresses (Enter = cancel): " valid_dns_choice 'Enter a number from the list, or one or two IPv4 addresses, such as 1.1.1.1 9.9.9.9.' || return 0
     if [[ $DNS_LIST == "$current" ]]; then info 'Same as the current DNS; nothing changed.'; return 0; fi
     say
     restart_notice
