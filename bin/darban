@@ -5059,7 +5059,9 @@ country_names() {
     printf '%s' "${out:-none}"
 }
 country_list() { printf '%s/%s.v4' "$GEO_DIR" "$1"; }
-country_value() { awk -v k="$2" '$1==k {print $2}' "$GEO_DIR/$1.info" 2>/dev/null; }
+# country_value <code> <date|ranges>: empty for a country not downloaded yet. awk would fail on the missing file, and
+# with errexit on, that would end the action that asked.
+country_value() { [[ -f $GEO_DIR/$1.info ]] || return 0; awk -v k="$2" '$1==k {print $2}' "$GEO_DIR/$1.info" 2>/dev/null || true; }
 mode_label() {
     case $COUNTRY_DIRECT in yes) printf 'outside the VPN' ;; no-android) printf 'outside the VPN, not for Android' ;; *) printf blocked ;; esac
 }
