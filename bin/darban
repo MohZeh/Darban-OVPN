@@ -93,6 +93,13 @@ DIRECT_BUDGET_SMALL=235929
 # The countries the menu offers by number; any other is typed as its two-letter code.
 COUNTRY_CHOICES='ir af ru cn tr by tm'
 COUNTRIES_MAX=10
+# Settings > DNS on this server: Unbound answers clients on this server's VPN address, and asks the upstream DNS.
+# The tool writes one file of its own there, and a drop-in that starts Unbound again when it stops; lib/common.sh
+# reads the flag that sends clients' DNS to it.
+UNBOUND_DIR=/etc/unbound/unbound.conf.d
+UNBOUND_CONF=$UNBOUND_DIR/darban.conf
+UNBOUND_DROPIN=$UNIT_DIR/unbound.service.d/darban.conf
+DARBAN_DNS_REDIRECT=$CONFIG_DIR/dns-redirect
 # The lines this tool added to server.conf for connection events, so their removal takes only those.
 EVENT_LINES_FILE=$CONFIG_DIR/.event-lines
 # The owner's age public key for backups, and the programs that get each new backup (v1.1 delivers them).
@@ -127,6 +134,13 @@ BLOCK_EXTRA=''
 COUNTRY_DIRECT=no
 # The owner's own list stays short enough to read in the menu.
 BLOCK_EXTRA_MAX=200
+# DNS on this server: on or off; the upstream DNS it asks, empty for the default; DNS over TLS to it; clients made to
+# use it; and DNSSEC checked.
+DNS_SERVER=no
+DNS_UPSTREAM=''
+DNS_TLS=no
+DNS_FORCE=yes
+DNS_DNSSEC=yes
 CONFIG_ISSUES=()
 # Normalized serial of the certificate OpenVPN serves; never listed, exported or revoked.
 SERVER_SERIAL=''
@@ -229,6 +243,7 @@ load_config() {
     # default has no line left in the file.
     DOWNLOAD_SSH_HOST='' DOWNLOAD_SSH_PORT=22 DOWNLOAD_SSH_USER=root CLIENT_CERT_DAYS='' LINK_PORT='' LINK_HOURS=''
     UPDATE_CHECK=yes SHARE_ID_IN_PROFILE=no BLOCK_COUNTRIES='' BLOCK_EXTRA='' COUNTRY_DIRECT=no
+    DNS_SERVER=no DNS_UPSTREAM='' DNS_TLS=no DNS_FORCE=yes DNS_DNSSEC=yes
     CONFIG_ISSUES=()
     [[ -f $CONFIG_FILE ]] || { CONFIG_ISSUES+=("$CONFIG_FILE is missing; download commands are disabled."); return 0; }
     # Parsed as data, never sourced.
@@ -247,6 +262,11 @@ load_config() {
             BLOCK_EXTRA) BLOCK_EXTRA=$value ;;
             COUNTRY_DIRECT) direct=$value ;;
             BLOCK_IRAN) old_iran=$value ;;
+            DNS_SERVER) DNS_SERVER=$value ;;
+            DNS_UPSTREAM) DNS_UPSTREAM=$value ;;
+            DNS_TLS) DNS_TLS=$value ;;
+            DNS_FORCE) DNS_FORCE=$value ;;
+            DNS_DNSSEC) DNS_DNSSEC=$value ;;
             IRAN_DIRECT) old_direct=$value ;;
             *) CONFIG_ISSUES+=("Unknown setting ignored in $CONFIG_FILE: $key") ;;
         esac
@@ -284,6 +304,13 @@ load_config() {
     fi
     if [[ $COUNTRY_DIRECT != yes && $COUNTRY_DIRECT != no && $COUNTRY_DIRECT != no-android ]]; then
         CONFIG_ISSUES+=("Invalid COUNTRY_DIRECT in $CONFIG_FILE; using no."); COUNTRY_DIRECT=no
+    fi
+    if [[ $DNS_SERVER != yes && $DNS_SERVER != no ]]; then CONFIG_ISSUES+=("Invalid DNS_SERVER in $CONFIG_FILE; using no."); DNS_SERVER=no; fi
+    if [[ $DNS_TLS != yes && $DNS_TLS != no ]]; then CONFIG_ISSUES+=("Invalid DNS_TLS in $CONFIG_FILE; using no."); DNS_TLS=no; fi
+    if [[ $DNS_FORCE != yes && $DNS_FORCE != no ]]; then CONFIG_ISSUES+=("Invalid DNS_FORCE in $CONFIG_FILE; using yes."); DNS_FORCE=yes; fi
+    if [[ $DNS_DNSSEC != yes && $DNS_DNSSEC != no ]]; then CONFIG_ISSUES+=("Invalid DNS_DNSSEC in $CONFIG_FILE; using yes."); DNS_DNSSEC=yes; fi
+    if [[ -n $DNS_UPSTREAM ]] && ! valid_dns "$DNS_UPSTREAM"; then
+        CONFIG_ISSUES+=("Invalid DNS_UPSTREAM in $CONFIG_FILE; using the default."); DNS_UPSTREAM=''
     fi
     # Only the form of a range is checked here; geolist.py checks what each one is when the rules are written.
     if [[ -n $BLOCK_EXTRA && ! $BLOCK_EXTRA =~ ^([0-9]{1,3}(\.[0-9]{1,3}){3}/[0-9]{1,2})(\ [0-9]{1,3}(\.[0-9]{1,3}){3}/[0-9]{1,2})*$ ]]; then
@@ -3948,6 +3975,10 @@ new_conf_file() {
 set_routing() {
     local dns item
     conf_ready || return 1
+    if conf_full_tunnel && [[ $DNS_SERVER == yes ]]; then
+        info 'In a split tunnel clients keep their own DNS. Turn DNS on this server off first (Settings > 8 > 1).'
+        return 0
+    fi
     if conf_full_tunnel; then
         kv Current 'full tunnel: all client IPv4 traffic goes through the VPN'
         info 'Full tunnel is what most people want from a VPN: their whole internet goes through this server. A split tunnel only reaches the VPN network itself.'
@@ -3980,6 +4011,12 @@ set_routing() {
 }
 set_dns() {
     local item current DNS_LIST=''
+    if [[ $DNS_SERVER == yes ]]; then
+        info 'DNS on this server is on (Settings > 8): clients ask this server, and what is set here is the DNS it asks.'
+        say
+        set_dns_upstream
+        return
+    fi
     conf_ready || return 1
     if ! conf_full_tunnel; then
         info 'In a split tunnel, clients keep their own DNS. Switch to the full tunnel first (item 1).'
@@ -4048,18 +4085,26 @@ set_vpn_network() {
     # and Ctrl+C cannot stop it in between.
     new_conf_file || return 1
     conf_set_directive server "$candidate 255.255.255.0" "$CONF_TEMP" || { fail 'Could not prepare server.conf. Nothing was changed.'; return 1; }
+    if [[ $DNS_SERVER == yes ]]; then
+        sed -i "s#^push \"dhcp-option DNS ${current%.0}\.1\"\$#push \"dhcp-option DNS ${candidate%.0}.1\"#" "$CONF_TEMP" || return 1
+    fi
     nat_saved=$(mktemp) || return 1
     darban_tmp_register "$nat_saved"
     cp -- "$nat" "$nat_saved" || return 1
     critical_begin
     # nft loads a whole file in one transaction, so a refused file leaves the running rules as they were.
-    if ! sed -i "s#$current/24#$candidate/24#g" "$nat" || ! nft -f "$nat"; then
+    if ! sed -i -e "s#$current/24#$candidate/24#g" -e "s#dnat to ${current%.0}\.1\$#dnat to ${candidate%.0}.1#" -e "s#!= ${current%.0}\.1 #!= ${candidate%.0}.1 #" "$nat" \
+        || ! nft -f "$nat"; then
         cp -- "$nat_saved" "$nat" || true
         critical_end
         fail 'Could not load the new NAT rule. Nothing was changed.'
         return 1
     fi
     conf_apply "VPN network $candidate/24" "$CONF_TEMP" || rc=$?
+    # Unbound answers on the new address from now on; until it does, clients cannot open any name.
+    if (( rc == 0 )) && [[ $DNS_SERVER == yes ]] && ! unbound_apply; then
+        warn "DNS on this server still answers on the old address: $DNS_WHY. Clients cannot open names until it is fixed $S_ARROW sudo darban, then Settings > DNS on this server > 2"
+    fi
     if (( rc != 0 )); then
         cp -- "$nat_saved" "$nat" || true
         nft -f "$nat" || urgent 'Could not restore the previous NAT rule. Check: nft list ruleset'
@@ -4150,7 +4195,7 @@ save_config() {
     temp=$(mktemp "$CONFIG_DIR/.config.XXXXXXXX") || return 1
     darban_tmp_register "$temp"
     if [[ -f $CONFIG_FILE ]]; then
-        awk -F= '$1!="DOWNLOAD_SSH_HOST" && $1!="DOWNLOAD_SSH_PORT" && $1!="DOWNLOAD_SSH_USER" && $1!="CLIENT_CERT_DAYS" && $1!="LINK_PORT" && $1!="LINK_HOURS" && $1!="UPDATE_CHECK" && $1!="BLOCK_IRAN" && $1!="BLOCK_EXTRA" && $1!="IRAN_DIRECT" && $1!="BLOCK_COUNTRIES" && $1!="COUNTRY_DIRECT"' "$CONFIG_FILE" >"$temp" || return 1
+        awk -F= '$1!="DOWNLOAD_SSH_HOST" && $1!="DOWNLOAD_SSH_PORT" && $1!="DOWNLOAD_SSH_USER" && $1!="CLIENT_CERT_DAYS" && $1!="LINK_PORT" && $1!="LINK_HOURS" && $1!="UPDATE_CHECK" && $1!="BLOCK_IRAN" && $1!="BLOCK_EXTRA" && $1!="IRAN_DIRECT" && $1!="BLOCK_COUNTRIES" && $1!="COUNTRY_DIRECT" && $1!="DNS_SERVER" && $1!="DNS_UPSTREAM" && $1!="DNS_TLS" && $1!="DNS_FORCE" && $1!="DNS_DNSSEC"' "$CONFIG_FILE" >"$temp" || return 1
     fi
     printf 'DOWNLOAD_SSH_HOST=%s\nDOWNLOAD_SSH_PORT=%s\nDOWNLOAD_SSH_USER=%s\n' "$DOWNLOAD_SSH_HOST" "$DOWNLOAD_SSH_PORT" "$DOWNLOAD_SSH_USER" >>"$temp" || return 1
     if [[ -n $CLIENT_CERT_DAYS ]]; then printf 'CLIENT_CERT_DAYS=%s\n' "$CLIENT_CERT_DAYS" >>"$temp" || return 1; fi
@@ -4160,6 +4205,11 @@ save_config() {
     if [[ -n $BLOCK_COUNTRIES ]]; then printf 'BLOCK_COUNTRIES=%s\n' "$BLOCK_COUNTRIES" >>"$temp" || return 1; fi
     if [[ -n $BLOCK_EXTRA ]]; then printf 'BLOCK_EXTRA=%s\n' "$BLOCK_EXTRA" >>"$temp" || return 1; fi
     if [[ $COUNTRY_DIRECT != no ]]; then printf 'COUNTRY_DIRECT=%s\n' "$COUNTRY_DIRECT" >>"$temp" || return 1; fi
+    if [[ $DNS_SERVER == yes ]]; then printf 'DNS_SERVER=yes\n' >>"$temp" || return 1; fi
+    if [[ -n $DNS_UPSTREAM ]]; then printf 'DNS_UPSTREAM=%s\n' "$DNS_UPSTREAM" >>"$temp" || return 1; fi
+    if [[ $DNS_TLS == yes ]]; then printf 'DNS_TLS=yes\n' >>"$temp" || return 1; fi
+    if [[ $DNS_FORCE == no ]]; then printf 'DNS_FORCE=no\n' >>"$temp" || return 1; fi
+    if [[ $DNS_DNSSEC == no ]]; then printf 'DNS_DNSSEC=no\n' >>"$temp" || return 1; fi
     chmod 600 "$temp" && mv -f -- "$temp" "$CONFIG_FILE" || return 1
     if (( ! held )); then ca_unlock; fi
 }
@@ -4712,6 +4762,7 @@ network_rules_health() {
         check warn "The TCP MSS rule for VPN traffic is missing or different; on some networks websites may not load $S_ARROW $reinstall"
     fi
     blocked_health "$net"
+    dns_server_health "$net"
 }
 health() {
     local version state enabled dco port e crl_err host resolved next last value issue exports pending rows mine
@@ -4967,6 +5018,7 @@ draw_settings() {
     menu_group MORE
     menu_item 6 'Advanced'
     menu_item 7 "$(printf '%-24s %s' 'Blocked destinations' "$(blocked_summary)")"
+    menu_item 8 "$(printf '%-24s %s' 'DNS on this server' "$(dns_server_summary)")"
     menu_item 0 'Back'
     hr
     printf ' %s* restarts OpenVPN: connected users drop for a few seconds.%s\n' "$C_DIM" "$C_RESET" || true
@@ -5024,7 +5076,7 @@ settings_menu() {
     while :; do
         if (( redraw )); then draw_settings || true; fi
         redraw=1
-        ask 'Choose [0-7, Enter = back]: ' || return 0
+        ask 'Choose [0-8, Enter = back]: ' || return 0
         case $REPLY in
             1) menu_action 'Change server address' set_domain ;;
             2) menu_action 'Change OpenVPN UDP port' change_port ;;
@@ -5033,8 +5085,9 @@ settings_menu() {
             5) menu_action 'Link certificate' change_link_cert ;;
             6) advanced_menu ;;
             7) blocked_menu ;;
+            8) dns_server_menu ;;
             0|'') return 0 ;;
-            *) warn "Unknown option \"$REPLY\". Enter a number from 0 to 7."; redraw=0 ;;
+            *) warn "Unknown option \"$REPLY\". Enter a number from 0 to 8."; redraw=0 ;;
         esac
     done
 }
@@ -5446,6 +5499,328 @@ blocked_health() {
     else
         check ok "Their sites go outside the VPN: $want routes, given at connection to every client that can take them"
     fi
+}
+# ---------- DNS on this server ----------
+# Unbound answers clients on this server's VPN address and passes each question to the upstream DNS: it never asks
+# the name servers of sites itself, so they see that DNS and never this server. It sends no part of an address on
+# (no EDNS Client Subnet), and can reach the upstream over TLS. Clients can be made to use it: their DNS to any other
+# server is sent to it. The next part, lists of blocked names, builds on this.
+DNS_WHY=''
+dns_gateway() {
+    # This server's address inside the VPN: the first of its /24.
+    local net
+    net=$(darban_conf_net) || return 1
+    valid_ipv4 "${net:-}" || return 1
+    printf '%s.1\n' "${net%.0}"
+}
+dns_upstream() { printf '%s' "${DNS_UPSTREAM:-$DEFAULT_CLIENT_DNS}"; }
+dns_tls_name() {
+    # The name each known DNS proves with its certificate over TLS; an address without one cannot be checked.
+    case $1 in
+        1.1.1.1|1.0.0.1) printf cloudflare-dns.com ;;
+        9.9.9.9|149.112.112.112) printf dns.quad9.net ;;
+        8.8.8.8|8.8.4.4) printf dns.google ;;
+        94.140.14.14|94.140.15.15) printf dns.adguard-dns.com ;;
+        *) return 1 ;;
+    esac
+}
+dns_tls_possible() { local item; for item in $1; do dns_tls_name "$item" >/dev/null || return 1; done; }
+on_off() { if [[ $1 == yes ]]; then printf on; else printf off; fi; }
+dns_server_summary() {
+    if [[ $DNS_SERVER != yes ]]; then printf off; return 0; fi
+    printf 'on, asks %s%s' "$(dns_upstream)" "$([[ $DNS_TLS == yes ]] && printf ' over TLS')"
+}
+unbound_installed() { command -v unbound-checkconf >/dev/null 2>&1; }
+unbound_conf_text() {
+    # unbound_conf_text <gateway>: the tool's own file of Unbound, from the settings in memory.
+    local net=${1%.1}.0 item name
+    cat <<EOF
+# Written by Darban OVPN, Settings > DNS on this server. A change here is written over at the next change there.
+server:
+    interface: $1
+    # The VPN address exists only while OpenVPN runs; Unbound may start first.
+    ip-freebind: yes
+    access-control: $net/24 allow
+    do-ip6: no
+    hide-identity: yes
+    hide-version: yes
+    qname-minimisation: yes
+    # No subnetcache module: no part of a client's address, or of this server's, goes to any DNS.
+EOF
+    if [[ $DNS_DNSSEC == yes ]]; then printf '    module-config: "validator iterator"\n'; else printf '    module-config: "iterator"\n'; fi
+    if [[ $DNS_TLS == yes ]]; then printf '    tls-cert-bundle: /etc/ssl/certs/ca-certificates.crt\n'; fi
+    if [[ $DNS_FORCE == yes ]]; then
+        printf '    # Firefox then keeps its own DNS over HTTPS off, and asks this server.\n    local-zone: "use-application-dns.net." always_nxdomain\n'
+    fi
+    printf 'forward-zone:\n    name: "."\n'
+    if [[ $DNS_TLS == yes ]]; then
+        printf '    forward-tls-upstream: yes\n'
+        for item in $(dns_upstream); do name=$(dns_tls_name "$item") || return 1; printf '    forward-addr: %s@853#%s\n' "$item" "$name"; done
+    else
+        for item in $(dns_upstream); do printf '    forward-addr: %s\n' "$item"; done
+    fi
+}
+unbound_apply() {
+    # Unbound's file and its drop-in from the settings in memory, checked, then Unbound started again with them. When
+    # anything fails, the file that ran stays and so does Unbound; DNS_WHY says what failed.
+    local gateway new old had_old=0
+    gateway=$(dns_gateway) || { DNS_WHY='server.conf has no single /24 VPN network'; return 1; }
+    install -d -m 755 "$UNBOUND_DIR" "${UNBOUND_DROPIN%/*}" || { DNS_WHY="could not make $UNBOUND_DIR"; return 1; }
+    new=$(mktemp "$UNBOUND_DIR/.darban.XXXXXXXX") || return 1
+    darban_tmp_register "$new"
+    old=$(mktemp) || return 1
+    darban_tmp_register "$old"
+    unbound_conf_text "$gateway" >"$new" && chmod 644 "$new" || { DNS_WHY='could not write its file'; return 1; }
+    if ! unbound-checkconf "$new" >/dev/null 2>&1; then DNS_WHY='unbound-checkconf refused the new file'; return 1; fi
+    printf '[Service]\n# Clients have no DNS while Unbound is down: it starts again at once.\nRestart=always\nRestartSec=2\n' >"$UNBOUND_DROPIN.new" \
+        && chmod 644 "$UNBOUND_DROPIN.new" && mv -f -- "$UNBOUND_DROPIN.new" "$UNBOUND_DROPIN" || { DNS_WHY='could not write its drop-in'; return 1; }
+    if [[ -f $UNBOUND_CONF ]]; then cp -a -- "$UNBOUND_CONF" "$old" && had_old=1; fi
+    mv -f -- "$new" "$UNBOUND_CONF"
+    systemctl daemon-reload >/dev/null 2>&1 || true
+    # Ubuntu's package would make this server itself ask 127.0.0.1, where this Unbound does not answer: the server's
+    # own DNS stays as it is.
+    systemctl disable --now unbound-resolvconf.service >/dev/null 2>&1 || true
+    if systemctl enable unbound.service >/dev/null 2>&1 && systemctl restart unbound.service >/dev/null 2>&1 \
+        && systemctl is-active --quiet unbound.service; then
+        return 0
+    fi
+    if (( had_old )); then cp -a -- "$old" "$UNBOUND_CONF"; else rm -f -- "$UNBOUND_CONF"; fi
+    systemctl restart unbound.service >/dev/null 2>&1 || true
+    DNS_WHY='Unbound did not start with the new file; see: journalctl -u unbound'
+    return 1
+}
+dns_push_file() {
+    # dns_push_file <addresses>: server.conf in CONF_TEMP, pushing those DNS servers instead of the ones it pushes.
+    local item
+    new_conf_file || return 1
+    awk '!($1=="push" && $2=="\"dhcp-option" && $3=="DNS")' "$DARBAN_SERVER_CONF" >"$CONF_TEMP" || return 1
+    for item in $1; do printf 'push "dhcp-option DNS %s"\n' "$item" >>"$CONF_TEMP" || return 1; done
+}
+dns_redirect_apply() {
+    # The flag that sends clients' DNS here, then NAT written again from it. Needs the lock.
+    if [[ $DNS_SERVER == yes && $DNS_FORCE == yes ]]; then
+        : >"$DARBAN_DNS_REDIRECT" && chmod 600 "$DARBAN_DNS_REDIRECT" || return 1
+    else
+        rm -f -- "$DARBAN_DNS_REDIRECT"
+    fi
+    blocked_apply
+}
+ufw_dns_open() {
+    # With ufw active, clients' DNS to this server passes only with a rule; the setup's record takes it away again.
+    command -v ufw >/dev/null 2>&1 || return 0
+    ufw status 2>/dev/null | grep -q '^Status: active' || return 0
+    ufw status 2>/dev/null | grep -q '53 on tun0' && return 0
+    ufw allow in on tun0 to any port 53 >/dev/null 2>&1 || { warn 'ufw did not take the rule for DNS: ufw allow in on tun0 to any port 53'; return 0; }
+    record_added 'ufw_dns tun0'
+}
+dns_settings_commit() {
+    # Unbound and the redirect from the settings in memory, then the settings saved. Needs the lock.
+    unbound_apply || { fail "DNS on this server was not changed: $DNS_WHY."; return 1; }
+    dns_redirect_apply || return 1
+    save_config || { fail 'The setting could not be saved.'; return 1; }
+}
+set_dns_server() {
+    local gateway installed=0
+    conf_ready || return 1
+    if [[ $DNS_SERVER == yes ]]; then
+        kv Now on
+        bullet "clients go back to asking $(dns_upstream) themselves; OpenVPN restarts once"
+        say
+        confirm_choice 'Turn DNS on this server off?' 'No, keep it on' 'Turn it off' caution || { cancelled; return 0; }
+        dns_push_file "$(dns_upstream)" || return 1
+        conf_apply "DNS $(dns_upstream)" "$CONF_TEMP" || return 1
+        ca_lock || return 1
+        DNS_SERVER=no
+        dns_redirect_apply || warn 'The rules that send DNS here could not be taken away; see: sudo darban status'
+        save_config || { fail 'The setting could not be saved.'; return 1; }
+        rm -f -- "$UNBOUND_CONF" "$UNBOUND_DROPIN"
+        systemctl daemon-reload >/dev/null 2>&1 || true
+        # Unbound that the tool installed stops; one that was here before goes on without the tool's file.
+        if grep -qx 'package unbound' "$CONFIG_DIR/.server-setup-started" 2>/dev/null || [[ -e $CONFIG_DIR/.unbound-installed ]]; then
+            systemctl disable --now unbound.service >/dev/null 2>&1 || true
+        else
+            systemctl restart unbound.service >/dev/null 2>&1 || true
+        fi
+        audit 'DNS on this server turned off'
+        ok "DNS on this server is off. Clients ask $(dns_upstream) again."
+        return 0
+    fi
+    if ! conf_full_tunnel; then info 'In a split tunnel, clients keep their own DNS. Switch to the full tunnel first (Settings > Advanced > 1).'; return 0; fi
+    gateway=$(dns_gateway) || { warn "This works with a single 'server A.B.C.0 255.255.255.0' line in server.conf."; return 1; }
+    kv Now off
+    info "Clients ask this server, at $gateway, for every name, and it asks $(dns_upstream). It never asks the name servers of sites itself, so they see that DNS and never this server."
+    bullet 'this is what blocking names, the next part of this menu, will need'
+    bullet 'installs Unbound, if it is not here yet'
+    if [[ $DNS_FORCE == yes ]]; then bullet 'DNS that clients send to other servers comes here too (item 4)'; fi
+    bullet 'while Unbound is down, clients cannot open any name: it starts again by itself, and Diagnostics watch it'
+    restart_notice
+    say
+    confirm_choice 'Turn DNS on this server on?' 'No, keep it off' 'Turn it on' caution || { cancelled; return 0; }
+    if ! unbound_installed; then
+        info "Installing Unbound${S_ELL}"
+        if ! apt-get -o DPkg::Lock::Timeout=120 -y -q --no-install-recommends install unbound >/dev/null; then
+            fail 'Unbound could not be installed. Nothing was changed.'
+            return 1
+        fi
+        installed=1
+        record_added 'package unbound'
+        : >"$CONFIG_DIR/.unbound-installed" || true
+    fi
+    ca_lock || return 1
+    DNS_SERVER=yes
+    if ! unbound_apply; then
+        fail "Unbound did not start: $DNS_WHY. Nothing else was changed."
+        if (( installed )); then systemctl disable --now unbound.service >/dev/null 2>&1 || true; fi
+        return 1
+    fi
+    ufw_dns_open
+    dns_push_file "$gateway" || return 1
+    if ! conf_apply "DNS on this server, $gateway" "$CONF_TEMP"; then
+        rm -f -- "$UNBOUND_CONF"
+        systemctl restart unbound.service >/dev/null 2>&1 || true
+        return 1
+    fi
+    ca_lock || return 1
+    dns_redirect_apply || warn 'The rules that send DNS here did not load; see: sudo darban status'
+    save_config || { fail 'The setting could not be saved.'; return 1; }
+    audit "DNS on this server turned on, upstream $(dns_upstream)"
+    ok "DNS on this server is on: clients ask $gateway, which asks $(dns_upstream)."
+}
+set_dns_upstream() {
+    local DNS_LIST='' old=$DNS_UPSTREAM old_tls=$DNS_TLS
+    kv Current "$(dns_upstream)"
+    info 'The DNS this server asks for each name. The name servers of sites see this one, and never this server.'
+    # Google passes the first three parts of the address that asks, here this server's, on to each site's DNS
+    # (EDNS Client Subnet). Cloudflare and Quad9 on these addresses do not.
+    show_presets 'Cloudflare' '1.1.1.1 1.0.0.1' "Google, tells each site's DNS part of this server's address" '8.8.8.8 8.8.4.4' \
+        'Quad9, blocks known malicious sites' '9.9.9.9 149.112.112.112' 'AdGuard, blocks ads and trackers' '94.140.14.14 94.140.15.15'
+    say
+    prompt_valid "Choose 1-${#PRESETS[@]}, or type one or two IPv4 addresses (Enter = cancel): " valid_dns_choice 'Enter a number from the list, or one or two IPv4 addresses, such as 1.1.1.1 9.9.9.9.' || return 0
+    if [[ $DNS_LIST == "$(dns_upstream)" ]]; then info 'Same as now; nothing changed.'; return 0; fi
+    DNS_UPSTREAM=$DNS_LIST
+    if [[ $DNS_TLS == yes ]] && ! dns_tls_possible "$DNS_UPSTREAM"; then
+        DNS_TLS=no
+        warn "TLS cannot be checked with $DNS_UPSTREAM, so DNS over TLS turns off. The four DNS of the list have it."
+    fi
+    if [[ $DNS_SERVER != yes ]]; then
+        save_config || { fail 'The setting could not be saved.'; return 1; }
+        saved "upstream DNS $DNS_UPSTREAM" 'when DNS on this server is turned on'
+        return 0
+    fi
+    ca_lock || return 1
+    if ! dns_settings_commit; then DNS_UPSTREAM=$old DNS_TLS=$old_tls; return 1; fi
+    audit "DNS on this server asks $DNS_UPSTREAM"
+    ok "Applied: this server asks $DNS_UPSTREAM. Nothing restarted but Unbound."
+}
+dns_toggle() {
+    # dns_toggle <setting> <label>: one switch of DNS on this server, applied to Unbound at once when it is on.
+    local name=$1 label=$2 old new
+    old=${!name}
+    if [[ $old == yes ]]; then new=no; else new=yes; fi
+    if [[ $name == DNS_TLS && $new == yes ]] && ! dns_tls_possible "$(dns_upstream)"; then
+        info "TLS cannot be checked with $(dns_upstream). Choose one of the four DNS of the list first (item 2)."
+        return 0
+    fi
+    printf -v "$name" '%s' "$new"
+    if [[ $DNS_SERVER != yes ]]; then
+        save_config || { fail 'The setting could not be saved.'; return 1; }
+        saved "$label $(on_off "$new")" 'when DNS on this server is turned on'
+        return 0
+    fi
+    ca_lock || return 1
+    if ! dns_settings_commit; then printf -v "$name" '%s' "$old"; return 1; fi
+    audit "DNS on this server: $label $(on_off "$new")"
+    ok "Applied: $label $(on_off "$new"). Nothing restarted but Unbound."
+}
+set_dns_tls() {
+    kv Now "$(on_off "$DNS_TLS")"
+    info "This server asks the upstream DNS over TLS, port 853, so the network of this server's provider cannot read or change the names it asks. It works with the four DNS of the list."
+    say
+    confirm_choice "Turn DNS over TLS $( [[ $DNS_TLS == yes ]] && printf off || printf on)?" 'No, keep it as it is' 'Change it' caution || { cancelled; return 0; }
+    dns_toggle DNS_TLS 'DNS over TLS'
+}
+set_dns_force() {
+    kv Now "$(on_off "$DNS_FORCE")"
+    info "DNS that a client sends to any other server goes to this one, and DNS over TLS from clients is refused, so the names this server blocks hold. DNS over HTTPS cannot be told from other web traffic, and still passes; Firefox is told to keep its own off."
+    say
+    confirm_choice "Turn this $( [[ $DNS_FORCE == yes ]] && printf off || printf on)?" 'No, keep it as it is' 'Change it' caution || { cancelled; return 0; }
+    dns_toggle DNS_FORCE 'clients use it'
+}
+set_dns_dnssec() {
+    kv Now "$(on_off "$DNS_DNSSEC")"
+    info "The answers of signed names are checked, so a forged answer is refused. Turn it off only if a name that should open does not."
+    say
+    confirm_choice "Turn the DNSSEC check $( [[ $DNS_DNSSEC == yes ]] && printf off || printf on)?" 'No, keep it as it is' 'Change it' caution || { cancelled; return 0; }
+    dns_toggle DNS_DNSSEC 'the DNSSEC check'
+}
+draw_dns_server() {
+    clear_screen
+    title_bar "Settings $S_CRUMB DNS on this server"
+    printf ' %sClients ask this server for names, and it asks the upstream DNS. Only Unbound restarts for items 2 to 5.%s\n' "$C_DIM" "$C_RESET" || true
+    menu_item 1 "$(printf '%-24s %s' 'DNS on this server *' "$(on_off "$DNS_SERVER")")"
+    menu_item 2 "$(printf '%-24s %s' 'Upstream DNS' "$(dns_upstream)")"
+    menu_item 3 "$(printf '%-24s %s' 'DNS over TLS' "$(on_off "$DNS_TLS")")"
+    menu_item 4 "$(printf '%-24s %s' 'Clients must use it' "$(on_off "$DNS_FORCE")")"
+    menu_item 5 "$(printf '%-24s %s' 'DNSSEC check' "$(on_off "$DNS_DNSSEC")")"
+    menu_item 0 'Back'
+    hr
+    printf ' %s* restarts OpenVPN: connected users drop for a few seconds.%s\n' "$C_DIM" "$C_RESET" || true
+}
+dns_server_menu() {
+    local redraw=1
+    while :; do
+        if (( redraw )); then draw_dns_server || true; fi
+        redraw=1
+        ask 'Choose [0-5, Enter = back]: ' || return 0
+        case $REPLY in
+            1) menu_action 'DNS on this server' set_dns_server ;;
+            2) menu_action 'Upstream DNS' set_dns_upstream ;;
+            3) menu_action 'DNS over TLS' set_dns_tls ;;
+            4) menu_action 'Clients must use it' set_dns_force ;;
+            5) menu_action 'DNSSEC check' set_dns_dnssec ;;
+            0|'') return 0 ;;
+            *) warn "Unknown option \"$REPLY\". Enter a number from 0 to 5."; redraw=0 ;;
+        esac
+    done
+}
+dns_server_health() {
+    # dns_server_health <VPN network>: Unbound runs with the tool's file, clients are told to ask it, and the rules
+    # that send their DNS here run.
+    local gateway=${1%.0}.1 pushed
+    [[ $DNS_SERVER == yes ]] || return 0
+    if [[ ! -f $UNBOUND_CONF ]] || ! grep -q "^    interface: $gateway\$" "$UNBOUND_CONF"; then
+        check bad "DNS on this server is on, but Unbound's file does not answer on $gateway $S_ARROW sudo darban, then Settings > DNS on this server > 2, and choose the same DNS"
+    elif ! systemctl is-active --quiet unbound.service 2>/dev/null; then
+        check bad "DNS on this server does not run, so clients cannot open any name $S_ARROW sudo systemctl restart unbound; then: journalctl -u unbound"
+    else
+        check ok "DNS on this server answers on $gateway and asks $(dns_upstream)$([[ $DNS_TLS == yes ]] && printf ' over TLS')"
+    fi
+    pushed=$(conf_dns)
+    if [[ $pushed != "$gateway" ]]; then
+        check bad "DNS on this server is on, but clients are told to ask ${pushed:-nothing} $S_ARROW sudo darban, then Settings > DNS on this server > 1, off and on again"
+    fi
+    if [[ $DNS_FORCE == yes ]] && ! darban_live_dns_redirect_ok "$1"; then
+        check warn "Clients can still use another DNS: the rules that send it here are not loaded $S_ARROW sudo systemctl restart darban-nat.service"
+    fi
+}
+dns_restore_check() {
+    # After a restore: a server.conf that tells clients to ask a DNS on this server, which this server does not run,
+    # would leave them without names. They are told to ask the upstream DNS instead, and the setting turns off.
+    local net gateway upstream
+    net=$(darban_conf_net) || return 0
+    valid_ipv4 "${net:-}" || return 0
+    gateway=${net%.0}.1
+    grep -qx "push \"dhcp-option DNS $gateway\"" "$DARBAN_SERVER_CONF" 2>/dev/null || return 0
+    if [[ -f $UNBOUND_CONF ]] && unbound_installed; then return 0; fi
+    upstream=$(awk -F= '$1=="DNS_UPSTREAM" {v=$2} END {print v}' "$CONFIG_FILE" 2>/dev/null)
+    valid_dns "${upstream:-$DEFAULT_CLIENT_DNS}" || upstream=$DEFAULT_CLIENT_DNS
+    upstream=${upstream:-$DEFAULT_CLIENT_DNS}
+    awk '!($1=="push" && $2=="\"dhcp-option" && $3=="DNS")' "$DARBAN_SERVER_CONF" >"$DARBAN_SERVER_CONF.dns" || return 1
+    for gateway in $upstream; do printf 'push "dhcp-option DNS %s"\n' "$gateway" >>"$DARBAN_SERVER_CONF.dns" || return 1; done
+    chmod 644 "$DARBAN_SERVER_CONF.dns" && mv -f -- "$DARBAN_SERVER_CONF.dns" "$DARBAN_SERVER_CONF" || return 1
+    sed -i '/^DNS_SERVER=/d' "$CONFIG_FILE" 2>/dev/null || true
+    rm -f -- "$DARBAN_DNS_REDIRECT"
+    warn "DNS on this server was on in the backup, but this server does not run it: clients ask $upstream instead. Turn it on again in Settings > DNS on this server."
 }
 # ---------- backup and restore of the CA ----------
 # A backup is one tar of a closed list of files (lib/backup.py), encrypted with age for the owner's public key: this
@@ -5920,6 +6295,7 @@ restore_commit() {
         install -D -m 600 "$file" "$LEDGER_DIR/$name" 2>/dev/null && sync -- "$LEDGER_DIR/$name" 2>/dev/null \
             || { RESTORE_WHY="the record of when $name was seen could not be put back in $LEDGER_DIR"; return 1; }
     done
+    dns_restore_check || true
     if ! restore_nat; then journal_write nat=failed || return 1; fi
     # Connection events, when this server can have them: the lines go into the new server.conf while OpenVPN is off.
     if ! events_lines_on && ! events_blocker >/dev/null; then

@@ -124,6 +124,7 @@ mapfile -t added_kernel < <(recorded kernel)
 forward_before=$(awk '$1=="ip_forward_before" {print $2}' "$MARKER")
 ufw_port=$(awk '$1=="ufw_port" {print $2}' "$MARKER")
 ufw_iface=$(awk '$1=="ufw_iface" {print $2}' "$MARKER")
+ufw_dns=$(awk '$1=="ufw_dns" {print $2}' "$MARKER")
 mapfile -t certificates < <(awk '$1=="certbot_cert" && $2 ~ /^[A-Za-z0-9._-]+$/ {print $2}' "$MARKER" | sort -u)
 mapfile -t apt_added < <(awk '$1=="apt_added" {print $2}' "$MARKER")
 mapfile -t apt_saved < <(awk '$1=="apt_saved" {print $2}' "$MARKER")
@@ -146,6 +147,15 @@ if [[ $forward_before == 0 ]]; then sysctl -q -w net.ipv4.ip_forward=0 >/dev/nul
 if command -v ufw >/dev/null; then
     if [[ $ufw_port =~ ^[0-9]+$ ]]; then ufw delete allow "$ufw_port/udp" >/dev/null 2>&1 || true; fi
     if [[ $ufw_iface =~ ^[A-Za-z0-9_.@-]+$ ]]; then ufw route delete allow in on tun0 out on "$ufw_iface" >/dev/null 2>&1 || true; fi
+    if [[ $ufw_dns == tun0 ]]; then ufw delete allow in on tun0 to any port 53 >/dev/null 2>&1 || true; fi
+fi
+# DNS on this server: the tool's file of Unbound and its drop-in. Unbound itself goes with the packages, when the tool
+# installed it; one that was here before goes on without them.
+if [[ -e /etc/unbound/unbound.conf.d/darban.conf || -e /etc/systemd/system/unbound.service.d/darban.conf ]]; then
+    try rm -f -- /etc/unbound/unbound.conf.d/darban.conf /etc/systemd/system/unbound.service.d/darban.conf
+    rmdir /etc/systemd/system/unbound.service.d 2>/dev/null || true
+    systemctl daemon-reload >/dev/null 2>&1 || true
+    systemctl try-restart unbound.service >/dev/null 2>&1 || true
 fi
 
 # The certificates for temporary links that this tool got, then the certbot it installed, if any. A kept

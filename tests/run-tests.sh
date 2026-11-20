@@ -1523,6 +1523,109 @@ test_country_sites_go_outside_the_vpn() {
     if grep -q '^COUNTRY_DIRECT=' "$E/cfg/config"; then result 0 'and the setting too'; else result 1 'and the setting too'; fi
 }
 
+unbound_here() {
+    # unbound_here [refuse]: Unbound as if installed: its config check passes, or refuses with "refuse".
+    printf '#!/usr/bin/env bash\necho "unbound-checkconf $*" >> "$STUB_LOG"\n%s\n' "$( [[ ${1:-} == refuse ]] && printf 'exit 1' || printf 'exit 0')" > "$E/bin/unbound-checkconf"
+    chmod +x "$E/bin/unbound-checkconf"
+}
+
+test_dns_on_this_server() {
+    local out conf=$E/unbound/darban.conf nat=$E/cfg/nat.nft
+    built_server
+    unbound_here
+    out=$(menu '7\n0\n0\n')
+    has 'Settings offers DNS on this server' "$(printf '%-24s %s' 'DNS on this server' off)" "$out"
+
+    out=$(menu '7\n8\n1\n1\n0\n0\n0\n')
+    has 'option 1 keeps it off' 'Cancelled; nothing changed' "$out"
+    : > "$STUB_LOG"
+    out=$(menu '7\n8\n1\n2\n0\n0\n0\n')
+    has 'it is on' 'DNS on this server is on: clients ask 10.8.0.1, which asks 1.1.1.1 9.9.9.9.' "$out"
+    if grep -q 'apt-get.* install unbound' "$STUB_LOG"; then result 0 'Unbound already here is not installed again'; else result 1 'Unbound already here is not installed again'; fi
+    grep -qx '    interface: 10.8.0.1' "$conf"; rc_is 'Unbound answers on the VPN address' 0 "$?"
+    grep -qx '    access-control: 10.8.0.0/24 allow' "$conf"; rc_is 'only to VPN clients' 0 "$?"
+    grep -qx '    forward-addr: 1.1.1.1' "$conf"; rc_is 'and asks the upstream DNS' 0 "$?"
+    grep -qx '    module-config: "validator iterator"' "$conf"; rc_is 'DNSSEC is checked' 0 "$?"
+    grep -q 'use-application-dns.net' "$conf"; rc_is 'Firefox is told to keep its own DNS off' 0 "$?"
+    grep -qx 'Restart=always' "$E/units/unbound.service.d/darban.conf"; rc_is 'Unbound starts again by itself' 0 "$?"
+    rc_is 'clients are told to ask this server' 'push "dhcp-option DNS 10.8.0.1"' "$(grep 'dhcp-option DNS' "$SERVER_CONF")"
+    grep -q 'systemctl restart unbound.service' "$STUB_LOG"; rc_is 'Unbound starts with it' 0 "$?"
+    grep -q 'systemctl restart openvpn-server@server' "$STUB_LOG"; rc_is 'OpenVPN restarts once' 0 "$?"
+    grep -q '^DNS_SERVER=yes$' "$E/cfg/config"; rc_is 'the setting is saved' 0 "$?"
+    ok_if 'clients must use it' test -e "$E/cfg/dns-redirect"
+    grep -Fq 'ip saddr 10.8.0.0/24 ip daddr != 10.8.0.1 udp dport 53 dnat to 10.8.0.1' "$nat"; rc_is 'their DNS to other servers comes here' 0 "$?"
+    grep -Fq 'ip saddr 10.8.0.0/24 tcp dport 853 reject with tcp reset' "$nat"; rc_is 'DNS over TLS from clients is refused' 0 "$?"
+    has 'Settings shows it' 'on, asks 1.1.1.1 9.9.9.9' "$(menu '7\n0\n0\n')"
+
+    # The upstream DNS, from this menu or from Advanced: only Unbound restarts.
+    : > "$STUB_LOG"
+    out=$(menu '7\n8\n2\n3\n0\n0\n0\n')
+    has 'a new upstream DNS' 'Applied: this server asks 9.9.9.9 149.112.112.112. Nothing restarted but Unbound.' "$out"
+    grep -qx '    forward-addr: 149.112.112.112' "$conf"; rc_is 'Unbound asks it' 0 "$?"
+    if grep -q 'systemctl restart openvpn' "$STUB_LOG"; then result 0 'OpenVPN does not restart for it'; else result 1 'OpenVPN does not restart for it'; fi
+    rc_is 'clients still ask this server' 'push "dhcp-option DNS 10.8.0.1"' "$(grep 'dhcp-option DNS' "$SERVER_CONF")"
+    out=$(menu '7\n6\n2\n1\n0\n0\n0\n')
+    has 'Advanced says where clients ask' 'DNS on this server is on (Settings > 8)' "$out"
+    has 'and sets the upstream DNS' 'Applied: this server asks 1.1.1.1 1.0.0.1' "$out"
+
+    # DNS over TLS: with a DNS of the list, and not with an address whose certificate cannot be checked.
+    out=$(menu '7\n8\n3\n2\n0\n0\n0\n')
+    has 'DNS over TLS is on' 'Applied: DNS over TLS on' "$out"
+    grep -qx '    forward-tls-upstream: yes' "$conf"; rc_is 'Unbound asks over TLS' 0 "$?"
+    grep -qx '    forward-addr: 1.1.1.1@853#cloudflare-dns.com' "$conf"; rc_is 'and checks the name of the certificate' 0 "$?"
+    out=$(menu '7\n8\n2\n203.0.114.53\n0\n0\n0\n')
+    has 'TLS turns off for an address it cannot check' 'TLS cannot be checked with 203.0.114.53' "$out"
+    if grep -q 'forward-tls-upstream' "$conf"; then result 0 'TLS is gone from the file'; else result 1 'TLS is gone from the file'; fi
+    out=$(menu '7\n8\n3\n2\n0\n0\n0\n')
+    has 'and is not turned on again for it' 'Choose one of the four DNS of the list first' "$out"
+    menu '7\n8\n2\n1\n0\n0\n0\n' >/dev/null
+
+    # Clients must use it, and DNSSEC.
+    out=$(menu '7\n8\n4\n2\n0\n0\n0\n')
+    has 'clients may use another DNS' 'Applied: clients use it off' "$out"
+    ok_if 'the flag is gone' test ! -e "$E/cfg/dns-redirect"
+    if grep -q 'dnat to' "$nat"; then result 0 'and the rule that sent DNS here'; else result 1 'and the rule that sent DNS here'; fi
+    if grep -q 'use-application-dns.net' "$conf"; then result 0 'Firefox is no longer told'; else result 1 'Firefox is no longer told'; fi
+    menu '7\n8\n4\n2\n0\n0\n0\n' >/dev/null
+    out=$(menu '7\n8\n5\n2\n0\n0\n0\n')
+    has 'DNSSEC is off' 'Applied: the DNSSEC check off' "$out"
+    grep -qx '    module-config: "iterator"' "$conf"; rc_is 'Unbound no longer checks it' 0 "$?"
+    cp "$conf" "$E/unbound.before"
+    unbound_here refuse
+    out=$(menu '7\n8\n5\n2\n0\n0\n0\n')
+    has 'a file Unbound refuses changes nothing' 'unbound-checkconf refused the new file' "$out"
+    cmp -s "$conf" "$E/unbound.before"; rc_is 'the file that ran stays' 0 "$?"
+    grep -q '^DNS_DNSSEC=no$' "$E/cfg/config"; rc_is 'and so does the setting' 0 "$?"
+    unbound_here
+
+    # A new VPN network: clients ask the new address, Unbound answers there, and DNS is sent there.
+    out=$(menu '7\n6\n3\n10.50.0.0\n2\n0\n0\n0\n')
+    has 'the network change is confirmed' 'Applied: VPN network 10.50.0.0/24' "$out"
+    rc_is 'clients ask the new address' 'push "dhcp-option DNS 10.50.0.1"' "$(grep 'dhcp-option DNS' "$SERVER_CONF")"
+    grep -qx '    interface: 10.50.0.1' "$conf"; rc_is 'Unbound answers there' 0 "$?"
+    grep -Fq 'udp dport 53 dnat to 10.50.0.1' "$nat"; rc_is 'and DNS is sent there' 0 "$?"
+    out=$(menu '7\n6\n1\n0\n0\n0\n')
+    has 'a split tunnel waits for it to be off' 'Turn DNS on this server off first' "$out"
+
+    # Off: clients ask the upstream DNS again, and the tool's files go.
+    : > "$STUB_LOG"
+    out=$(menu '7\n8\n1\n2\n0\n0\n0\n')
+    has 'it is off' 'DNS on this server is off. Clients ask 1.1.1.1 1.0.0.1 again.' "$out"
+    rc_is 'clients are told the upstream DNS' "$(printf 'push "dhcp-option DNS 1.1.1.1"\npush "dhcp-option DNS 1.0.0.1"')" "$(grep 'dhcp-option DNS' "$SERVER_CONF")"
+    ok_if 'the file of Unbound is gone' test ! -e "$conf"
+    ok_if 'and its drop-in' test ! -e "$E/units/unbound.service.d/darban.conf"
+    ok_if 'and the flag' test ! -e "$E/cfg/dns-redirect"
+    if grep -q '^DNS_SERVER=' "$E/cfg/config"; then result 0 'the setting is off'; else result 1 'the setting is off'; fi
+
+    # Without Unbound it is installed first; when it does not start, clients keep their DNS.
+    rm -f "$E/bin/unbound-checkconf"
+    : > "$STUB_LOG"
+    out=$(menu '7\n8\n1\n2\n0\n0\n0\n')
+    grep -q 'apt-get.* install unbound' "$STUB_LOG"; rc_is 'Unbound is installed' 0 "$?"
+    has 'one that does not start changes nothing else' 'Nothing else was changed' "$out"
+    rc_is 'clients keep their DNS' "$(printf 'push "dhcp-option DNS 1.1.1.1"\npush "dhcp-option DNS 1.0.0.1"')" "$(grep 'dhcp-option DNS' "$SERVER_CONF")"
+}
+
 test_advanced_network_needs_nat_from_this_tool() {
     local out
     echo 'server 10.8.0.0 255.255.255.0' >> "$SERVER_CONF"
@@ -2956,6 +3059,35 @@ STUB
     has 'routes without connection events are named' 'but connection events are off' "$(mgr status)"
     events_here
     has 'routes that reach clients are seen' 'Their sites go outside the VPN: 2 routes' "$(mgr status)"
+}
+
+test_diagnostics_check_dns_on_this_server() {
+    local out
+    printf 'server 10.8.0.0 255.255.255.0\npush "dhcp-option DNS 10.8.0.1"\n' >> "$SERVER_CONF"
+    cat > "$E/bin/nft" <<'STUB'
+#!/usr/bin/env bash
+case "$*" in
+    'list table ip darban') exit 0 ;;
+    'list chain ip darban prerouting') cat "$E/live-pre" 2>/dev/null ;;
+    'list chain ip darban forward') cat "$E/live-forward" 2>/dev/null ;;
+    *) exit 0 ;;
+esac
+STUB
+    chmod +x "$E/bin/nft"
+    lacks 'nothing is said while it is off' 'DNS on this server' "$(mgr status)"
+    printf 'DNS_SERVER=yes\n' >> "$E/cfg/config"
+    has 'a missing file is named' "Unbound's file does not answer on 10.8.0.1" "$(mgr status)"
+    mkdir -p "$E/unbound"
+    printf 'server:\n    interface: 10.8.0.1\n' > "$E/unbound/darban.conf"
+    out=$(mgr status)
+    has 'a running Unbound is seen' 'DNS on this server answers on 10.8.0.1 and asks 1.1.1.1 9.9.9.9' "$out"
+    has 'rules that do not send DNS here are named' 'Clients can still use another DNS' "$out"
+    printf '\t\tip saddr 10.8.0.0/24 ip daddr != 10.8.0.1 udp dport 53 dnat to 10.8.0.1\n\t\tip saddr 10.8.0.0/24 ip daddr != 10.8.0.1 tcp dport 53 dnat to 10.8.0.1\n' > "$E/live-pre"
+    printf '\t\tip saddr 10.8.0.0/24 tcp dport 853 reject with tcp reset\n' > "$E/live-forward"
+    lacks 'rules that send DNS here pass' 'Clients can still use another DNS' "$(mgr status)"
+    has 'a stopped Unbound is named' 'DNS on this server does not run' "$(FAKE_FAILED=unbound.service mgr status)"
+    sed -i 's/dhcp-option DNS 10.8.0.1/dhcp-option DNS 1.1.1.1/' "$SERVER_CONF"
+    has 'clients told another DNS are named' 'but clients are told to ask 1.1.1.1' "$(mgr status)"
 }
 
 test_live_rule_checks_read_all_of_nft() {

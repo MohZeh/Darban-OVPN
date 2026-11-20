@@ -540,6 +540,47 @@ else
     echo 'NOTE: this runner could not download the list of Iran, so sites outside the VPN were not judged.'
     printf '7\n7\n0\n0\n0\n' | darban >/dev/null || true
 fi
+# DNS on this server, with the real Unbound and a real client: clients are told to ask it, and DNS they send to
+# another server, here one that does not exist, is answered by it all the same. Over TLS too, then off again.
+cat >"$LOG/ask.py" <<'PY'
+import random, socket, struct, sys
+server = sys.argv[1]
+ident = random.randrange(65536)
+query = struct.pack('>HHHHHH', ident, 0x0100, 1, 0, 0, 0) + b'\x07example\x03com\x00' + struct.pack('>HH', 1, 1)
+sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+sock.settimeout(5)
+try:
+    sock.sendto(query, (server, 53))
+    data, _ = sock.recvfrom(4096)
+except OSError:
+    print('no answer'); sys.exit(1)
+got, flags, _, answers = struct.unpack('>HHHH', data[:8])
+print('rcode %d, %d answers' % (flags & 0xF, answers))
+sys.exit(0 if got == ident and flags & 0xF == 0 and answers > 0 else 1)
+PY
+dns_net=$(awk '$1=="server" {print $2; exit}' /etc/openvpn/server/server.conf)
+dns_gateway=${dns_net%.0}.1
+printf '7\n8\n1\n2\n0\n0\n0\n' | darban | tee "$LOG/dns-on.log"
+grep -q "DNS on this server is on: clients ask $dns_gateway" "$LOG/dns-on.log"
+systemctl is-active --quiet unbound
+ns_reconnect
+grep -q "dhcp-option DNS $dns_gateway" "$LOG/f.log"
+ip netns exec "$NS" python3 -I "$LOG/ask.py" "$dns_gateway"
+# 192.0.2.53 is a documentation address: no DNS answers there, unless the server sends the question to its own.
+ip netns exec "$NS" python3 -I "$LOG/ask.py" 192.0.2.53
+darban status >"$LOG/dns-status.log" 2>&1 || true
+grep -q "DNS on this server answers on $dns_gateway" "$LOG/dns-status.log"
+if grep -q 'Clients can still use another DNS' "$LOG/dns-status.log"; then echo 'FAIL: Diagnostics do not see the rules that send DNS here.'; exit 1; fi
+printf '7\n8\n3\n2\n0\n0\n0\n' | darban | tee "$LOG/dns-tls.log"
+grep -q 'Applied: DNS over TLS on' "$LOG/dns-tls.log"
+ip netns exec "$NS" python3 -I "$LOG/ask.py" "$dns_gateway"
+printf '7\n8\n3\n2\n0\n0\n0\n' | darban >/dev/null
+printf '7\n8\n1\n2\n0\n0\n0\n' | darban | tee "$LOG/dns-off.log"
+grep -q 'DNS on this server is off' "$LOG/dns-off.log"
+ns_reconnect
+if ip netns exec "$NS" python3 -I "$LOG/ask.py" 192.0.2.53; then echo 'FAIL: DNS is still sent to this server after it was turned off.'; exit 1; fi
+if [[ -e /etc/unbound/unbound.conf.d/darban.conf ]]; then echo "FAIL: the tool's file of Unbound stayed."; exit 1; fi
+echo 'PASS: DNS on this server answers a real client, over TLS too, catches DNS sent elsewhere, and goes when turned off.'
 if modinfo -k "$(uname -r)" ovpn >/dev/null 2>&1; then
     ip -d link show tun0 | grep -w ovpn >/dev/null
     echo 'PASS: the server uses the in-kernel ovpn module (DCO).'
