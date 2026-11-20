@@ -486,12 +486,21 @@ if reaches; then echo 'FAIL: a blocked address was reached through the VPN.'; ex
 if (( reached_before && SECONDS - started > 5 )); then echo 'FAIL: a blocked address was not refused at once; the client waited.'; exit 1; fi
 printf '7\n7\n4\n1\n0\n0\n0\n' | darban | tee "$LOG/unblock.log"
 grep -q 'Unblocked: 9.9.9.9/32' "$LOG/unblock.log"
+# The set as the kernel holds it now, for the log, and the address asked for a few times: one slow answer from
+# outside the runner is not a rule that stayed.
+nft list set ip darban blocked
+if nft list set ip darban blocked | grep -q '9\.9\.9\.9'; then echo 'FAIL: the unblocked address is still in the live set.'; exit 1; fi
+reached_after=0
+for attempt in 1 2 3; do
+    if reaches; then reached_after=1; break; fi
+    sleep 2
+done
 if (( ! reached_before )); then
     echo 'NOTE: this runner could not reach 9.9.9.9:443 through the VPN at all, so only the rules are judged.'
-elif reaches; then
+elif (( reached_after )); then
     echo 'PASS: a blocked address is refused at once through the VPN, and reached again once unblocked.'
 else
-    echo 'FAIL: an address that was unblocked is still not reached through the VPN.'; exit 1
+    echo 'FAIL: an address that was unblocked is still not reached through the VPN, three times.'; exit 1
 fi
 # The sites of a country outside the VPN, with a real OpenVPN 2 client: after its next connection, an address of Iran goes
 # through the client's own network, and any other through the tunnel. The list used is the real list of Iran: a runner
