@@ -165,12 +165,16 @@ darban_live_isolation_ok() {
     rules=$(nft list chain ip darban forward 2>/dev/null) || return 1
     grep -Fq "ip saddr $1/24 ip daddr $1/24 drop" <<<"$rules" && grep -Fq "ip saddr $1/24 ip daddr 169.254.0.0/16 drop" <<<"$rules"
 }
-# darban_live_blocked_ok NET: the rules that refuse blocked destinations run, whatever the set holds.
+# darban_live_blocked_ok NET: the rules that refuse blocked destinations run, whatever the set holds. nft does not
+# list a rule as it was written: "ip protocol tcp" before "reject with tcp reset" may be left out as implied, and the
+# word "type" of an ICMP code too. So each rule is found by its parts.
 darban_live_blocked_ok() {
     local rules
     rules=$(nft list chain ip darban forward 2>/dev/null) || return 1
-    grep -Fq "ip saddr $1/24 ip daddr @blocked ip protocol tcp reject with tcp reset" <<<"$rules" &&
-        grep -Fq "ip saddr $1/24 ip daddr @blocked reject with icmp" <<<"$rules"
+    awk -v net="ip saddr $1/24 " '
+        index($0, net) && index($0, " ip daddr @blocked ") && index($0, "reject with tcp reset") {tcp = 1}
+        index($0, net) && index($0, " ip daddr @blocked ") && index($0, "reject with icmp") {icmp = 1}
+        END {exit !(tcp && icmp)}' <<<"$rules"
 }
 # The number of ranges the live set holds. nft lists them between "elements = {" and "}", separated by commas,
 # over one line or several, and a single address without its /32.

@@ -2368,8 +2368,11 @@ test_release_assets_know_their_version() {
     bash -n "$out/get.sh"; rc_is 'the published script is valid' 0 "$?"
     if tar -tzf "$out/darban-ovpn.tar.gz" | grep -q '^tests/'; then result 0 'tests are not published'; else result 1 'tests are not published'; fi
     tar -tzf "$out/darban-ovpn.tar.gz" | grep -qx 'VERSION'; rc_is 'the archive states its version' 0 "$?"
-    tar -tzf "$out/darban-ovpn.tar.gz" | grep -qx 'lib/geolist.py'; rc_is 'the archive has the lists of blocked destinations' 0 "$?"
-    tar -tzf "$out/darban-ovpn.tar.gz" | grep -qx 'systemd/darban-geo.timer'; rc_is 'the archive has their daily update' 0 "$?"
+    # Listed whole first: grep -q stops reading at its match, and tar then fails on the closed pipe.
+    local listed
+    listed=$(tar -tzf "$out/darban-ovpn.tar.gz")
+    grep -qx 'lib/geolist.py' <<<"$listed"; rc_is 'the archive has the lists of blocked destinations' 0 "$?"
+    grep -qx 'systemd/darban-geo.timer' <<<"$listed"; rc_is 'the archive has their daily update' 0 "$?"
     (cd "$out" && sha256sum --quiet -c SHA256SUMS >/dev/null); rc_is 'the checksums match' 0 "$?"
 
     # Q12: every file carries the commit time, and a second build of the commit, from a copy whose files have

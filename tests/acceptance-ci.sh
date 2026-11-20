@@ -477,6 +477,8 @@ if reaches; then reached_before=1; fi
 printf '7\n7\n2\n9.9.9.9\n0\n0\n0\n' | darban | tee "$LOG/block.log"
 grep -q 'Blocked: 9.9.9.9/32' "$LOG/block.log"
 nft list set ip darban blocked | grep -q '9\.9\.9\.9'
+# The rules as the kernel lists them, for the log: Diagnostics must recognize this form.
+nft list chain ip darban forward
 darban status >"$LOG/block-status.log" 2>&1 || true
 grep -q 'Blocked destinations are refused: 1 range (1 address of your own)' "$LOG/block-status.log"
 started=$SECONDS
