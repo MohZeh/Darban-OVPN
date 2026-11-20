@@ -209,8 +209,8 @@ sed -e "s#^source /usr/local/lib/darban/#source $E/lib/#" -e "s#^OUT_DIR=.*#OUT_
     -e 's#^EVENT_MAX=.*#EVENT_MAX=${TEST_EVENT_MAX:-500}#' \
     -e 's#^event_run_id() {.*#event_run_id() { printf "%s\\n" "${TEST_EVENT_RUN:-$$-0}"; }#' \
     "$SRC/bin/darban" > "$E/manager.sh"
-# The event script as install.sh places it, writing into this fake server's queue.
+# The event script as install.sh places it, writing into this fake server's queue, and giving its routes.
 mkdir -p "$E/libexec"
-sed -e "s#^queue=.*#queue=$E/events#" "$SRC/bin/darban-ovpn-event" > "$E/libexec/darban-ovpn-event"
+sed -e "s#^queue=.*#queue=$E/events#" -e "s#^direct=.*#direct=$E/server/darban-direct.routes#" "$SRC/bin/darban-ovpn-event" > "$E/libexec/darban-ovpn-event"
 chmod 755 "$E/libexec/darban-ovpn-event"
 sed -e "s#^source /usr/local/lib/darban/#source $E/lib/#" "$SRC/bin/darban-crl-maintain" > "$E/crl-maintain"

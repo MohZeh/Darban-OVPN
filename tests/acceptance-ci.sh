@@ -493,6 +493,44 @@ elif reaches; then
 else
     echo 'FAIL: an address that was unblocked is still not reached through the VPN.'; exit 1
 fi
+# Iranian sites outside the VPN, with a real OpenVPN 2 client: after its next connection, an address of Iran goes
+# through the client's own network, and any other through the tunnel. The list of Iran is the real one: a runner
+# that cannot download it skips this, and says so.
+ns_reconnect() {
+    local pid attempt
+    pid=$(cat "$LOG/ns.pid")
+    kill "$pid" 2>/dev/null || true
+    for attempt in $(seq 1 20); do kill -0 "$pid" 2>/dev/null || break; sleep 0.5; done
+    ip netns exec "$NS" openvpn --config "$LOG/ns.ovpn" --daemon --writepid "$LOG/ns.pid" --log "$LOG/f.log" --verb 3
+    for attempt in $(seq 1 20); do
+        if grep -q 'Initialization Sequence Completed' "$LOG/f.log"; then return 0; fi
+        sleep 1
+    done
+    return 1
+}
+printf '7\n7\n1\n2\n0\n0\n0\n' | darban | tee "$LOG/iran.log"
+if grep -q 'Blocked: Iranian addresses' "$LOG/iran.log"; then
+    printf '7\n7\n5\n2\n0\n0\n0\n' | darban | tee "$LOG/direct.log"
+    grep -q 'Saved: Iranian sites outside the VPN, on' "$LOG/direct.log"
+    iran_ip=$(awk 'NR == 2 {print $3}' /etc/openvpn/server/darban-direct.routes)
+    ns_reconnect
+    ip netns exec "$NS" ip route get "$iran_ip" | tee "$LOG/route-iran.txt"
+    if grep -q 'dev tun' "$LOG/route-iran.txt"; then echo "FAIL: $iran_ip of Iran still goes through the tunnel."; exit 1; fi
+    grep -q 'dev dt1' "$LOG/route-iran.txt"
+    ip netns exec "$NS" ip route get 1.1.1.1 | grep 'dev tun' >/dev/null
+    darban status >"$LOG/direct-status.log" 2>&1 || true
+    grep -q 'Iranian sites go outside the VPN' "$LOG/direct-status.log"
+    # Back as it was: Iran off takes the routes along, and the next connection has none.
+    printf '7\n7\n1\n2\n0\n0\n0\n' | darban | tee "$LOG/iran-off.log"
+    grep -q 'Iranian addresses are no longer blocked' "$LOG/iran-off.log"
+    if [[ -e /etc/openvpn/server/darban-direct.routes ]]; then echo 'FAIL: the routes stayed after Iran was turned off.'; exit 1; fi
+    ns_reconnect
+    ip netns exec "$NS" ip route get "$iran_ip" | grep 'dev tun' >/dev/null
+    echo 'PASS: with Iranian sites outside the VPN, a real client sends Iran through its own network, and nothing else.'
+else
+    echo 'NOTE: this runner could not download the list of Iran, so Iranian sites outside the VPN were not judged.'
+    printf '7\n7\n0\n0\n0\n' | darban >/dev/null || true
+fi
 if modinfo -k "$(uname -r)" ovpn >/dev/null 2>&1; then
     ip -d link show tun0 | grep -w ovpn >/dev/null
     echo 'PASS: the server uses the in-kernel ovpn module (DCO).'
