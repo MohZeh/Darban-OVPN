@@ -98,10 +98,14 @@ darban_blocked_elements() {
     [[ -r $DARBAN_BLOCKED ]] || return 0
     awk '/^([0-9]{1,3}\.){3}[0-9]{1,3}\/[0-9]{1,2}$/ {s = s (s == "" ? "" : ", ") $0} END {print s}' "$DARBAN_BLOCKED"
 }
-# darban_nat_rules NET IFACE: NAT for the VPN, clients kept apart, and the blocked destinations. Loaded with nft -f in
-# one transaction. The blocked ranges are in the file itself, so they load at boot and follow a new VPN network.
+# While this file exists, Settings > DNS on this server makes clients use it: DNS to any other server is sent to this
+# one, and DNS over TLS is refused. Its content does not matter.
+DARBAN_DNS_REDIRECT=/etc/darban/dns-redirect
+# darban_nat_rules NET IFACE: NAT for the VPN, clients kept apart, the blocked destinations, and DNS kept on this server
+# when asked. Loaded with nft -f in one transaction. The blocked ranges are in the file itself, so they load at boot and
+# follow a new VPN network.
 darban_nat_rules() {
-    local blocked
+    local blocked gateway=${1%.0}.1
     blocked=$(darban_blocked_elements)
     cat <<EOF
 table ip darban
@@ -111,8 +115,18 @@ table ip darban {
         type ipv4_addr; flags interval;
 EOF
     if [[ -n $blocked ]]; then printf '        elements = { %s }\n' "$blocked"; fi
-    cat <<EOF
+    printf '    }\n'
+    if [[ -e $DARBAN_DNS_REDIRECT ]]; then
+        cat <<EOF
+    # DNS a client sends to another server goes to the DNS of this server, so its blocked names hold.
+    chain prerouting {
+        type nat hook prerouting priority dstnat;
+        ip saddr $1/24 ip daddr != $gateway udp dport 53 dnat to $gateway
+        ip saddr $1/24 ip daddr != $gateway tcp dport 53 dnat to $gateway
     }
+EOF
+    fi
+    cat <<EOF
     chain postrouting {
         type nat hook postrouting priority srcnat;
         ip saddr $1/24 oifname "$2" masquerade
@@ -125,6 +139,11 @@ EOF
         # A blocked destination never sees this server's address. It is refused at once, so an app does not wait.
         ip saddr $1/24 ip daddr @blocked ip protocol tcp reject with tcp reset
         ip saddr $1/24 ip daddr @blocked reject with icmp type admin-prohibited
+EOF
+    if [[ -e $DARBAN_DNS_REDIRECT ]]; then
+        printf '        # DNS over TLS would pass DNS around this server.\n        ip saddr %s/24 tcp dport 853 reject with tcp reset\n' "$1"
+    fi
+    cat <<EOF
         # TCP segments must fit in one tunnel packet. A larger one is split, and many mobile and home networks
         # drop the pieces: then most websites never open, while apps that send small packets still work.
         ip saddr $1/24 tcp flags syn tcp option maxseg size > $DARBAN_MSS tcp option maxseg size set $DARBAN_MSS
@@ -175,6 +194,17 @@ darban_live_blocked_ok() {
         index($0, net) && index($0, " ip daddr @blocked ") && index($0, "reject with tcp reset") {tcp = 1}
         index($0, net) && index($0, " ip daddr @blocked ") && index($0, "reject with icmp") {icmp = 1}
         END {exit !(tcp && icmp)}' <<<"$rules"
+}
+# darban_live_dns_redirect_ok NET: DNS to another server is sent to this one, and DNS over TLS is refused.
+darban_live_dns_redirect_ok() {
+    local rules gateway=${1%.0}.1
+    rules=$(nft list chain ip darban prerouting 2>/dev/null) || return 1
+    awk -v net="ip saddr $1/24 " -v to="dnat to $gateway" '
+        index($0, net) && index($0, "udp dport 53") && index($0, to) {udp = 1}
+        index($0, net) && index($0, "tcp dport 53") && index($0, to) {tcp = 1}
+        END {exit !(udp && tcp)}' <<<"$rules" || return 1
+    rules=$(nft list chain ip darban forward 2>/dev/null) || return 1
+    grep -F "ip saddr $1/24 tcp dport 853 reject" <<<"$rules" >/dev/null
 }
 # The number of ranges the live set holds. nft lists them between "elements = {" and "}", separated by commas,
 # over one line or several, and a single address without its /32.

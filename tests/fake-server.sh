@@ -193,7 +193,7 @@ printf 'DOWNLOAD_SSH_HOST=203.0.113.7\nDOWNLOAD_SSH_PORT=2222\nDOWNLOAD_SSH_USER
 sed -e "s#^DARBAN_LIB=.*#DARBAN_LIB=$E/lib#" -e "s#^DARBAN_PKI=.*#DARBAN_PKI=$P#" -e "s#^DARBAN_EASYRSA=.*#DARBAN_EASYRSA=$E/bin/easyrsa#" \
     -e "s#^DARBAN_SERVER_DIR=.*#DARBAN_SERVER_DIR=$E/server#" -e "s#^DARBAN_LOCK=.*#DARBAN_LOCK=$E/run/lock#" \
     -e "s#^DARBAN_RESTORE_JOURNAL=.*#DARBAN_RESTORE_JOURNAL=$E/varlib/restore.journal#" \
-    -e "s#^DARBAN_BLOCKED=.*#DARBAN_BLOCKED=$E/cfg/blocked.v4#" \
+    -e "s#^DARBAN_BLOCKED=.*#DARBAN_BLOCKED=$E/cfg/blocked.v4#" -e "s#^DARBAN_DNS_REDIRECT=.*#DARBAN_DNS_REDIRECT=$E/cfg/dns-redirect#" \
     "$SRC/lib/common.sh" > "$E/lib/common.sh"
 echo 'darban_require_root() { :; }' >> "$E/lib/common.sh"
 cp "$SRC/lib/ui.sh" "$E/lib/ui.sh"
@@ -202,7 +202,8 @@ cp "$SRC/lib/geolist.py" "$E/lib/geolist.py"
 sed -e "s#^source /usr/local/lib/darban/#source $E/lib/#" -e "s#^OUT_DIR=.*#OUT_DIR=$E/clients#" -e "s#^LINK_DIR=.*#LINK_DIR=$E/links#" -e "s#^BACKUP_ROOT=.*#BACKUP_ROOT=$E/backups-tool#" -e "s#^SBIN_DIR=.*#SBIN_DIR=$E/sbin#" -e "s#^UNIT_DIR=.*#UNIT_DIR=$E/units#" -e "s#^CONFIG_DIR=.*#CONFIG_DIR=$E/cfg#" \
     -e "s#^SYSTEM_CA_FILE=.*#SYSTEM_CA_FILE=$E/system-ca.pem#" -e "s#^CERT_SEARCH_DIRS=.*#CERT_SEARCH_DIRS='$E/le-live $E/panel-cert $E/acme'#" \
     -e "s#^LE_DIR=.*#LE_DIR=$E/le#" -e "s#^LINK_CERT_LOG=.*#LINK_CERT_LOG=$E/varlib/link-certificates.log#" \
-    -e "s#^GEO_SOURCE=.*#GEO_SOURCE=file://$E/geo-src/#" \
+    -e "s#^GEO_SOURCE=.*#GEO_SOURCE=file://$E/geo-src/#" -e "s#^UNBOUND_DIR=.*#UNBOUND_DIR=$E/unbound#" \
+    -e "s#^UNBOUND_ROOT_KEY=.*#UNBOUND_ROOT_KEY=$E/varlib/unbound/root.key#" -e "s#^DNS_ROOT_DATA=.*#DNS_ROOT_DATA=$E/dns-root.key#" \
     -e "s#^EVENT_SCRIPT=.*#EVENT_SCRIPT=$E/libexec/darban-ovpn-event#" -e "s#^EVENT_DIR=.*#EVENT_DIR=$E/events#" \
     -e "s#^LEDGER_DIR=.*#LEDGER_DIR=$E/varlib/clients#" \
     -e "s#^PKI_BACKUP_DIR=.*#PKI_BACKUP_DIR=$E/pki-backups#" -e "s#^RESTORE_WARN=.*#RESTORE_WARN=$E/varlib/restore-unverified#" \

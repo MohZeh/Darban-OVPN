@@ -174,6 +174,22 @@ The lists come from [Chocolate4U/Iran-v2ray-rules](https://github.com/Chocolate4
 
 Only IPv4 goes through the VPN, so only IPv4 is blocked. In a split tunnel no traffic to the internet passes this server, so nothing is blocked there. The ranges are written into `/etc/darban/nat.nft` itself, so they load at boot with NAT and stay when the VPN network changes. **Diagnostics** show how many ranges are refused, and warn when a list is more than a week old. The settings are `BLOCK_COUNTRIES`, `COUNTRY_DIRECT` and `BLOCK_EXTRA` in `/etc/darban/config`, and the lists are in `/etc/darban/geo`.
 
+## DNS on this server
+
+**Settings › DNS on this server** runs Unbound on this server. Clients are told to ask it for every name, at the server's first address inside the VPN, such as `10.8.0.1`, and it asks the upstream DNS. It never asks the name servers of sites itself, so they see that DNS and never this server, and it sends no part of any address on (no EDNS Client Subnet). It is what blocking names will need.
+
+| # | Item | Notes |
+|---|---|---|
+| 1 | DNS on this server | On or off. Installs Unbound if it is not here yet, and restarts OpenVPN once, since clients are told the new DNS. Needs the full tunnel |
+| 2 | Upstream DNS | The DNS this server asks: Cloudflare, Google, Quad9, AdGuard, or one or two addresses. Only Unbound restarts. While this is on, **Settings › Advanced › 2** sets the same |
+| 3 | DNS over TLS | This server asks the upstream DNS over TLS, port 853, so the network of the server's provider cannot read or change its questions. Only with the four DNS of the list, whose certificates are checked by name |
+| 4 | Clients must use it | DNS a client sends to any other server is answered by this one, and DNS over TLS from clients is refused. DNS over HTTPS cannot be told from other web traffic and still passes; Firefox is told to keep its own off. On by default |
+| 5 | DNSSEC check | Answers of signed names are checked, so a forged one is refused. On by default |
+
+While Unbound is down, clients cannot open any name. A drop-in, `/etc/systemd/system/unbound.service.d/darban.conf`, starts it again at once, and **Diagnostics** name it when it does not run, when clients are told another DNS, and when the rules that send DNS here are not loaded. The tool's file is `/etc/unbound/unbound.conf.d/darban.conf`; anything else of Unbound is left as it is. With ufw active, the rule `ufw allow in on tun0 to any port 53` is added. A new VPN network moves all of it to the new address.
+
+A restore onto a server that does not run it tells clients the upstream DNS instead, and says so. The settings are `DNS_SERVER`, `DNS_UPSTREAM`, `DNS_TLS`, `DNS_FORCE` and `DNS_DNSSEC` in `/etc/darban/config`.
+
 ## Firewall ports
 
 | Port | Needed for |

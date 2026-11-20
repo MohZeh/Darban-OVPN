@@ -67,7 +67,7 @@ Open **7 Settings**:
 
 After changing either one, send the profiles again, because each profile holds the address it was made with. A new port must also be open in your provider's firewall.
 
-The same menu holds the sharing settings: `3` **Shares expire after**, for links and files kept on the server, `4` **Link port** and `5` **Link certificate**. `6` **Advanced** holds the VPN settings; see [Advanced settings](advanced.md#advanced-settings). `7` **Blocked destinations** keeps VPN clients from reaching the addresses of chosen countries, such as Iran, Russia or China, or addresses of your own, through this server, so those sites never see its address, and can send the sites of those countries outside the VPN, so they still open; see [Blocked destinations](advanced.md#blocked-destinations).
+The same menu holds the sharing settings: `3` **Shares expire after**, for links and files kept on the server, `4` **Link port** and `5` **Link certificate**. `6` **Advanced** holds the VPN settings; see [Advanced settings](advanced.md#advanced-settings). `7` **Blocked destinations** keeps VPN clients from reaching the addresses of chosen countries, such as Iran, Russia or China, or addresses of your own, through this server, so those sites never see its address, and can send the sites of those countries outside the VPN, so they still open; see [Blocked destinations](advanced.md#blocked-destinations). `8` **DNS on this server** makes clients ask this server for names, with its own settings; see [DNS on this server](advanced.md#dns-on-this-server).
 
 ## Update the tool
 
