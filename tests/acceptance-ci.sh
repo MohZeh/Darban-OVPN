@@ -561,7 +561,16 @@ PY
 dns_net=$(awk '$1=="server" {print $2; exit}' /etc/openvpn/server/server.conf)
 dns_gateway=${dns_net%.0}.1
 printf '7\n8\n1\n2\n0\n0\n0\n' | darban | tee "$LOG/dns-on.log"
-grep -q "DNS on this server is on: clients ask $dns_gateway" "$LOG/dns-on.log"
+if ! grep -q "DNS on this server is on: clients ask $dns_gateway" "$LOG/dns-on.log"; then
+    # Why Unbound did not start, for the log of this run.
+    journalctl -u unbound.service -n 60 --no-pager || true
+    unbound-checkconf || true
+    ls -la /etc/unbound /etc/unbound/unbound.conf.d || true
+    cat /etc/unbound/unbound.conf || true
+    ss -lunp | grep ':53 ' || true
+    echo 'FAIL: DNS on this server did not turn on.'
+    exit 1
+fi
 systemctl is-active --quiet unbound
 ns_reconnect
 grep -q "dhcp-option DNS $dns_gateway" "$LOG/f.log"

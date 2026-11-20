@@ -5563,7 +5563,7 @@ EOF
 unbound_apply() {
     # Unbound's file and its drop-in from the settings in memory, checked, then Unbound started again with them. When
     # anything fails, the file that ran stays and so does Unbound; DNS_WHY says what failed.
-    local gateway new old had_old=0
+    local gateway new old had_old=0 out
     gateway=$(dns_gateway) || { DNS_WHY='server.conf has no single /24 VPN network'; return 1; }
     install -d -m 755 "$UNBOUND_DIR" "${UNBOUND_DROPIN%/*}" || { DNS_WHY="could not make $UNBOUND_DIR"; return 1; }
     new=$(mktemp "$UNBOUND_DIR/.darban.XXXXXXXX") || return 1
@@ -5576,6 +5576,12 @@ unbound_apply() {
         && chmod 644 "$UNBOUND_DROPIN.new" && mv -f -- "$UNBOUND_DROPIN.new" "$UNBOUND_DROPIN" || { DNS_WHY='could not write its drop-in'; return 1; }
     if [[ -f $UNBOUND_CONF ]]; then cp -a -- "$UNBOUND_CONF" "$old" && had_old=1; fi
     mv -f -- "$new" "$UNBOUND_CONF"
+    # The whole configuration, with the other files of Unbound, is what it starts with.
+    if ! out=$(unbound-checkconf 2>&1); then
+        if (( had_old )); then cp -a -- "$old" "$UNBOUND_CONF"; else rm -f -- "$UNBOUND_CONF"; fi
+        DNS_WHY="unbound-checkconf refused the whole configuration: $(safe_text "$(tail -n 1 <<<"$out")")"
+        return 1
+    fi
     systemctl daemon-reload >/dev/null 2>&1 || true
     # Ubuntu's package would make this server itself ask 127.0.0.1, where this Unbound does not answer: the server's
     # own DNS stays as it is.
@@ -5584,9 +5590,11 @@ unbound_apply() {
         && systemctl is-active --quiet unbound.service; then
         return 0
     fi
+    # Its own last words say why, so the menu shows them.
+    out=$(journalctl -u unbound.service -n 5 --no-pager -o cat 2>/dev/null | grep -v '^$' | tail -n 1) || out=''
     if (( had_old )); then cp -a -- "$old" "$UNBOUND_CONF"; else rm -f -- "$UNBOUND_CONF"; fi
     systemctl restart unbound.service >/dev/null 2>&1 || true
-    DNS_WHY='Unbound did not start with the new file; see: journalctl -u unbound'
+    DNS_WHY="Unbound did not start with the new file${out:+: $(safe_text "$out")}; see: journalctl -u unbound"
     return 1
 }
 dns_push_file() {
