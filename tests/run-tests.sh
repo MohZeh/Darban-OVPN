@@ -1629,6 +1629,109 @@ test_dns_on_this_server() {
     rc_is 'clients keep their DNS' "$(printf 'push "dhcp-option DNS 1.1.1.1"\npush "dhcp-option DNS 1.0.0.1"')" "$(grep 'dhcp-option DNS' "$SERVER_CONF")"
 }
 
+name_sources() {
+    # The name lists where the tool downloads them: ads (with a keyword line DNS cannot use), the three of malware,
+    # and Iran's list, whose names a stand-in DNS answers.
+    mkdir -p "$E/geo-src"
+    printf 'domain:ads.example\ndomain:tracker.example\nkeyword:adserver\n' > "$E/geo-src/category-ads-all.txt"
+    printf 'domain:bad.example\n' > "$E/geo-src/malware.txt"
+    printf 'domain:phish.example\n' > "$E/geo-src/phishing.txt"
+    printf 'domain:mine.example\n' > "$E/geo-src/cryptominers.txt"
+    printf 'domain:home.ir\ndomain:away.ir\ndomain:gone.ir\n' > "$E/geo-src/ir.txt"
+    # home.ir is in the ranges of Iran, away.ir outside them, gone.ir does not exist.
+    cat > "$E/dns-stand-in.py" <<'PY'
+import socket, struct, sys
+answers = {'home.ir': '37.1.0.5', 'away.ir': '46.1.0.5'}
+sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+sock.bind(('127.0.0.1', int(sys.argv[1])))
+while True:
+    data, peer = sock.recvfrom(512)
+    ident = struct.unpack('>H', data[:2])[0]
+    at, labels = 12, []
+    while data[at]:
+        labels.append(data[at + 1:at + 1 + data[at]].decode())
+        at += data[at] + 1
+    question = data[12:at + 5]
+    name = '.'.join(labels)
+    if name in answers:
+        record = b'\xc0\x0c' + struct.pack('>HHIH', 1, 1, 60, 4) + socket.inet_aton(answers[name])
+        sock.sendto(struct.pack('>HHHHHH', ident, 0x8180, 1, 1, 0, 0) + question + record, peer)
+    else:
+        sock.sendto(struct.pack('>HHHHHH', ident, 0x8183, 1, 0, 0, 0) + question, peer)
+PY
+}
+
+test_dns_blocks_names() {
+    local out zone=$E/unbound-zone/darban.rpz conf=$E/unbound/darban.conf responder
+    built_server
+    unbound_here
+    geo_source 600
+    name_sources
+    python3 -I "$E/dns-stand-in.py" 15353 &
+    responder=$!
+    menu '7\n8\n2\n127.0.0.1\n0\n0\n0\n' >/dev/null
+
+    # Chosen while DNS on this server is off: saved, and used once it is on.
+    out=$(menu '7\n8\n6\n2\n2\n0\n0\n0\n')
+    has 'a list is saved for later' 'Saved: name lists ads. It applies when DNS on this server is turned on (item 1).' "$out"
+    rc_is 'the ads list holds its names, without the keyword' "$(printf 'ads.example\ntracker.example')" "$(cat "$E/cfg/geo/names-ads.txt")"
+    ok_if 'no zone while it is off' test ! -e "$zone"
+    menu '7\n8\n1\n2\n0\n0\n0\n' >/dev/null
+    grep -qx 'ads.example CNAME .' "$zone"; rc_is 'turned on, Unbound blocks the name' 0 "$?"
+    grep -qx '\*.ads.example CNAME .' "$zone"; rc_is 'and every name under it' 0 "$?"
+    grep -qx 'rpz:' "$conf"; rc_is "Unbound's file reads the zone" 0 "$?"
+    grep -qx '    module-config: "respip validator iterator"' "$conf"; rc_is 'with the module that applies it' 0 "$?"
+
+    # Iranian sites abroad and malware.
+    out=$(menu '7\n8\n6\n1 3\n2\n0\n0\n0\n')
+    has 'two more lists' 'Saved: name lists Iranian sites abroad, ads, malware. Applied at once; only Unbound restarted.' "$out"
+    rc_is 'only the Iranian name hosted abroad is in its list' 'away.ir' "$(cat "$E/cfg/geo/names-abroad.txt")"
+    grep -qx 'away.ir CNAME .' "$zone"; rc_is 'and it is blocked' 0 "$?"
+    if grep -q 'home.ir' "$zone"; then result 0 'an Iranian site in Iran is not blocked'; else result 1 'an Iranian site in Iran is not blocked'; fi
+    for name in bad.example phish.example mine.example; do grep -qx "$name CNAME ." "$zone"; rc_is "malware: $name" 0 "$?"; done
+    has 'the menu shows the lists' "$(printf '%-24s %s' 'Name lists' 'Iranian sites abroad, ads, malware')" "$(menu '7\n8\n0\n0\n0\n')"
+
+    # The owner's own names.
+    out=$(menu '7\n8\n7\nBlocked.Example\n0\n0\n0\n')
+    has 'a name is blocked' 'Blocked: blocked.example.' "$out"
+    grep -qx 'blocked.example CNAME .' "$zone"; rc_is 'in lower case' 0 "$?"
+    out=$(menu '7\n8\n7\nnot a name\n\n0\n0\n0\n')
+    has 'something that is no name is asked again' 'Enter a name such as example.com' "$out"
+    out=$(menu '7\n8\n8\nads.example\n0\n0\n0\n')
+    has 'a name is allowed' 'Allowed: ads.example.' "$out"
+    grep -qx 'ads.example CNAME rpz-passthru.' "$zone"; rc_is 'an allowed name passes' 0 "$?"
+    if grep -qx 'ads.example CNAME .' "$zone"; then result 0 'and is no longer blocked'; else result 1 'and is no longer blocked'; fi
+    menu '7\n8\n8\nok.bad.example\n0\n0\n0\n' >/dev/null
+    grep -qx 'ok.bad.example CNAME rpz-passthru.' "$zone"; rc_is 'a name inside a blocked one passes' 0 "$?"
+    grep -qx 'bad.example CNAME .' "$zone"; rc_is 'while the one around it stays blocked' 0 "$?"
+    out=$(menu '7\n8\n7\n1\n0\n0\n0\n')
+    has 'a number removes a name' 'Removed: blocked.example.' "$out"
+
+    # A zone Unbound refuses changes nothing.
+    cp "$zone" "$E/zone.before"
+    unbound_here refuse
+    out=$(menu '7\n8\n7\nnew.example\n0\n0\n0\n')
+    has 'a refused change is said' 'The blocked names were not changed' "$out"
+    cmp -s "$zone" "$E/zone.before"; rc_is 'the zone that ran stays' 0 "$?"
+    if grep -q 'new.example' "$E/cfg/config"; then result 0 'and the setting too'; else result 1 'and the setting too'; fi
+    unbound_here
+
+    # The update, from the menu and each day; the list abroad is made again only once a week.
+    out=$(menu '7\n8\n9\n0\n0\n0\n')
+    has 'the lists are updated' 'The name lists are up to date' "$out"
+    : > "$STUB_LOG"
+    printf 'domain:away.ir\ndomain:home.ir\n' > "$E/geo-src/ir.txt"
+    printf 'date 2026-01-01\nnames 1\n' > "$E/cfg/geo/names-abroad.info"
+    out=$(mgr geo-update); rc_is 'the daily job updates the name lists' 0 "$?"
+    has 'it says so' 'The name lists are up to date' "$out"
+    grep -q "$(date -u +%Y-%m-%d)" "$E/cfg/geo/names-abroad.info"; rc_is 'an old list abroad is made again' 0 "$?"
+
+    # Off: the zone goes.
+    menu '7\n8\n1\n2\n0\n0\n0\n' >/dev/null
+    ok_if 'the zone goes with DNS on this server' test ! -e "$zone"
+    kill "$responder" 2>/dev/null; wait "$responder" 2>/dev/null
+}
+
 test_advanced_network_needs_nat_from_this_tool() {
     local out
     echo 'server 10.8.0.0 255.255.255.0' >> "$SERVER_CONF"
@@ -3091,6 +3194,13 @@ STUB
     has 'a stopped Unbound is named' 'DNS on this server does not run' "$(FAKE_FAILED=unbound.service mgr status)"
     sed -i 's/dhcp-option DNS 10.8.0.1/dhcp-option DNS 1.1.1.1/' "$SERVER_CONF"
     has 'clients told another DNS are named' 'but clients are told to ask 1.1.1.1' "$(mgr status)"
+    # Blocked names: the zone, and Unbound's file that reads it.
+    printf 'NAMES_BLOCK=x.example\n' >> "$E/cfg/config"
+    has 'blocked names without a zone are named' 'Unbound has no zone of them' "$(mgr status)"
+    mkdir -p "$E/unbound-zone"
+    printf 'x.example CNAME .\n*.x.example CNAME .\n' > "$E/unbound-zone/darban.rpz"
+    printf 'rpz:\n' >> "$E/unbound/darban.conf"
+    has 'a zone in use is seen' 'DNS on this server blocks 1 names' "$(mgr status)"
 }
 
 test_live_rule_checks_read_all_of_nft() {

@@ -152,7 +152,7 @@ fi
 # DNS on this server: the tool's file of Unbound and its drop-in. Unbound itself goes with the packages, when the tool
 # installed it; one that was here before goes on without them.
 if [[ -e /etc/unbound/unbound.conf.d/darban.conf || -e /etc/systemd/system/unbound.service.d/darban.conf ]]; then
-    try rm -f -- /etc/unbound/unbound.conf.d/darban.conf /etc/systemd/system/unbound.service.d/darban.conf
+    try rm -f -- /etc/unbound/unbound.conf.d/darban.conf /etc/systemd/system/unbound.service.d/darban.conf /etc/unbound/darban.rpz
     rmdir /etc/systemd/system/unbound.service.d 2>/dev/null || true
     systemctl daemon-reload >/dev/null 2>&1 || true
     systemctl try-restart unbound.service >/dev/null 2>&1 || true

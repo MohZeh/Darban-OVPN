@@ -58,7 +58,7 @@ sudo darban
 - Advanced settings for routing, DNS, network, ciphers and keepalive, with automatic rollback
 - TCP MSS for VPN traffic is limited, so websites also open on networks that drop split packets
 - Blocked destinations: VPN clients cannot reach the addresses of chosen countries, such as Iran, Russia or China, or addresses you choose, through the server, so those sites never see its address; the sites of those countries can go outside the VPN instead, so they still open
-- DNS on this server: clients ask the server for names, and it asks the DNS you choose, over TLS if you like, so sites never see the server; DNS clients send elsewhere can be made to come here
+- DNS on this server: clients ask the server for names, and it asks the DNS you choose, over TLS if you like, so sites never see the server; DNS clients send elsewhere can be made to come here; it can block names too: Iranian sites hosted abroad, ads and trackers, malware and phishing, or names you choose
 - Update notice in the menu, update and restore from inside the tool
 - A setup that stops half way continues on the next run, or can be undone
 - Diagnostics, updates and removal keep working on a broken server

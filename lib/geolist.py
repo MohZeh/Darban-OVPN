@@ -192,6 +192,184 @@ def routes(args):
     print('routes=%d' % len(chosen))
 
 
+# ---------- names, for DNS on this server ----------
+# A name as DNS has it: labels of letters, digits and hyphens, a dot between them, at most 253 characters.
+NAME = re.compile(r'(?=.{1,253}$)([a-z0-9_]([a-z0-9_-]{0,61}[a-z0-9_])?)(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)+')
+
+
+def clean_name(text):
+    """The name in lower case, without a final dot; None when it is not one."""
+    name = text.strip().lower().rstrip('.')
+    return name if NAME.fullmatch(name) else None
+
+
+def parse_names(text, name):
+    """The names of a list: lines domain:<name> or full:<name>, the name and all under it. Other kinds, such as
+    keyword: or regexp:, cannot be told to DNS and are left out; too many lines that are no name refuse the list."""
+    found, bad, lines = set(), 0, 0
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line or line.startswith('#'):
+            continue
+        lines += 1
+        kind, _, value = line.partition(':')
+        if kind not in ('domain', 'full'):
+            continue
+        clean = clean_name(value.split('@')[0])
+        if clean is None:
+            bad += 1
+            continue
+        found.add(clean)
+    if lines and bad / lines > MAX_BAD_SHARE:
+        raise Refused('%s: %d of its %d lines are not names' % (name, bad, lines))
+    return found
+
+
+def read_names(path):
+    if not path or not os.path.exists(path):
+        return set()
+    with open(path, encoding='ascii') as handle:
+        return {line.strip() for line in handle if line.strip()}
+
+
+def keep_names(path, names):
+    if not names:
+        raise Refused('the list has no name')
+    last = read_names(path)
+    if last and len(names) < len(last) * MIN_SHARE_OF_LAST:
+        raise Refused('the new list has %d names, less than half of the %d of the last one' % (len(names), len(last)))
+    write_lines(path, sorted(names))
+    print('names=%d' % len(names))
+
+
+def names(args):
+    found = set()
+    for name in args.file:
+        try:
+            found |= parse_names(download(args.source + name), name)
+        except Refused:
+            raise
+        except Exception as error:
+            raise Refused('could not download %s: %s' % (name, error))
+    keep_names(args.out, found)
+
+
+def dns_query(name, server, port, timeout=2.0):
+    """The IPv4 answers for a name, None when it does not exist, or 'error'."""
+    import random
+    import socket
+    import struct
+    labels = name.encode('ascii').split(b'.')
+    ident = random.randrange(65536)
+    packet = struct.pack('>HHHHHH', ident, 0x0100, 1, 0, 0, 0)
+    packet += b''.join(bytes([len(label)]) + label for label in labels) + b'\0' + struct.pack('>HH', 1, 1)
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+        sock.settimeout(timeout)
+        try:
+            sock.sendto(packet, (server, port))
+            data, _ = sock.recvfrom(4096)
+        except OSError:
+            return 'error'
+    if len(data) < 12:
+        return 'error'
+    got, flags, questions, answers = struct.unpack('>HHHH', data[:8])
+    if got != ident:
+        return 'error'
+    if flags & 0xF == 3:
+        return None
+    if flags & 0xF:
+        return 'error'
+
+    def skip_name(at):
+        while at < len(data):
+            length = data[at]
+            if length == 0:
+                return at + 1
+            if length & 0xC0 == 0xC0:
+                return at + 2
+            at += length + 1
+        return len(data)
+
+    at = 12
+    for _ in range(questions):
+        at = skip_name(at) + 4
+    found = []
+    for _ in range(answers):
+        at = skip_name(at)
+        if at + 10 > len(data):
+            break
+        kind, _, _, size = struct.unpack('>HHIH', data[at:at + 10])
+        at += 10
+        if kind == 1 and size == 4:
+            found.append(ipaddress.IPv4Address(data[at:at + 4]))
+        at += size
+    return found
+
+
+def abroad(args):
+    """The names of a country's list whose every address is outside the country's ranges: sites of the country
+    that a route around the VPN, or a block by address, cannot reach."""
+    import bisect
+    import concurrent.futures
+    ranges = sorted(read_ranges(args.ranges), key=lambda n: int(n.network_address))
+    if not ranges:
+        raise Refused('the list of addresses of the country is not here')
+    starts = [int(n.network_address) for n in ranges]
+
+    def inside(address):
+        at = bisect.bisect_right(starts, int(address)) - 1
+        return at >= 0 and address in ranges[at]
+
+    try:
+        all_names = sorted(parse_names(download(args.source + args.file), args.file))
+    except Refused:
+        raise
+    except Exception as error:
+        raise Refused('could not download %s: %s' % (args.file, error))
+    with concurrent.futures.ThreadPoolExecutor(args.threads) as pool:
+        answers = list(pool.map(lambda name: dns_query(name, args.server, args.port), all_names))
+    answered = [(name, found) for name, found in zip(all_names, answers) if isinstance(found, list) and found]
+    # Too few answers means the DNS was not reached, not that the country moved.
+    if len(answered) < len(all_names) * 0.1:
+        raise Refused('only %d of %d names answered: is %s reachable?' % (len(answered), len(all_names), args.server))
+    away = {name for name, found in answered if not any(inside(address) for address in found)}
+    keep_names(args.out, away)
+
+
+def name_entry(args):
+    clean = clean_name(args.value)
+    if clean is None or '.' not in clean:
+        raise Refused('not a name, such as example.com')
+    print(clean)
+
+
+def rpz(args):
+    """A zone of response policy for Unbound: each blocked name and all under it answer NXDOMAIN, and each allowed
+    name, with all under it, passes, even inside a blocked one."""
+    block = set()
+    for path in args.list or ():
+        block |= read_names(path)
+    for word in (args.block or '').split():
+        clean = clean_name(word)
+        if clean:
+            block.add(clean)
+    allow = {clean for clean in (clean_name(word) for word in (args.allow or '').split()) if clean}
+
+    def allowed(name):
+        return any(name == a or name.endswith('.' + a) for a in allow)
+
+    block = {name for name in block if not allowed(name)}
+    lines = ['$ORIGIN darban.rpz.', '$TTL 300',
+             '@ IN SOA localhost. root.localhost. %d 3600 600 86400 300' % int(__import__('time').time()),
+             '@ IN NS localhost.']
+    for name in sorted(allow):
+        lines += ['%s CNAME rpz-passthru.' % name, '*.%s CNAME rpz-passthru.' % name]
+    for name in sorted(block):
+        lines += ['%s CNAME .' % name, '*.%s CNAME .' % name]
+    write_lines(args.out, lines, 0o644)
+    print('blocked=%d allowed=%d' % (len(block), len(allow)))
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__.split('\n')[0])
     commands = parser.add_subparsers(dest='command', required=True)
@@ -210,9 +388,29 @@ def main():
     four.add_argument('--out', required=True)
     four.add_argument('--android', required=True, choices=('yes', 'no'))
     four.add_argument('--budget', required=True, type=int)
+    five = commands.add_parser('names')
+    five.add_argument('--source', required=True)
+    five.add_argument('--file', required=True, action='append')
+    five.add_argument('--out', required=True)
+    six = commands.add_parser('abroad')
+    six.add_argument('--source', required=True)
+    six.add_argument('--file', required=True)
+    six.add_argument('--ranges', required=True)
+    six.add_argument('--server', required=True)
+    six.add_argument('--port', type=int, default=53)
+    six.add_argument('--threads', type=int, default=8)
+    six.add_argument('--out', required=True)
+    seven = commands.add_parser('name')
+    seven.add_argument('value')
+    eight = commands.add_parser('rpz')
+    eight.add_argument('--list', action='append')
+    eight.add_argument('--block')
+    eight.add_argument('--allow')
+    eight.add_argument('--out', required=True)
     args = parser.parse_args()
     try:
-        {'fetch': fetch, 'merge': merge, 'entry': entry, 'routes': routes}[args.command](args)
+        {'fetch': fetch, 'merge': merge, 'entry': entry, 'routes': routes, 'names': names, 'abroad': abroad,
+         'name': name_entry, 'rpz': rpz}[args.command](args)
     except Refused as reason:
         print(reason, file=sys.stderr)
         sys.exit(2)

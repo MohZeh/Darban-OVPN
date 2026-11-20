@@ -103,6 +103,11 @@ UNBOUND_DROPIN=$UNIT_DIR/unbound.service.d/darban.conf
 UNBOUND_ROOT_KEY=/var/lib/unbound/root.key
 DNS_ROOT_DATA=/usr/share/dns/root.key
 DARBAN_DNS_REDIRECT=$CONFIG_DIR/dns-redirect
+# The names Unbound refuses, as a zone of response policy, outside the folder Unbound reads as configuration.
+UNBOUND_RPZ=/etc/unbound/darban.rpz
+# The port of the upstream DNS that the daily check of Iranian sites abroad asks.
+NAMES_DNS_PORT=53
+NAMES_OWN_MAX=200
 # The lines this tool added to server.conf for connection events, so their removal takes only those.
 EVENT_LINES_FILE=$CONFIG_DIR/.event-lines
 # The owner's age public key for backups, and the programs that get each new backup (v1.1 delivers them).
@@ -144,6 +149,10 @@ DNS_UPSTREAM=''
 DNS_TLS=no
 DNS_FORCE=yes
 DNS_DNSSEC=yes
+# Blocked names: the lists on (abroad, ads, malware), and the owner's own names to block and to allow, space separated.
+NAME_LISTS=''
+NAMES_BLOCK=''
+NAMES_ALLOW=''
 CONFIG_ISSUES=()
 # Normalized serial of the certificate OpenVPN serves; never listed, exported or revoked.
 SERVER_SERIAL=''
@@ -246,7 +255,7 @@ load_config() {
     # default has no line left in the file.
     DOWNLOAD_SSH_HOST='' DOWNLOAD_SSH_PORT=22 DOWNLOAD_SSH_USER=root CLIENT_CERT_DAYS='' LINK_PORT='' LINK_HOURS=''
     UPDATE_CHECK=yes SHARE_ID_IN_PROFILE=no BLOCK_COUNTRIES='' BLOCK_EXTRA='' COUNTRY_DIRECT=no
-    DNS_SERVER=no DNS_UPSTREAM='' DNS_TLS=no DNS_FORCE=yes DNS_DNSSEC=yes
+    DNS_SERVER=no DNS_UPSTREAM='' DNS_TLS=no DNS_FORCE=yes DNS_DNSSEC=yes NAME_LISTS='' NAMES_BLOCK='' NAMES_ALLOW=''
     CONFIG_ISSUES=()
     [[ -f $CONFIG_FILE ]] || { CONFIG_ISSUES+=("$CONFIG_FILE is missing; download commands are disabled."); return 0; }
     # Parsed as data, never sourced.
@@ -270,6 +279,9 @@ load_config() {
             DNS_TLS) DNS_TLS=$value ;;
             DNS_FORCE) DNS_FORCE=$value ;;
             DNS_DNSSEC) DNS_DNSSEC=$value ;;
+            NAME_LISTS) NAME_LISTS=$value ;;
+            NAMES_BLOCK) NAMES_BLOCK=$value ;;
+            NAMES_ALLOW) NAMES_ALLOW=$value ;;
             IRAN_DIRECT) old_direct=$value ;;
             *) CONFIG_ISSUES+=("Unknown setting ignored in $CONFIG_FILE: $key") ;;
         esac
@@ -314,6 +326,16 @@ load_config() {
     if [[ $DNS_DNSSEC != yes && $DNS_DNSSEC != no ]]; then CONFIG_ISSUES+=("Invalid DNS_DNSSEC in $CONFIG_FILE; using yes."); DNS_DNSSEC=yes; fi
     if [[ -n $DNS_UPSTREAM ]] && ! valid_dns "$DNS_UPSTREAM"; then
         CONFIG_ISSUES+=("Invalid DNS_UPSTREAM in $CONFIG_FILE; using the default."); DNS_UPSTREAM=''
+    fi
+    if [[ -n $NAME_LISTS && ! $NAME_LISTS =~ ^(abroad|ads|malware)(\ (abroad|ads|malware)){0,2}$ ]]; then
+        CONFIG_ISSUES+=("Invalid NAME_LISTS in $CONFIG_FILE; no list is used."); NAME_LISTS=''
+    fi
+    # Only the form is checked here; geolist.py checks each name when the zone is written.
+    if [[ -n $NAMES_BLOCK && ! $NAMES_BLOCK =~ ^[a-z0-9._-]+(\ [a-z0-9._-]+)*$ ]]; then
+        CONFIG_ISSUES+=("Invalid NAMES_BLOCK in $CONFIG_FILE; it is not used."); NAMES_BLOCK=''
+    fi
+    if [[ -n $NAMES_ALLOW && ! $NAMES_ALLOW =~ ^[a-z0-9._-]+(\ [a-z0-9._-]+)*$ ]]; then
+        CONFIG_ISSUES+=("Invalid NAMES_ALLOW in $CONFIG_FILE; it is not used."); NAMES_ALLOW=''
     fi
     # Only the form of a range is checked here; geolist.py checks what each one is when the rules are written.
     if [[ -n $BLOCK_EXTRA && ! $BLOCK_EXTRA =~ ^([0-9]{1,3}(\.[0-9]{1,3}){3}/[0-9]{1,2})(\ [0-9]{1,3}(\.[0-9]{1,3}){3}/[0-9]{1,2})*$ ]]; then
@@ -4198,7 +4220,7 @@ save_config() {
     temp=$(mktemp "$CONFIG_DIR/.config.XXXXXXXX") || return 1
     darban_tmp_register "$temp"
     if [[ -f $CONFIG_FILE ]]; then
-        awk -F= '$1!="DOWNLOAD_SSH_HOST" && $1!="DOWNLOAD_SSH_PORT" && $1!="DOWNLOAD_SSH_USER" && $1!="CLIENT_CERT_DAYS" && $1!="LINK_PORT" && $1!="LINK_HOURS" && $1!="UPDATE_CHECK" && $1!="BLOCK_IRAN" && $1!="BLOCK_EXTRA" && $1!="IRAN_DIRECT" && $1!="BLOCK_COUNTRIES" && $1!="COUNTRY_DIRECT" && $1!="DNS_SERVER" && $1!="DNS_UPSTREAM" && $1!="DNS_TLS" && $1!="DNS_FORCE" && $1!="DNS_DNSSEC"' "$CONFIG_FILE" >"$temp" || return 1
+        awk -F= '$1!="DOWNLOAD_SSH_HOST" && $1!="DOWNLOAD_SSH_PORT" && $1!="DOWNLOAD_SSH_USER" && $1!="CLIENT_CERT_DAYS" && $1!="LINK_PORT" && $1!="LINK_HOURS" && $1!="UPDATE_CHECK" && $1!="BLOCK_IRAN" && $1!="BLOCK_EXTRA" && $1!="IRAN_DIRECT" && $1!="BLOCK_COUNTRIES" && $1!="COUNTRY_DIRECT" && $1!="DNS_SERVER" && $1!="DNS_UPSTREAM" && $1!="DNS_TLS" && $1!="DNS_FORCE" && $1!="DNS_DNSSEC" && $1!="NAME_LISTS" && $1!="NAMES_BLOCK" && $1!="NAMES_ALLOW"' "$CONFIG_FILE" >"$temp" || return 1
     fi
     printf 'DOWNLOAD_SSH_HOST=%s\nDOWNLOAD_SSH_PORT=%s\nDOWNLOAD_SSH_USER=%s\n' "$DOWNLOAD_SSH_HOST" "$DOWNLOAD_SSH_PORT" "$DOWNLOAD_SSH_USER" >>"$temp" || return 1
     if [[ -n $CLIENT_CERT_DAYS ]]; then printf 'CLIENT_CERT_DAYS=%s\n' "$CLIENT_CERT_DAYS" >>"$temp" || return 1; fi
@@ -4213,6 +4235,9 @@ save_config() {
     if [[ $DNS_TLS == yes ]]; then printf 'DNS_TLS=yes\n' >>"$temp" || return 1; fi
     if [[ $DNS_FORCE == no ]]; then printf 'DNS_FORCE=no\n' >>"$temp" || return 1; fi
     if [[ $DNS_DNSSEC == no ]]; then printf 'DNS_DNSSEC=no\n' >>"$temp" || return 1; fi
+    if [[ -n $NAME_LISTS ]]; then printf 'NAME_LISTS=%s\n' "$NAME_LISTS" >>"$temp" || return 1; fi
+    if [[ -n $NAMES_BLOCK ]]; then printf 'NAMES_BLOCK=%s\n' "$NAMES_BLOCK" >>"$temp" || return 1; fi
+    if [[ -n $NAMES_ALLOW ]]; then printf 'NAMES_ALLOW=%s\n' "$NAMES_ALLOW" >>"$temp" || return 1; fi
     chmod 600 "$temp" && mv -f -- "$temp" "$CONFIG_FILE" || return 1
     if (( ! held )); then ca_unlock; fi
 }
@@ -5363,7 +5388,7 @@ set_countries() {
         if ! systemctl enable --now darban-geo.timer >/dev/null 2>&1; then
             warn 'The daily update of the lists did not start, so they stay as they are now. See: systemctl status darban-geo.timer'
         fi
-    else
+    elif [[ -z $NAME_LISTS ]]; then
         systemctl disable --now darban-geo.timer >/dev/null 2>&1 || true
     fi
     audit "blocked destinations: countries $(country_names "$BLOCK_COUNTRIES")"
@@ -5559,7 +5584,14 @@ server:
     qname-minimisation: yes
     # No subnetcache module: no part of a client's address, or of this server's, goes to any DNS.
 EOF
-    if [[ $DNS_DNSSEC == yes ]]; then printf '    module-config: "validator iterator"\n'; else printf '    module-config: "iterator"\n'; fi
+    # respip applies the zone of blocked names, when there is one.
+    if names_in_use && [[ -s $UNBOUND_RPZ ]]; then
+        if [[ $DNS_DNSSEC == yes ]]; then printf '    module-config: "respip validator iterator"\n'; else printf '    module-config: "respip iterator"\n'; fi
+    elif [[ $DNS_DNSSEC == yes ]]; then
+        printf '    module-config: "validator iterator"\n'
+    else
+        printf '    module-config: "iterator"\n'
+    fi
     if [[ $DNS_TLS == yes ]]; then printf '    tls-cert-bundle: /etc/ssl/certs/ca-certificates.crt\n'; fi
     if [[ $DNS_FORCE == yes ]]; then
         printf '    # Firefox then keeps its own DNS over HTTPS off, and asks this server.\n    local-zone: "use-application-dns.net." always_nxdomain\n'
@@ -5570,6 +5602,9 @@ EOF
         for item in $(dns_upstream); do name=$(dns_tls_name "$item") || return 1; printf '    forward-addr: %s@853#%s\n' "$item" "$name"; done
     else
         for item in $(dns_upstream); do printf '    forward-addr: %s\n' "$item"; done
+    fi
+    if names_in_use && [[ -s $UNBOUND_RPZ ]]; then
+        printf 'rpz:\n    name: "darban.rpz."\n    zonefile: "%s"\n    rpz-log: no\n' "$UNBOUND_RPZ"
     fi
 }
 unbound_apply() {
@@ -5654,7 +5689,7 @@ set_dns_server() {
         DNS_SERVER=no
         dns_redirect_apply || warn 'The rules that send DNS here could not be taken away; see: sudo darban status'
         save_config || { fail 'The setting could not be saved.'; return 1; }
-        rm -f -- "$UNBOUND_CONF" "$UNBOUND_DROPIN"
+        rm -f -- "$UNBOUND_CONF" "$UNBOUND_DROPIN" "$UNBOUND_RPZ"
         systemctl daemon-reload >/dev/null 2>&1 || true
         # Unbound that the tool installed stops; one that was here before goes on without the tool's file.
         if grep -qx 'package unbound' "$CONFIG_DIR/.server-setup-started" 2>/dev/null || [[ -e $CONFIG_DIR/.unbound-installed ]]; then
@@ -5691,6 +5726,8 @@ set_dns_server() {
     fi
     ca_lock || return 1
     DNS_SERVER=yes
+    # The blocked names chosen while it was off take effect with it.
+    if names_in_use && ! names_zone_write; then warn "The blocked names are not used yet: $NAMES_WHY. Settings > DNS on this server > 9 makes them again."; fi
     if ! unbound_apply; then
         fail "Unbound did not start: $DNS_WHY. Nothing else was changed."
         if (( installed )); then systemctl disable --now unbound.service >/dev/null 2>&1 || true; fi
@@ -5779,12 +5816,16 @@ set_dns_dnssec() {
 draw_dns_server() {
     clear_screen
     title_bar "Settings $S_CRUMB DNS on this server"
-    printf ' %sClients ask this server for names, and it asks the upstream DNS. Only Unbound restarts for items 2 to 5.%s\n' "$C_DIM" "$C_RESET" || true
+    printf ' %sClients ask this server for names, and it asks the upstream DNS. Only Unbound restarts for items 2 to 9.%s\n' "$C_DIM" "$C_RESET" || true
     menu_item 1 "$(printf '%-24s %s' 'DNS on this server *' "$(on_off "$DNS_SERVER")")"
     menu_item 2 "$(printf '%-24s %s' 'Upstream DNS' "$(dns_upstream)")"
     menu_item 3 "$(printf '%-24s %s' 'DNS over TLS' "$(on_off "$DNS_TLS")")"
     menu_item 4 "$(printf '%-24s %s' 'Clients must use it' "$(on_off "$DNS_FORCE")")"
     menu_item 5 "$(printf '%-24s %s' 'DNSSEC check' "$(on_off "$DNS_DNSSEC")")"
+    menu_item 6 "$(printf '%-24s %s' 'Name lists' "$(name_lists_label "$NAME_LISTS")")"
+    menu_item 7 "$(printf '%-24s %s' 'Names you block' "$(names_count_label "$NAMES_BLOCK")")"
+    menu_item 8 "$(printf '%-24s %s' 'Names you allow' "$(names_count_label "$NAMES_ALLOW")")"
+    menu_item 9 "$(printf '%-24s %s' 'Update the name lists' "$(name_lists_date)")"
     menu_item 0 'Back'
     hr
     printf ' %s* restarts OpenVPN: connected users drop for a few seconds.%s\n' "$C_DIM" "$C_RESET" || true
@@ -5794,15 +5835,19 @@ dns_server_menu() {
     while :; do
         if (( redraw )); then draw_dns_server || true; fi
         redraw=1
-        ask 'Choose [0-5, Enter = back]: ' || return 0
+        ask 'Choose [0-9, Enter = back]: ' || return 0
         case $REPLY in
             1) menu_action 'DNS on this server' set_dns_server ;;
             2) menu_action 'Upstream DNS' set_dns_upstream ;;
             3) menu_action 'DNS over TLS' set_dns_tls ;;
             4) menu_action 'Clients must use it' set_dns_force ;;
             5) menu_action 'DNSSEC check' set_dns_dnssec ;;
+            6) menu_action 'Name lists' set_name_lists ;;
+            7) menu_action 'Names you block' set_names_block ;;
+            8) menu_action 'Names you allow' set_names_allow ;;
+            9) menu_action 'Update the name lists' update_name_lists ;;
             0|'') return 0 ;;
-            *) warn "Unknown option \"$REPLY\". Enter a number from 0 to 5."; redraw=0 ;;
+            *) warn "Unknown option \"$REPLY\". Enter a number from 0 to 9."; redraw=0 ;;
         esac
     done
 }
@@ -5825,6 +5870,7 @@ dns_server_health() {
     if [[ $DNS_FORCE == yes ]] && ! darban_live_dns_redirect_ok "$1"; then
         check warn "Clients can still use another DNS: the rules that send it here are not loaded $S_ARROW sudo systemctl restart darban-nat.service"
     fi
+    names_health
 }
 dns_restore_check() {
     # After a restore: a server.conf that tells clients to ask a DNS on this server, which this server does not run,
@@ -5844,6 +5890,242 @@ dns_restore_check() {
     sed -i '/^DNS_SERVER=/d' "$CONFIG_FILE" 2>/dev/null || true
     rm -f -- "$DARBAN_DNS_REDIRECT"
     warn "DNS on this server was on in the backup, but this server does not run it: clients ask $upstream instead. Turn it on again in Settings > DNS on this server."
+}
+# ---------- blocked names, on DNS on this server ----------
+# Unbound answers "no such name" for each blocked name and all under it, from a zone of response policy. The lists
+# come from the same source as the lists of countries; Iranian sites abroad are the names of Iran's list whose every
+# address lies outside Iran's ranges, found by asking the upstream DNS once a week. The owner's own names are blocked
+# too, and the names the owner allows pass even inside a blocked one.
+NAMES_WHY=''
+names_in_use() { [[ -n $NAME_LISTS || -n $NAMES_BLOCK || -n $NAMES_ALLOW ]]; }
+name_list_title() {
+    case $1 in abroad) printf 'Iranian sites hosted abroad' ;; ads) printf 'Ads and trackers' ;; malware) printf 'Malware and phishing' ;; esac
+}
+name_list_short() { case $1 in abroad) printf 'Iranian sites abroad' ;; ads) printf ads ;; malware) printf malware ;; esac; }
+name_lists_label() {
+    local list out=''
+    for list in $1; do out+="${out:+, }$(name_list_short "$list")"; done
+    printf '%s' "${out:-none}"
+}
+names_count_label() {
+    local words
+    read -ra words <<<"$1"
+    if (( ${#words[@]} == 1 )); then printf '1 name'; else printf '%d names' "${#words[@]}"; fi
+}
+name_list_file() { printf '%s/names-%s.txt' "$GEO_DIR" "$1"; }
+name_list_value() { [[ -f $GEO_DIR/names-$1.info ]] || return 0; awk -v k="$2" '$1==k {print $2}' "$GEO_DIR/names-$1.info" 2>/dev/null || true; }
+name_lists_date() {
+    local list date oldest=''
+    [[ -n $NAME_LISTS ]] || { printf 'no list chosen'; return 0; }
+    for list in $NAME_LISTS; do
+        date=$(name_list_value "$list" date)
+        if [[ -z $date ]]; then printf '%s not downloaded' "$(name_list_short "$list")"; return 0; fi
+        if [[ -z $oldest || $date < $oldest ]]; then oldest=$date; fi
+    done
+    printf '%s' "$oldest"
+}
+names_fetch() {
+    # names_fetch <list>: a new copy of one list in place, or the last one kept. Iranian sites abroad needs the
+    # ranges of Iran, and asks the upstream DNS for every name of Iran's list: a few minutes.
+    local list=$1 out rc=0 count info server
+    install -d -m 700 "$GEO_DIR" || return 1
+    case $list in
+        ads) out=$(python3 -I "$GEO_PY" names --source "$GEO_SOURCE" --file category-ads-all.txt --out "$(name_list_file ads)" 2>&1) || rc=$? ;;
+        malware) out=$(python3 -I "$GEO_PY" names --source "$GEO_SOURCE" --file malware.txt --file phishing.txt --file cryptominers.txt \
+            --out "$(name_list_file malware)" 2>&1) || rc=$? ;;
+        abroad)
+            if [[ ! -s $(country_list ir) ]] && ! country_fetch ir; then NAMES_WHY="the ranges of Iran: $GEO_WHY"; return 1; fi
+            read -r server _ <<<"$(dns_upstream)"
+            out=$(python3 -I "$GEO_PY" abroad --source "$GEO_SOURCE" --file ir.txt --ranges "$(country_list ir)" --server "$server" \
+                --port "$NAMES_DNS_PORT" --out "$(name_list_file abroad)" 2>&1) || rc=$? ;;
+        *) return 1 ;;
+    esac
+    if (( rc != 0 )); then
+        NAMES_WHY=$(tail -n 1 <<<"$out")
+        NAMES_WHY=$(safe_text "${NAMES_WHY:-the download failed}")
+        return 1
+    fi
+    count=$(sed -n 's/^names=\([0-9]*\)$/\1/p' <<<"$out")
+    info=$(mktemp "$GEO_DIR/.names.XXXXXXXX") || return 1
+    darban_tmp_register "$info"
+    printf 'date %s\nnames %s\n' "$(date -u +%Y-%m-%d)" "${count:-0}" >"$info" && chmod 600 "$info" && mv -f -- "$info" "$GEO_DIR/names-$list.info"
+}
+names_zone_write() {
+    # The zone from the lists on and the owner's names, replaced in one step; gone when there is nothing to block.
+    local list lists=()
+    if ! names_in_use; then rm -f -- "$UNBOUND_RPZ"; return 0; fi
+    for list in $NAME_LISTS; do
+        [[ -s $(name_list_file "$list") ]] || { NAMES_WHY="the list $(name_list_title "$list") is not on this server"; return 1; }
+        lists+=(--list "$(name_list_file "$list")")
+    done
+    install -d -m 755 "${UNBOUND_RPZ%/*}" || return 1
+    python3 -I "$GEO_PY" rpz "${lists[@]}" --block "$NAMES_BLOCK" --allow "$NAMES_ALLOW" --out "$UNBOUND_RPZ" >/dev/null \
+        || { NAMES_WHY='the zone of blocked names could not be written'; return 1; }
+}
+names_commit() {
+    # names_commit <lists> <block> <allow>: the zone and Unbound from these settings, then the settings saved. When
+    # Unbound does not take them, everything stays as it was.
+    local old_lists=$NAME_LISTS old_block=$NAMES_BLOCK old_allow=$NAMES_ALLOW zone_old had_zone=0
+    ca_lock || return 1
+    NAME_LISTS=$1 NAMES_BLOCK=$2 NAMES_ALLOW=$3
+    if [[ $DNS_SERVER == yes ]]; then
+        zone_old=$(mktemp) || return 1
+        darban_tmp_register "$zone_old"
+        if [[ -f $UNBOUND_RPZ ]]; then cp -a -- "$UNBOUND_RPZ" "$zone_old" && had_zone=1; fi
+        if ! names_zone_write || ! unbound_apply; then
+            NAME_LISTS=$old_lists NAMES_BLOCK=$old_block NAMES_ALLOW=$old_allow
+            if (( had_zone )); then cp -a -- "$zone_old" "$UNBOUND_RPZ"; else rm -f -- "$UNBOUND_RPZ"; fi
+            fail "The blocked names were not changed: ${NAMES_WHY:-$DNS_WHY}."
+            return 1
+        fi
+    fi
+    save_config || { fail 'The setting could not be saved.'; return 1; }
+}
+names_effect() {
+    # How the change reaches clients: at once, or when DNS on this server is turned on.
+    if [[ $DNS_SERVER == yes ]]; then printf 'Applied at once; only Unbound restarted.'; else printf 'It applies when DNS on this server is turned on (item 1).'; fi
+}
+valid_name_list_tokens() { local token; [[ -n $1 ]] || return 1; for token in $1; do [[ $token =~ ^[1-3]$ ]] || return 1; done; }
+set_name_lists() {
+    local lists=(abroad ads malware) i mark list new token added=() kept=()
+    info "Names Unbound answers \"no such name\" for, with every name under them. Clients reach none of these sites through this server, and they never see its address."
+    say
+    for i in 0 1 2; do
+        list=${lists[i]}
+        mark='[ ]'
+        if [[ " $NAME_LISTS " == *" $list "* ]]; then mark='[x]'; fi
+        say "  $C_KEY$((i + 1))$C_RESET  $mark $(printf '%-28s' "$(name_list_title "$list")") $(name_list_value "$list" names)"
+    done
+    say
+    bullet 'Iranian sites hosted abroad: about one Iranian site in five; the server asks for every name of Iran once a week, which takes a few minutes'
+    bullet 'the lists come from github.com/Chocolate4U/Iran-v2ray-rules and are updated every day; about 92,000 names of ads, 17,000 of malware'
+    say
+    prompt_valid 'Numbers to turn on or off, such as 1 3 (Enter = cancel): ' valid_name_list_tokens 'Enter numbers from 1 to 3, separated by spaces.' || return 0
+    new=" $NAME_LISTS "
+    for token in $REPLY; do
+        list=${lists[token - 1]}
+        if [[ $new == *" $list "* ]]; then new=${new/ $list / }; else new+="$list "; fi
+    done
+    # Always in the same order.
+    for list in "${lists[@]}"; do [[ $new == *" $list "* ]] && kept+=("$list"); done
+    new="${kept[*]}"
+    if [[ $new == "$NAME_LISTS" ]]; then info 'Same as now; nothing changed.'; return 0; fi
+    kv Now "$(name_lists_label "$NAME_LISTS")"
+    kv New "$(name_lists_label "$new")"
+    say
+    confirm_choice 'Apply this change?' 'No, keep them as they are' 'Apply' caution || { cancelled; return 0; }
+    kept=()
+    for list in $new; do
+        if [[ " $NAME_LISTS " == *" $list "* && -s $(name_list_file "$list") ]]; then kept+=("$list"); continue; fi
+        info "Downloading the list $(name_list_title "$list")${S_ELL}"
+        if names_fetch "$list"; then
+            kept+=("$list")
+        elif [[ -s $(name_list_file "$list") ]]; then
+            warn "A new list $(name_list_title "$list") could not be made: $NAMES_WHY. The one from $(name_list_value "$list" date) is used."
+            kept+=("$list")
+        else
+            warn "The list $(name_list_title "$list") could not be made: $NAMES_WHY. It is left out."
+        fi
+    done
+    new="${kept[*]}"
+    if [[ $new == "$NAME_LISTS" ]]; then fail 'Nothing was changed.'; return 1; fi
+    names_commit "$new" "$NAMES_BLOCK" "$NAMES_ALLOW" || return 1
+    if [[ -n $NAME_LISTS ]]; then
+        systemctl enable --now darban-geo.timer >/dev/null 2>&1 || warn 'The daily update of the lists did not start. See: systemctl status darban-geo.timer'
+    elif [[ -z $BLOCK_COUNTRIES ]]; then
+        systemctl disable --now darban-geo.timer >/dev/null 2>&1 || true
+    fi
+    audit "blocked names: lists $(name_lists_label "$NAME_LISTS")"
+    ok "Saved: name lists $(name_lists_label "$NAME_LISTS"). $(names_effect)"
+}
+OWN_COUNT=0
+valid_own_name_choice() {
+    if [[ $1 =~ ^[0-9]{1,3}$ ]]; then (( 10#$1 >= 1 && 10#$1 <= OWN_COUNT )); return; fi
+    python3 -I "$GEO_PY" name "$1" >/dev/null 2>&1
+}
+set_own_names() {
+    # set_own_names <block|allow>: the owner's own names of one kind: a name typed is added, a number removes one.
+    local kind=$1 current words i entry kept=() block=$NAMES_BLOCK allow=$NAMES_ALLOW
+    if [[ $kind == block ]]; then current=$NAMES_BLOCK; else current=$NAMES_ALLOW; fi
+    read -ra words <<<"$current"
+    if [[ $kind == block ]]; then
+        info 'A name to block, such as example.com: it and every name under it answer "no such name".'
+    else
+        info 'A name that always passes, with every name under it, even when a list blocks it: for a site a list blocks by mistake.'
+    fi
+    for i in "${!words[@]}"; do say "  $C_KEY$((i + 1))$C_RESET  ${words[i]}"; done
+    say
+    OWN_COUNT=${#words[@]}
+    prompt_valid "A name to add$( (( OWN_COUNT )) && printf ', or the number of one to remove') (Enter = cancel): " valid_own_name_choice \
+        'Enter a name such as example.com, or a number from the list.' || return 0
+    if [[ $REPLY =~ ^[0-9]{1,3}$ ]]; then
+        entry=${words[10#$REPLY - 1]}
+        for i in "${!words[@]}"; do (( i == 10#$REPLY - 1 )) || kept+=("${words[i]}"); done
+        current="${kept[*]}"
+    else
+        entry=$(python3 -I "$GEO_PY" name "$REPLY") || return 1
+        if [[ " $current " == *" $entry "* ]]; then info "$entry is there already; nothing changed."; return 0; fi
+        if (( OWN_COUNT >= NAMES_OWN_MAX )); then fail "At most $NAMES_OWN_MAX names of each kind. Remove one first."; return 1; fi
+        current="${current:+$current }$entry"
+    fi
+    if [[ $kind == block ]]; then block=$current; else allow=$current; fi
+    names_commit "$NAME_LISTS" "$block" "$allow" || return 1
+    audit "blocked names: $kind list $current"
+    if [[ $REPLY =~ ^[0-9]{1,3}$ ]]; then ok "Removed: $entry. $(names_effect)"; return 0; fi
+    if [[ $kind == block ]]; then ok "Blocked: $entry. $(names_effect)"; else ok "Allowed: $entry. $(names_effect)"; fi
+}
+set_names_block() { set_own_names block; }
+set_names_allow() { set_own_names allow; }
+update_name_lists() {
+    # update_name_lists [daily]: a new copy of each list on. The daily job makes Iranian sites abroad again only
+    # once a week, since it asks the upstream DNS for every name of Iran.
+    local list failed=0 date age summary=''
+    if [[ -z $NAME_LISTS ]]; then info 'No name list is on. Item 6 turns them on.'; return 0; fi
+    for list in $NAME_LISTS; do
+        if [[ ${1:-} == daily && $list == abroad ]]; then
+            date=$(name_list_value abroad date)
+            age=$(( ($(date -u +%s) - $(date -u -d "${date:-1970-01-01}" +%s 2>/dev/null || echo 0)) / 86400 ))
+            if (( age < 7 )); then continue; fi
+        fi
+        info "Downloading the list $(name_list_title "$list")${S_ELL}"
+        if ! names_fetch "$list"; then
+            failed=1
+            fail "The list $(name_list_title "$list") was not updated: $NAMES_WHY. The one from $(name_list_value "$list" date) stays in use."
+            audit "blocked names: the list $(name_list_title "$list") was not updated: $NAMES_WHY"
+        fi
+    done
+    names_commit "$NAME_LISTS" "$NAMES_BLOCK" "$NAMES_ALLOW" || return 1
+    (( ! failed )) || return 1
+    for list in $NAME_LISTS; do summary+="${summary:+, }$(name_list_short "$list") $(name_list_value "$list" names) names"; done
+    ok "The name lists are up to date: $summary."
+}
+geo_daily() {
+    # What darban-geo.timer runs each day: the lists of countries, then the name lists.
+    local rc=0
+    if [[ -n $BLOCK_COUNTRIES || -n $BLOCK_EXTRA || -z $NAME_LISTS ]]; then update_lists || rc=1; fi
+    if [[ -n $NAME_LISTS ]]; then update_name_lists daily || rc=1; fi
+    return "$rc"
+}
+names_health() {
+    # Unbound has the zone of blocked names, and the lists are renewed.
+    local zone list date age oldest='' name=''
+    names_in_use || return 0
+    zone=$(grep -c ' CNAME \.$' "$UNBOUND_RPZ" 2>/dev/null) || zone=0
+    if [[ ! -s $UNBOUND_RPZ ]] || ! grep -q '^rpz:' "$UNBOUND_CONF" 2>/dev/null; then
+        check bad "Names should be blocked, but Unbound has no zone of them $S_ARROW sudo darban, then Settings > DNS on this server > 9"
+        return 0
+    fi
+    check ok "DNS on this server blocks $(( zone / 2 )) names ($(name_lists_label "$NAME_LISTS"), and $(names_count_label "$NAMES_BLOCK") of your own)"
+    for list in $NAME_LISTS; do
+        date=$(name_list_value "$list" date)
+        if [[ -z $oldest || ${date:-0000} < $oldest ]]; then oldest=${date:-0000}; name=$(name_list_title "$list"); fi
+    done
+    [[ -n $oldest ]] || return 0
+    [[ $oldest != 0000 ]] || oldest=1970-01-01
+    age=$(( ($(date -u +%s) - $(date -u -d "$oldest" +%s 2>/dev/null || echo 0)) / 86400 ))
+    if (( age > 14 )); then
+        check warn "The list $name is $age days old: its update fails $S_ARROW sudo systemctl status darban-geo.service"
+    fi
 }
 # ---------- backup and restore of the CA ----------
 # A backup is one tar of a closed list of files (lib/backup.py), encrypted with age for the owner's public key: this
@@ -6998,7 +7280,7 @@ main() {
             geo-update)
                 darban_require_root || exit 1
                 load_config
-                run_action update_lists
+                run_action geo_daily
                 exit "$ACTION_RC" ;;
             # It takes the rest of the line as its own.
             restore) cmd=restore; shift; RESTORE_ARGS=("$@"); break ;;
