@@ -203,6 +203,7 @@ sed -e "s#^source /usr/local/lib/darban/#source $E/lib/#" -e "s#^OUT_DIR=.*#OUT_
     -e "s#^SYSTEM_CA_FILE=.*#SYSTEM_CA_FILE=$E/system-ca.pem#" -e "s#^CERT_SEARCH_DIRS=.*#CERT_SEARCH_DIRS='$E/le-live $E/panel-cert $E/acme'#" \
     -e "s#^LE_DIR=.*#LE_DIR=$E/le#" -e "s#^LINK_CERT_LOG=.*#LINK_CERT_LOG=$E/varlib/link-certificates.log#" \
     -e "s#^GEO_SOURCE=.*#GEO_SOURCE=file://$E/geo-src/#" -e "s#^UNBOUND_DIR=.*#UNBOUND_DIR=$E/unbound#" \
+    -e "s#^UNBOUND_ROOT_KEY=.*#UNBOUND_ROOT_KEY=$E/varlib/unbound/root.key#" -e "s#^DNS_ROOT_DATA=.*#DNS_ROOT_DATA=$E/dns-root.key#" \
     -e "s#^EVENT_SCRIPT=.*#EVENT_SCRIPT=$E/libexec/darban-ovpn-event#" -e "s#^EVENT_DIR=.*#EVENT_DIR=$E/events#" \
     -e "s#^LEDGER_DIR=.*#LEDGER_DIR=$E/varlib/clients#" \
     -e "s#^PKI_BACKUP_DIR=.*#PKI_BACKUP_DIR=$E/pki-backups#" -e "s#^RESTORE_WARN=.*#RESTORE_WARN=$E/varlib/restore-unverified#" \

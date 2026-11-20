@@ -99,6 +99,9 @@ COUNTRIES_MAX=10
 UNBOUND_DIR=/etc/unbound/unbound.conf.d
 UNBOUND_CONF=$UNBOUND_DIR/darban.conf
 UNBOUND_DROPIN=$UNIT_DIR/unbound.service.d/darban.conf
+# The root key of DNSSEC that Unbound reads and keeps up to date, and where the package dns-root-data has it.
+UNBOUND_ROOT_KEY=/var/lib/unbound/root.key
+DNS_ROOT_DATA=/usr/share/dns/root.key
 DARBAN_DNS_REDIRECT=$CONFIG_DIR/dns-redirect
 # The lines this tool added to server.conf for connection events, so their removal takes only those.
 EVENT_LINES_FILE=$CONFIG_DIR/.event-lines
@@ -5531,6 +5534,15 @@ dns_server_summary() {
     printf 'on, asks %s%s' "$(dns_upstream)" "$([[ $DNS_TLS == yes ]] && printf ' over TLS')"
 }
 unbound_installed() { command -v unbound-checkconf >/dev/null 2>&1; }
+dns_root_data_installed() { [[ -s $DNS_ROOT_DATA ]]; }
+unbound_root_key() {
+    # Unbound does not start without the root key of DNSSEC, even with the check off: Ubuntu's own file names it.
+    # It is taken from dns-root-data when Unbound has none yet, and Unbound keeps it up to date from then on.
+    [[ -s $UNBOUND_ROOT_KEY ]] && return 0
+    [[ -s $DNS_ROOT_DATA ]] || return 1
+    install -d -m 755 "${UNBOUND_ROOT_KEY%/*}" && cp -- "$DNS_ROOT_DATA" "$UNBOUND_ROOT_KEY" && chmod 644 "$UNBOUND_ROOT_KEY" || return 1
+    chown unbound:unbound "$UNBOUND_ROOT_KEY" 2>/dev/null || true
+}
 unbound_conf_text() {
     # unbound_conf_text <gateway>: the tool's own file of Unbound, from the settings in memory.
     local net=${1%.1}.0 item name
@@ -5565,6 +5577,7 @@ unbound_apply() {
     # anything fails, the file that ran stays and so does Unbound; DNS_WHY says what failed.
     local gateway new old had_old=0 out
     gateway=$(dns_gateway) || { DNS_WHY='server.conf has no single /24 VPN network'; return 1; }
+    unbound_root_key || { DNS_WHY="the root key of DNSSEC, $UNBOUND_ROOT_KEY, is missing, and the package dns-root-data that has it is not installed"; return 1; }
     install -d -m 755 "$UNBOUND_DIR" "${UNBOUND_DROPIN%/*}" || { DNS_WHY="could not make $UNBOUND_DIR"; return 1; }
     new=$(mktemp "$UNBOUND_DIR/.darban.XXXXXXXX") || return 1
     darban_tmp_register "$new"
@@ -5628,7 +5641,7 @@ dns_settings_commit() {
     save_config || { fail 'The setting could not be saved.'; return 1; }
 }
 set_dns_server() {
-    local gateway installed=0
+    local gateway installed=0 record_root=0
     conf_ready || return 1
     if [[ $DNS_SERVER == yes ]]; then
         kv Now on
@@ -5664,15 +5677,17 @@ set_dns_server() {
     restart_notice
     say
     confirm_choice 'Turn DNS on this server on?' 'No, keep it off' 'Turn it on' caution || { cancelled; return 0; }
-    if ! unbound_installed; then
+    if ! unbound_installed || ! dns_root_data_installed; then
         info "Installing Unbound${S_ELL}"
-        if ! apt-get -o DPkg::Lock::Timeout=120 -y -q --no-install-recommends install unbound >/dev/null; then
+        # dns-root-data holds the root key of DNSSEC: Unbound does not start without it, and only recommends it.
+        if ! unbound_installed; then installed=1; fi
+        if ! dns_root_data_installed; then record_root=1; fi
+        if ! apt-get -o DPkg::Lock::Timeout=120 -y -q --no-install-recommends install unbound dns-root-data >/dev/null; then
             fail 'Unbound could not be installed. Nothing was changed.'
             return 1
         fi
-        installed=1
-        record_added 'package unbound'
-        : >"$CONFIG_DIR/.unbound-installed" || true
+        if (( installed )); then record_added 'package unbound'; : >"$CONFIG_DIR/.unbound-installed" || true; fi
+        if (( record_root )); then record_added 'package dns-root-data'; fi
     fi
     ca_lock || return 1
     DNS_SERVER=yes

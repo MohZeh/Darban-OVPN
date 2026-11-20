@@ -1524,9 +1524,11 @@ test_country_sites_go_outside_the_vpn() {
 }
 
 unbound_here() {
-    # unbound_here [refuse]: Unbound as if installed: its config check passes, or refuses with "refuse".
+    # unbound_here [refuse]: Unbound as if installed, with dns-root-data: its config check passes, or refuses with
+    # "refuse".
     printf '#!/usr/bin/env bash\necho "unbound-checkconf $*" >> "$STUB_LOG"\n%s\n' "$( [[ ${1:-} == refuse ]] && printf 'exit 1' || printf 'exit 0')" > "$E/bin/unbound-checkconf"
     chmod +x "$E/bin/unbound-checkconf"
+    printf '. IN DS 20326 8 2 E06D44B80B8F1D39A95C0B0D7C65D08458E880409BBC683457104237C7F8EC8D\n' > "$E/dns-root.key"
 }
 
 test_dns_on_this_server() {
@@ -1548,6 +1550,7 @@ test_dns_on_this_server() {
     grep -qx '    module-config: "validator iterator"' "$conf"; rc_is 'DNSSEC is checked' 0 "$?"
     grep -q 'use-application-dns.net' "$conf"; rc_is 'Firefox is told to keep its own DNS off' 0 "$?"
     grep -qx 'Restart=always' "$E/units/unbound.service.d/darban.conf"; rc_is 'Unbound starts again by itself' 0 "$?"
+    cmp -s "$E/dns-root.key" "$E/varlib/unbound/root.key"; rc_is 'the root key of DNSSEC comes from dns-root-data' 0 "$?"
     rc_is 'clients are told to ask this server' 'push "dhcp-option DNS 10.8.0.1"' "$(grep 'dhcp-option DNS' "$SERVER_CONF")"
     grep -q 'systemctl restart unbound.service' "$STUB_LOG"; rc_is 'Unbound starts with it' 0 "$?"
     grep -q 'systemctl restart openvpn-server@server' "$STUB_LOG"; rc_is 'OpenVPN restarts once' 0 "$?"
