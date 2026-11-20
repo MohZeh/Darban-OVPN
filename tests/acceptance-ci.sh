@@ -469,6 +469,28 @@ from_server=$(curl -4 -fsS --max-time 30 https://api.ipify.org)
 echo "Address seen through the VPN: $through_vpn; address of the server: $from_server"
 [[ -n $through_vpn && $through_vpn == "$from_server" ]]
 echo 'PASS: real traffic and DNS go through the tunnel and the NAT.'
+# Blocked destinations, with the real kernel: a blocked address is refused at once through the VPN, so it never
+# sees the server's address, and it is reachable again once unblocked. TCP, since runners do not pass ping.
+reaches() { ip netns exec "$NS" timeout 10 bash -c 'exec 3<>/dev/tcp/9.9.9.9/443' 2>/dev/null; }
+reached_before=0
+if reaches; then reached_before=1; fi
+printf '7\n7\n2\n9.9.9.9\n0\n0\n0\n' | darban | tee "$LOG/block.log"
+grep -q 'Blocked: 9.9.9.9/32' "$LOG/block.log"
+nft list set ip darban blocked | grep -q '9\.9\.9\.9'
+darban status >"$LOG/block-status.log" 2>&1 || true
+grep -q 'Blocked destinations are refused: 1 range (1 address of your own)' "$LOG/block-status.log"
+started=$SECONDS
+if reaches; then echo 'FAIL: a blocked address was reached through the VPN.'; exit 1; fi
+if (( reached_before && SECONDS - started > 5 )); then echo 'FAIL: a blocked address was not refused at once; the client waited.'; exit 1; fi
+printf '7\n7\n3\n1\n0\n0\n0\n' | darban | tee "$LOG/unblock.log"
+grep -q 'Unblocked: 9.9.9.9/32' "$LOG/unblock.log"
+if (( ! reached_before )); then
+    echo 'NOTE: this runner could not reach 9.9.9.9:443 through the VPN at all, so only the rules are judged.'
+elif reaches; then
+    echo 'PASS: a blocked address is refused at once through the VPN, and reached again once unblocked.'
+else
+    echo 'FAIL: an address that was unblocked is still not reached through the VPN.'; exit 1
+fi
 if modinfo -k "$(uname -r)" ovpn >/dev/null 2>&1; then
     ip -d link show tun0 | grep -w ovpn >/dev/null
     echo 'PASS: the server uses the in-kernel ovpn module (DCO).'
@@ -968,7 +990,8 @@ echo "PASS: Remove everything keeps the certificate when asked, without this too
 if systemctl is-active --quiet "$UNIT"; then echo 'FAIL: OpenVPN still runs after removal.'; exit 1; fi
 if systemctl is-active --quiet darban-expire.timer; then echo 'FAIL: the timer for kept files is still set after removal.'; exit 1; fi
 for path in /root/pki /etc/openvpn/server /root/openvpn-clients /etc/darban /usr/local/sbin/darban /etc/apt/sources.list.d/openvpn-aptrepo.list /var/log/darban-setup.log \
-    "$EVENT_SCRIPT" "$LEDGER" /etc/systemd/system/darban-events.path /etc/systemd/system/darban-sweep.timer /etc/systemd/system/darban-expire.service '/etc/systemd/system/run-darban\x2devents.mount'; do
+    "$EVENT_SCRIPT" "$LEDGER" /etc/systemd/system/darban-events.path /etc/systemd/system/darban-sweep.timer /etc/systemd/system/darban-expire.service '/etc/systemd/system/run-darban\x2devents.mount' \
+    /etc/systemd/system/darban-geo.service /etc/systemd/system/darban-geo.timer; do
     if [[ -e $path ]]; then echo "FAIL: still present after removal: $path"; exit 1; fi
 done
 if dpkg-query -W -f='${Status}' openvpn 2>/dev/null | grep 'install ok installed' >/dev/null; then echo 'FAIL: the openvpn package is still installed.'; exit 1; fi

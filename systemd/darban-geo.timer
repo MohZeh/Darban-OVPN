@@ -1,0 +1,12 @@
+[Unit]
+Description=Darban OVPN daily update of the list of Iran
+
+[Timer]
+# The list is made each day at about 13:30 UTC.
+OnCalendar=*-*-* 14:30:00 UTC
+RandomizedDelaySec=1h
+Persistent=true
+Unit=darban-geo.service
+
+[Install]
+WantedBy=timers.target

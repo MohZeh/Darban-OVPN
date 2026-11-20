@@ -53,7 +53,7 @@ if [[ -e /usr/local/sbin/darban && -e $LIB/common.sh ]]; then
         if [[ -e $file ]]; then cp -a -- "$file" "$backup_dir/sbin/"; fi
     done
     cp -a -- "$LIB/." "$backup_dir/lib/"
-    for file in /etc/systemd/system/darban-crl.service /etc/systemd/system/darban-crl.timer /etc/systemd/system/darban-links.service /etc/systemd/system/darban-backup.service; do
+    for file in /etc/systemd/system/darban-crl.service /etc/systemd/system/darban-crl.timer /etc/systemd/system/darban-links.service /etc/systemd/system/darban-backup.service /etc/systemd/system/darban-geo.service /etc/systemd/system/darban-geo.timer; do
         if [[ -e $file ]]; then cp -a -- "$file" "$backup_dir/units/"; fi
     done
     # The units of connection events, when the version replaced had them: going back to it keeps them.
@@ -68,6 +68,7 @@ install -o root -g root -m 600 lib/common.sh "$LIB/common.sh"
 install -o root -g root -m 600 lib/ui.sh "$LIB/ui.sh"
 install -o root -g root -m 600 lib/linkd.py "$LIB/linkd.py"
 install -o root -g root -m 600 lib/backup.py "$LIB/backup.py"
+install -o root -g root -m 600 lib/geolist.py "$LIB/geolist.py"
 install -o root -g root -m 700 setup/get.sh "$LIB/get.sh"
 install -o root -g root -m 700 setup/uninstall.sh "$LIB/uninstall.sh"
 install -o root -g root -m 700 setup/remove-server.sh "$LIB/remove-server.sh"
@@ -77,6 +78,9 @@ install -o root -g root -m 644 systemd/darban-crl.service /etc/systemd/system/da
 install -o root -g root -m 644 systemd/darban-crl.timer /etc/systemd/system/darban-crl.timer
 install -o root -g root -m 644 systemd/darban-links.service /etc/systemd/system/darban-links.service
 install -o root -g root -m 644 systemd/darban-backup.service /etc/systemd/system/darban-backup.service
+# The daily list of blocked destinations; Settings turns its timer on and off.
+install -o root -g root -m 644 systemd/darban-geo.service /etc/systemd/system/darban-geo.service
+install -o root -g root -m 644 systemd/darban-geo.timer /etc/systemd/system/darban-geo.timer
 # Connection events. The script OpenVPN runs lives outside $LIB, where OpenVPN's user can run it, so no uninstall
 # or restore of any version leaves server.conf naming a script that is gone.
 install -d -o root -g root -m 755 /usr/local/libexec

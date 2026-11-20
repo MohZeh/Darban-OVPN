@@ -391,7 +391,7 @@ def settings_and_menu_six_name_the_share_time(m):
     subprocess.run(['bash', m.env_dir + '/manager.sh'], input='1\nbob\n0\n', env=m.env, text=True,
                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=120)
     m.press('7', ENTER)
-    check('Settings opens', m.wait_for('Choose [0-6'), m.seen)
+    check('Settings opens', m.wait_for('Choose [0-7'), m.seen)
     screen = plain(m.seen)
     check('the time is in the sharing group, named for every share',
           re.search(r'SHARING\s+3\s+Shares expire after\s+24 hours', screen), screen)

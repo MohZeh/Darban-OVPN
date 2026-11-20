@@ -1,0 +1,33 @@
+[Unit]
+Description=Darban OVPN daily list of Iran, for blocked destinations
+# Started by darban-geo.timer, which Settings > Blocked destinations turns on and off.
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=root
+Group=root
+ExecStart=/usr/local/sbin/darban geo-update
+TimeoutStartSec=10min
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=read-only
+# The lists, the settings and NAT, and the shared lock.
+ReadWritePaths=/etc/darban /run
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+# The download, the journal, and nft, which talks to the kernel through netlink.
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
+RestrictNamespaces=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+LockPersonality=true
+SystemCallArchitectures=native

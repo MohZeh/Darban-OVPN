@@ -1320,6 +1320,103 @@ test_advanced_settings_are_applied_and_rolled_back() {
     cmp -s "$E/cfg/nat.nft" "$E/nat.before"; rc_is 'a failed network change restores NAT' 0 "$?"
 }
 
+geo_source() {
+    # geo_source <count>: a list of Iran with <count> public /24 ranges that do not touch, where the tool downloads it,
+    # with a comment, an IPv6 range and a private one, which are left out, and one CDN list of the five.
+    local i
+    mkdir -p "$E/geo-src/text"
+    {
+        printf '# a comment\n2001:db8::/32\n10.0.0.0/8\n'
+        for (( i = 0; i < $1; i++ )); do printf '37.%d.%d.0/24\n' $(( i / 125 + 1 )) $(( (i % 125) * 2 )); done
+    } > "$E/geo-src/text/ir.txt"
+    printf '185.143.232.0/22\n' > "$E/geo-src/text/arvancloud.txt"
+}
+
+test_blocked_destinations_are_applied_and_kept() {
+    local out nat=$E/cfg/nat.nft
+    built_server
+    geo_source 600
+    out=$(menu '7\n0\n0\n')
+    has 'Settings offers blocked destinations' "$(printf '%-24s %s' 'Blocked destinations' none)" "$out"
+
+    out=$(menu '7\n7\n1\n1\n0\n0\n0\n')
+    has 'option 1 keeps Iran reachable' 'Cancelled; nothing changed' "$out"
+    if grep -q '^BLOCK_IRAN=' "$E/cfg/config"; then result 0 'nothing is saved after No'; else result 1 'nothing is saved after No'; fi
+    : > "$STUB_LOG"
+    out=$(menu '7\n7\n1\n2\n0\n0\n0\n')
+    # 600 ranges of Iran and one of a CDN; the comment, the IPv6 range and the private range are left out.
+    has 'Iran is blocked' 'Blocked: Iranian addresses, 601 ranges' "$out"
+    grep -q '^BLOCK_IRAN=yes$' "$E/cfg/config"; rc_is 'the setting is saved' 0 "$?"
+    grep -q '37\.1\.0\.0/24' "$nat"; rc_is 'NAT holds the ranges of Iran' 0 "$?"
+    grep -q '185\.143\.232\.0/22' "$nat"; rc_is 'NAT holds the ranges of the CDN' 0 "$?"
+    if grep -q '10\.0\.0\.0/8' "$nat"; then result 0 'a private range is left out'; else result 1 'a private range is left out'; fi
+    grep -Fq 'ip saddr 10.8.0.0/24 ip daddr @blocked ip protocol tcp reject with tcp reset' "$nat"; rc_is 'TCP to them is refused at once' 0 "$?"
+    grep -q 'nft -f' "$STUB_LOG"; rc_is 'the rules are loaded' 0 "$?"
+    grep -q 'systemctl enable --now darban-geo.timer' "$STUB_LOG"; rc_is 'the daily update starts' 0 "$?"
+    if grep -q 'systemctl restart' "$STUB_LOG"; then result 0 'nothing restarts'; else result 1 'nothing restarts'; fi
+    has 'the menu shows the list' '601 ranges' "$(menu '7\n7\n0\n0\n0\n')"
+
+    # A broken list replaces neither the good one nor the rules, in the menu or in the daily job.
+    geo_source 20
+    cp "$nat" "$E/nat.before"
+    out=$(menu '7\n7\n4\n0\n0\n0\n')
+    has 'a list that is too short is refused' 'too few for the ranges of Iran' "$out"
+    has 'the last list stays' 'stays in use' "$out"
+    cmp -s "$nat" "$E/nat.before"; rc_is 'NAT is unchanged after a refused list' 0 "$?"
+    out=$(mgr geo-update); rc_not0 'the daily job fails on a refused list' "$?"
+    cmp -s "$nat" "$E/nat.before"; rc_is 'NAT is unchanged after the daily job' 0 "$?"
+    rm -rf "$E/geo-src"
+    out=$(mgr geo-update); rc_not0 'the daily job fails without the network' "$?"
+    has 'it says the last list stays' 'stays in use' "$out"
+    geo_source 600
+    out=$(mgr geo-update); rc_is 'the daily job updates the list' 0 "$?"
+    has 'it says so' 'The list of Iran is up to date: 601 ranges' "$out"
+
+    # The owner's own addresses.
+    out=$(menu '7\n7\n2\n10.1.2.3\n\n0\n0\n0\n')
+    has 'a private address is asked again' 'Enter a public IPv4 address' "$out"
+    out=$(menu '7\n7\n2\n1.2.3.4\n0\n0\n0\n')
+    has 'an address is blocked' 'Blocked: 1.2.3.4/32' "$out"
+    out=$(menu '7\n7\n2\n1.2.3.4\n0\n0\n0\n')
+    has 'the same address is not added twice' 'already blocked' "$out"
+    out=$(menu '7\n7\n2\n9.9.9.7/24\n0\n0\n0\n')
+    has 'a range is written as its network' 'Blocked: 9.9.9.0/24' "$out"
+    grep -q '^BLOCK_EXTRA=1.2.3.4/32 9.9.9.0/24$' "$E/cfg/config"; rc_is 'both are saved' 0 "$?"
+    grep -q '1\.2\.3\.4/32' "$nat"; rc_is 'NAT holds an address of your own' 0 "$?"
+    has 'Settings shows both kinds' 'Iran, and 2 addresses of your own' "$(menu '7\n0\n0\n')"
+    out=$(menu '7\n7\n3\n1\n0\n0\n0\n')
+    has 'an address is unblocked' 'Unblocked: 1.2.3.4/32' "$out"
+    if grep -q '1\.2\.3\.4/32' "$nat"; then result 0 'NAT no longer holds it'; else result 1 'NAT no longer holds it'; fi
+
+    # Iran off: the timer stops, and the owner's own range stays blocked.
+    : > "$STUB_LOG"
+    out=$(menu '7\n7\n1\n2\n0\n0\n0\n')
+    has 'Iran is no longer blocked' 'Iranian addresses are no longer blocked' "$out"
+    if grep -q '37\.1\.0\.0/24' "$nat"; then result 0 'NAT no longer holds Iran'; else result 1 'NAT no longer holds Iran'; fi
+    grep -q '9\.9\.9\.0/24' "$nat"; rc_is 'the own range stays' 0 "$?"
+    grep -q 'systemctl disable --now darban-geo.timer' "$STUB_LOG"; rc_is 'the daily update stops' 0 "$?"
+    out=$(mgr geo-update); rc_is 'without Iran, the job only loads your own addresses again' 0 "$?"
+    has 'it says so' 'Your own addresses are loaded again' "$out"
+
+    # A new VPN network keeps the blocked ranges, and the rules follow it.
+    out=$(menu '7\n6\n3\n10.50.0.0\n2\n0\n0\n0\n')
+    has 'the network change is confirmed' 'Applied: VPN network 10.50.0.0/24' "$out"
+    grep -Fq 'ip saddr 10.50.0.0/24 ip daddr @blocked' "$nat"; rc_is 'the rules follow the new network' 0 "$?"
+    grep -q '9\.9\.9\.0/24' "$nat"; rc_is 'the blocked range stays after a network change' 0 "$?"
+
+    # A line in the file that is not a range never reaches nft.
+    printf '9.9.9.0/24\n1.1.1.1/32 }; flush ruleset; {\n' > "$E/cfg/blocked.v4"
+    out=$(bash -c 'source "$E/lib/common.sh"; darban_nat_rules 10.8.0.0 eth0')
+    lacks 'a line that is not a range is left out' 'flush ruleset' "$out"
+    has 'a range is kept' 'elements = { 9.9.9.0/24 }' "$out"
+
+    # In a split tunnel nothing passes this server, so nothing is asked.
+    out=$(menu '7\n6\n1\n2\n0\n0\n0\n')
+    has 'split tunnel is applied' 'Applied: split tunnel' "$out"
+    out=$(menu '7\n7\n2\n0\n0\n0\n')
+    has 'a split tunnel is explained' 'In a split tunnel' "$out"
+}
+
 test_advanced_network_needs_nat_from_this_tool() {
     local out
     echo 'server 10.8.0.0 255.255.255.0' >> "$SERVER_CONF"
@@ -2271,6 +2368,8 @@ test_release_assets_know_their_version() {
     bash -n "$out/get.sh"; rc_is 'the published script is valid' 0 "$?"
     if tar -tzf "$out/darban-ovpn.tar.gz" | grep -q '^tests/'; then result 0 'tests are not published'; else result 1 'tests are not published'; fi
     tar -tzf "$out/darban-ovpn.tar.gz" | grep -qx 'VERSION'; rc_is 'the archive states its version' 0 "$?"
+    tar -tzf "$out/darban-ovpn.tar.gz" | grep -qx 'lib/geolist.py'; rc_is 'the archive has the lists of blocked destinations' 0 "$?"
+    tar -tzf "$out/darban-ovpn.tar.gz" | grep -qx 'systemd/darban-geo.timer'; rc_is 'the archive has their daily update' 0 "$?"
     (cd "$out" && sha256sum --quiet -c SHA256SUMS >/dev/null); rc_is 'the checksums match' 0 "$?"
 
     # Q12: every file carries the commit time, and a second build of the commit, from a copy whose files have
@@ -2699,6 +2798,44 @@ STUB
     has 'a file for another network needs the installer' '--version v' "$(mgr status)"
     rm -f "$E/live-post" "$E/live-forward"
     has 'rules that are not loaded are reported' 'The NAT rules of this tool are not loaded' "$(mgr status)"
+}
+
+test_diagnostics_check_blocked_destinations() {
+    # The live rules and the live set, from a stand-in for nft that answers from files.
+    local out
+    printf 'server 10.8.0.0 255.255.255.0\n' >> "$SERVER_CONF"
+    cat > "$E/bin/nft" <<'STUB'
+#!/usr/bin/env bash
+case "$*" in
+    'list table ip darban') exit 0 ;;
+    'list chain ip darban forward') cat "$E/live-forward" 2>/dev/null ;;
+    'list set ip darban blocked') cat "$E/live-set" 2>/dev/null ;;
+    *) exit 0 ;;
+esac
+STUB
+    chmod +x "$E/bin/nft"
+    out=$(mgr status)
+    lacks 'nothing is said while nothing is blocked' 'Blocked destinations' "$out"
+    printf 'BLOCK_EXTRA=9.9.9.0/24 1.2.3.4/32\n' >> "$E/cfg/config"
+    printf '1.2.3.4/32\n9.9.9.0/24\n' > "$E/cfg/blocked.v4"
+    printf '\t\tip saddr 10.8.0.0/24 ip daddr @blocked ip protocol tcp reject with tcp reset\n\t\tip saddr 10.8.0.0/24 ip daddr @blocked reject with icmp admin-prohibited\n' > "$E/live-forward"
+    printf 'table ip darban {\n\tset blocked {\n\t\ttype ipv4_addr\n\t\tflags interval\n\t\telements = { 1.2.3.4,\n\t\t\t     9.9.9.0/24 }\n\t}\n}\n' > "$E/live-set"
+    out=$(mgr status)
+    has 'the rules and the list are seen' 'Blocked destinations are refused: 2 ranges (2 addresses of your own)' "$out"
+    printf 'table ip darban {\n\tset blocked {\n\t\ttype ipv4_addr\n\t\tflags interval\n\t}\n}\n' > "$E/live-set"
+    has 'an empty live list is named' 'the loaded list is empty' "$(mgr status)"
+    : > "$E/live-forward"
+    has 'missing rules are named' 'their rules are not loaded' "$(mgr status)"
+    # A restore brings the settings, not the lists.
+    printf '\t\tip saddr 10.8.0.0/24 ip daddr @blocked ip protocol tcp reject with tcp reset\n\t\tip saddr 10.8.0.0/24 ip daddr @blocked reject with icmp admin-prohibited\n' > "$E/live-forward"
+    rm -f "$E/cfg/blocked.v4"
+    has 'settings without a list are named' 'but no list of them is loaded' "$(mgr status)"
+    # A list of Iran that its daily update no longer renews.
+    printf '\t\tip saddr 10.8.0.0/24 ip daddr @blocked ip protocol tcp reject with tcp reset\n\t\tip saddr 10.8.0.0/24 ip daddr @blocked reject with icmp admin-prohibited\n' > "$E/live-forward"
+    printf 'BLOCK_IRAN=yes\n' >> "$E/cfg/config"
+    printf 'date 2026-01-01\nranges 2100\n' > "$E/cfg/iran.v4.info"
+    printf '37.1.0.0/24\n' > "$E/cfg/iran.v4"
+    has 'an old list of Iran is named' 'days old: its daily update fails' "$(mgr status)"
 }
 
 test_live_rule_checks_read_all_of_nft() {

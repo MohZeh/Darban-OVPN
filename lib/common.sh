@@ -89,12 +89,30 @@ is_private_ip() { [[ $1 =~ ^(10\.|127\.|192\.168\.|172\.(1[6-9]|2[0-9]|3[01])\.|
 valid_subnet() { valid_ipv4 "$1" && [[ $1 == *.0 ]] && is_private_ip "$1" && [[ $1 != 127.* && $1 != 100.* ]]; }
 
 # ---------- the tool's own nftables table ----------
-# darban_nat_rules NET IFACE: NAT for the VPN, and clients kept apart. Loaded with nft -f in one transaction.
+# The destinations VPN clients cannot reach through this server, one IPv4 range per line, written by the tool
+# from Settings > Blocked destinations. No file: nothing is blocked.
+DARBAN_BLOCKED=/etc/darban/blocked.v4
+# darban_blocked_elements: the ranges of that file, for a set of nft. A line that is not a range is left out, so
+# nothing but a range ever reaches the rules.
+darban_blocked_elements() {
+    [[ -r $DARBAN_BLOCKED ]] || return 0
+    awk '/^([0-9]{1,3}\.){3}[0-9]{1,3}\/[0-9]{1,2}$/ {s = s (s == "" ? "" : ", ") $0} END {print s}' "$DARBAN_BLOCKED"
+}
+# darban_nat_rules NET IFACE: NAT for the VPN, clients kept apart, and the blocked destinations. Loaded with nft -f in
+# one transaction. The blocked ranges are in the file itself, so they load at boot and follow a new VPN network.
 darban_nat_rules() {
+    local blocked
+    blocked=$(darban_blocked_elements)
     cat <<EOF
 table ip darban
 delete table ip darban
 table ip darban {
+    set blocked {
+        type ipv4_addr; flags interval;
+EOF
+    if [[ -n $blocked ]]; then printf '        elements = { %s }\n' "$blocked"; fi
+    cat <<EOF
+    }
     chain postrouting {
         type nat hook postrouting priority srcnat;
         ip saddr $1/24 oifname "$2" masquerade
@@ -104,6 +122,9 @@ table ip darban {
         type filter hook forward priority filter; policy accept;
         ip saddr $1/24 ip daddr $1/24 drop
         ip saddr $1/24 ip daddr 169.254.0.0/16 drop
+        # A blocked destination never sees this server's address. It is refused at once, so an app does not wait.
+        ip saddr $1/24 ip daddr @blocked ip protocol tcp reject with tcp reset
+        ip saddr $1/24 ip daddr @blocked reject with icmp type admin-prohibited
         # TCP segments must fit in one tunnel packet. A larger one is split, and many mobile and home networks
         # drop the pieces: then most websites never open, while apps that send small packets still work.
         ip saddr $1/24 tcp flags syn tcp option maxseg size > $DARBAN_MSS tcp option maxseg size set $DARBAN_MSS
@@ -143,6 +164,21 @@ darban_live_isolation_ok() {
     local rules
     rules=$(nft list chain ip darban forward 2>/dev/null) || return 1
     grep -Fq "ip saddr $1/24 ip daddr $1/24 drop" <<<"$rules" && grep -Fq "ip saddr $1/24 ip daddr 169.254.0.0/16 drop" <<<"$rules"
+}
+# darban_live_blocked_ok NET: the rules that refuse blocked destinations run, whatever the set holds.
+darban_live_blocked_ok() {
+    local rules
+    rules=$(nft list chain ip darban forward 2>/dev/null) || return 1
+    grep -Fq "ip saddr $1/24 ip daddr @blocked ip protocol tcp reject with tcp reset" <<<"$rules" &&
+        grep -Fq "ip saddr $1/24 ip daddr @blocked reject with icmp" <<<"$rules"
+}
+# The number of ranges the live set holds. nft lists them between "elements = {" and "}", separated by commas,
+# over one line or several, and a single address without its /32.
+darban_live_blocked_count() {
+    local listed
+    listed=$(nft list set ip darban blocked 2>/dev/null) || return 1
+    awk '/elements = \{/ {on = 1} on {s = s " " $0} on && /\}/ {on = 0}
+        END {sub(/.*elements = \{/, "", s); sub(/\}.*/, "", s); print (s ~ /[0-9]/) ? split(s, parts, ",") : 0}' <<<"$listed"
 }
 darban_live_mss_ok() {
     # Both directions through the server, and both directions of connections to the server itself.

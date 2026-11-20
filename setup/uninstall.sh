@@ -51,8 +51,10 @@ else
     done
 fi
 systemctl disable --now darban-crl.timer >/dev/null 2>&1 || true
+systemctl disable --now darban-geo.timer >/dev/null 2>&1 || true
 systemctl stop darban-links.service >/dev/null 2>&1 || true
-rm -f -- "$UNITS/darban-crl.timer" "$UNITS/darban-crl.service" "$UNITS/darban-links.service" "$UNITS/darban-backup.service"
+rm -f -- "$UNITS/darban-crl.timer" "$UNITS/darban-crl.service" "$UNITS/darban-links.service" "$UNITS/darban-backup.service" \
+    "$UNITS/darban-geo.timer" "$UNITS/darban-geo.service"
 # Links hold copies of profiles with private keys.
 rm -rf -- "$LINKS"
 systemctl daemon-reload >/dev/null 2>&1 || true

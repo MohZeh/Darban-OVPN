@@ -151,6 +151,19 @@ UPDATE_CHECK=no
 
 The menu looks for a new release when it starts, at most once an hour, by asking GitHub's API, which then sees this server's address, and waits up to two seconds for the answer, so a new version shows on the first screen. After a failed check it tries again ten minutes later, or when GitHub says its limit allows. That limit counts every program on the server's address, the VPN clients' traffic included. **Setup** shows the state beside **Check for updates**: a new version, up to date with the time of the check, or why it is not known. `UPDATE_CHECK=no` turns the notice off, as does **Setup › Update notice**. The tool never installs an update by itself.
 
+## Blocked destinations
+
+**Settings › Blocked destinations** keeps VPN clients from reaching chosen addresses through this server, so those sites and services never see the server's address and cannot report it. A blocked connection is refused at once, so an app does not wait. A change applies immediately, to connections already open too, and OpenVPN does not restart.
+
+| # | Item | Notes |
+|---|---|---|
+| 1 | Iranian addresses | About 2,100 ranges of Iran and of Iranian CDNs (ArvanCloud, Derak, IranServer, ParsPack), from [Chocolate4U/Iran-v2ray-rules](https://github.com/Chocolate4U/Iran-v2ray-rules), the list that panels such as 3x-ui use as `geoip:ir`. Iranian sites and apps do not open while the VPN is connected; users disconnect it for them |
+| 2 | Block an address | A public IPv4 address, or a range no larger than `/8`, such as `203.0.114.0/24`; up to 200 |
+| 3 | Unblock an address | One of your own, from a numbered list |
+| 4 | Update the list of Iran | `darban-geo.timer` also does this every day. A list that looks wrong, such as one with less than half the ranges of the last, is refused, and the last good one stays in use |
+
+Only IPv4 goes through the VPN, so only IPv4 is blocked. In a split tunnel no traffic to the internet passes this server, so nothing is blocked there. The ranges are written into `/etc/darban/nat.nft` itself, so they load at boot with NAT and stay when the VPN network changes. **Diagnostics** show how many ranges are refused, and warn when the list of Iran is more than a week old. The settings are `BLOCK_IRAN=yes` and `BLOCK_EXTRA` in `/etc/darban/config`.
+
 ## Firewall ports
 
 | Port | Needed for |
@@ -266,7 +279,7 @@ The backup that **Remove everything** offers is a `.tar.gz` file in `/root`, rea
 | **Setup › Uninstall this tool only** | The tool, its timers, open links, the units and queue of connection events, and this tool's hook in certbot's renewal file | OpenVPN, PKI, CRL, `server.conf`, profiles, settings, the link certificate from Let's Encrypt, which certbot goes on renewing, and the event script with its lines in `server.conf`, so OpenVPN needs no restart |
 | **Setup › Remove everything** | The tool, OpenVPN, CA, profiles, NAT, connection events and the record of when clients were seen, the repository, the packages and the certbot the setup added | The link certificate it got from Let's Encrypt, unless you choose to delete it, so a new install here uses it without a new request; the Virtual HWE kernel unless you choose otherwise, the optional backup, and what was there before: other files in the profile folder, `ufw` rules, and repository files, which are put back |
 
-**After Uninstall, nothing renews the CRL.** Renew it yourself before it expires, or OpenVPN may refuse clients.
+**After Uninstall, nothing renews the CRL.** Renew it yourself before it expires, or OpenVPN may refuse clients. Blocked destinations stay blocked, since they are part of NAT, but the list of Iran is no longer updated.
 
 **After Remove everything, every `.ovpn` file stops working,** even if you install OpenVPN again. Only restoring the backup brings the old CA, and with it the old profiles, back. Copies on devices are not deleted; they just cannot connect. A backup is offered first and is the default. This option works only on a server the setup created. Packages are removed only if the setup added them and nothing else needs them. The running kernel is never removed. Closing ports in your provider's firewall is up to you.
 
