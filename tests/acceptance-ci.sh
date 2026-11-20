@@ -494,7 +494,7 @@ else
     echo 'FAIL: an address that was unblocked is still not reached through the VPN.'; exit 1
 fi
 # The sites of a country outside the VPN, with a real OpenVPN 2 client: after its next connection, an address of Iran goes
-# through the client's own network, and any other through the tunnel. The list of Iran is the real one: a runner
+# through the client's own network, and any other through the tunnel. The list used is the real list of Iran: a runner
 # that cannot download it skips this, and says so.
 ns_reconnect() {
     local pid attempt

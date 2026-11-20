@@ -1446,7 +1446,7 @@ test_blocked_destinations_read_the_settings_of_iran_alone() {
     sed -i 's/^BLOCK_COUNTRIES=ir$/BLOCK_IRAN=yes/' "$E/cfg/config"
     printf 'IRAN_DIRECT=no-android\n' >> "$E/cfg/config"
     out=$(menu '7\n0\n0\n')
-    has 'Iran is still blocked, outside the VPN' 'Iran, outside the VPN' "$out"
+    has 'Iran is still blocked, outside the VPN' "Iran"', outside the VPN' "$out"
     lacks 'and nothing is called unknown' 'Unknown setting' "$out"
     out=$(menu '7\n7\n0\n0\n0\n')
     ok_if 'the list moved into its folder' test -s "$E/cfg/geo/ir.v4"
@@ -1481,7 +1481,7 @@ test_country_sites_go_outside_the_vpn() {
     rc_is 'and the small one' 644 "$(stat -c %a "$small")"
     : > "$file"; connect_into "$file" IV_VER=2.6.12
     rc_is 'a client that connects gets them all' 601 "$(grep -c '^push "route ' "$file")"
-    has 'Settings shows it' 'Iran, outside the VPN' "$(menu '7\n0\n0\n')"
+    has 'Settings shows it' "Iran"', outside the VPN' "$(menu '7\n0\n0\n')"
     has 'the menu shows it' "$(printf '%-24s %s' 'Their sites' 'outside the VPN')" "$(menu '7\n7\n0\n0\n0\n')"
 
     out=$(menu '7\n7\n2\n3\n0\n0\n0\n')
