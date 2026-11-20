@@ -415,8 +415,8 @@ if [[ $PART == 2 ]]; then
 fi
 
 # Advanced settings against the real service: a good change is applied, and a broken one is rolled back.
-printf '7\n6\n2\n9.9.9.9\n2\n0\n0\n0\n' | darban
-grep -q 'dhcp-option DNS 9.9.9.9' /etc/openvpn/server/server.conf
+printf '7\n6\n2\n149.112.112.112\n2\n0\n0\n0\n' | darban
+grep -q 'dhcp-option DNS 149.112.112.112' /etc/openvpn/server/server.conf
 systemctl is-active --quiet "$UNIT"
 mkdir -p "/etc/systemd/system/$UNIT.d"
 printf '[Service]\nExecStartPre=/bin/sh -c "! grep -q 198.51.100.1 /etc/openvpn/server/server.conf"\n' > "/etc/systemd/system/$UNIT.d/acceptance.conf"
@@ -424,7 +424,7 @@ systemctl daemon-reload
 printf '7\n6\n2\n198.51.100.1\n2\n0\n0\n0\n' | darban | tee "$LOG/rollback.log"
 grep -q 'Rolled back' "$LOG/rollback.log"
 if grep -q 198.51.100.1 /etc/openvpn/server/server.conf; then echo 'FAIL: the broken change stayed.'; exit 1; fi
-grep -q 'dhcp-option DNS 9.9.9.9' /etc/openvpn/server/server.conf
+grep -q 'dhcp-option DNS 149.112.112.112' /etc/openvpn/server/server.conf
 systemctl is-active --quiet "$UNIT"
 rm -rf "/etc/systemd/system/$UNIT.d"
 systemctl daemon-reload
@@ -463,7 +463,7 @@ for attempt in $(seq 1 20); do
 done
 grep -q 'Initialization Sequence Completed' "$LOG/f.log"
 ip netns exec "$NS" ip route get 1.1.1.1 | grep 'dev tun' >/dev/null
-grep -q 'dhcp-option DNS 9.9.9.9' "$LOG/f.log"
+grep -q 'dhcp-option DNS 149.112.112.112' "$LOG/f.log"
 through_vpn=$(ip netns exec "$NS" curl -4 -fsS --max-time 30 https://api.ipify.org)
 from_server=$(curl -4 -fsS --max-time 30 https://api.ipify.org)
 echo "Address seen through the VPN: $through_vpn; address of the server: $from_server"

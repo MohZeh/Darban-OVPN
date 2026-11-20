@@ -910,7 +910,7 @@ test_server_setup_questions() {
     has 'the plan shows the address' '10.0.0.5' "$out"
     has 'the network is not asked: the default is shown' '10.8.0.0/24' "$out"
     has 'it says where to change the defaults' 'Settings' "$out"
-    has 'the plan shows the default DNS' '1.1.1.1 8.8.8.8' "$out"
+    has 'the plan shows the default DNS' '1.1.1.1 9.9.9.9' "$out"
 
     out=$(setup_run --host 203.0.113.9 --port 21194 --split-tunnel --yes); rc=$?
     rc_is 'split tunnel finishes' 0 "$rc"
@@ -1236,21 +1236,21 @@ test_advanced_settings_are_applied_and_rolled_back() {
     out=$(menu '7\n6\n0\n0\n0\n')
     has 'settings offers Advanced' '6  Advanced' "$out"
     has 'it shows the routing' 'full tunnel' "$out"
-    has 'it shows the DNS' '1.1.1.1 8.8.8.8' "$out"
+    has 'it shows the DNS' '1.1.1.1 9.9.9.9' "$out"
     has 'it shows the network' '10.8.0.0/24' "$out"
     has 'it shows the ciphers' 'AES-256-GCM' "$out"
 
     : > "$STUB_LOG"
-    out=$(menu '7\n6\n2\n9.9.9.9 8.8.4.4\n1\n0\n0\n0\n')
+    out=$(menu '7\n6\n2\n94.140.14.14 8.8.4.4\n1\n0\n0\n0\n')
     has 'option 1 changes nothing' 'Cancelled; nothing changed' "$out"
-    if conf_has 'DNS 9.9.9.9'; then result 0 'the DNS stays after No'; else result 1 'the DNS stays after No'; fi
+    if conf_has 'DNS 94.140.14.14'; then result 0 'the DNS stays after No'; else result 1 'the DNS stays after No'; fi
     if grep -q 'systemctl restart' "$STUB_LOG"; then result 0 'no restart after No'; else result 1 'no restart after No'; fi
     out=$(menu '7\n6\n2\nnot-an-ip\n\n0\n0\n0\n')
     has 'a bad DNS is asked again' 'or one or two IPv4 addresses' "$out"
 
-    out=$(menu '7\n6\n2\n9.9.9.9 8.8.4.4\n2\n0\n0\n0\n')
-    has 'the DNS change is confirmed' 'Applied: DNS 9.9.9.9 8.8.4.4' "$out"
-    conf_has 'dhcp-option DNS 9.9.9.9'; rc_is 'the new DNS is in server.conf' 0 "$?"
+    out=$(menu '7\n6\n2\n94.140.14.14 8.8.4.4\n2\n0\n0\n0\n')
+    has 'the DNS change is confirmed' 'Applied: DNS 94.140.14.14 8.8.4.4' "$out"
+    conf_has 'dhcp-option DNS 94.140.14.14'; rc_is 'the new DNS is in server.conf' 0 "$?"
     if conf_has 'dhcp-option DNS 1.1.1.1'; then result 0 'the old DNS is gone'; else result 1 'the old DNS is gone'; fi
     grep -q 'systemctl restart' "$STUB_LOG"; rc_is 'OpenVPN was restarted' 0 "$?"
     grep -q 'server.conf changed: DNS' "$STUB_LOG"; rc_is 'the change is audited' 0 "$?"
@@ -1290,6 +1290,8 @@ test_advanced_settings_are_applied_and_rolled_back() {
     # Common values come as a numbered list; a number picks one, and a value can still be typed.
     out=$(menu '7\n6\n2\n3\n2\n0\n0\n0\n')
     has 'the DNS list names what each does' 'Quad9, blocks known malicious sites (9.9.9.9 149.112.112.112)' "$out"
+    has "the DNS list says Google shares part of the server's address" \
+        "Google, tells each site's DNS part of this server's address (8.8.8.8 8.8.4.4)" "$out"
     has 'a number picks a DNS' 'Applied: DNS 9.9.9.9 149.112.112.112' "$out"
     out=$(menu '7\n6\n5\n3\n2\n0\n0\n0\n')
     conf_has '^keepalive 5 30$'; rc_is 'a number picks a keepalive' 0 "$?"
