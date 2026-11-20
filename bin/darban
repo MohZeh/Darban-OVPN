@@ -79,6 +79,9 @@ CONFIG_FILE=$CONFIG_DIR/config
 DARBAN_BLOCKED=$CONFIG_DIR/blocked.v4
 IRAN_LIST=$CONFIG_DIR/iran.v4
 IRAN_LIST_INFO=$CONFIG_DIR/iran.v4.info
+# The routes that send Iran outside the tunnel; bin/darban-ovpn-event gives them at each connection, as OpenVPN's
+# user, so they live beside server.conf, not in the folder only root can read.
+DIRECT_ROUTES=$DARBAN_SERVER_DIR/darban-direct.routes
 # The lines this tool added to server.conf for connection events, so their removal takes only those.
 EVENT_LINES_FILE=$CONFIG_DIR/.event-lines
 # The owner's age public key for backups, and the programs that get each new backup (v1.1 delivers them).
@@ -107,6 +110,8 @@ UPDATE_CHECK=yes
 # Blocked destinations: yes blocks the ranges of Iran; BLOCK_EXTRA holds the owner's own ranges, space separated.
 BLOCK_IRAN=no
 BLOCK_EXTRA=''
+# Iranian sites outside the VPN: no, yes, or no-android, which gives the routes to every client but Android phones.
+IRAN_DIRECT=no
 # The owner's own list stays short enough to read in the menu.
 BLOCK_EXTRA_MAX=200
 CONFIG_ISSUES=()
@@ -210,7 +215,7 @@ load_config() {
     # The defaults first: the menu reads the file again after each action, and a setting returned to its
     # default has no line left in the file.
     DOWNLOAD_SSH_HOST='' DOWNLOAD_SSH_PORT=22 DOWNLOAD_SSH_USER=root CLIENT_CERT_DAYS='' LINK_PORT='' LINK_HOURS=''
-    UPDATE_CHECK=yes SHARE_ID_IN_PROFILE=no BLOCK_IRAN=no BLOCK_EXTRA=''
+    UPDATE_CHECK=yes SHARE_ID_IN_PROFILE=no BLOCK_IRAN=no BLOCK_EXTRA='' IRAN_DIRECT=no
     CONFIG_ISSUES=()
     [[ -f $CONFIG_FILE ]] || { CONFIG_ISSUES+=("$CONFIG_FILE is missing; download commands are disabled."); return 0; }
     # Parsed as data, never sourced.
@@ -227,6 +232,7 @@ load_config() {
             SHARE_ID_IN_PROFILE) SHARE_ID_IN_PROFILE=$value ;;
             BLOCK_IRAN) BLOCK_IRAN=$value ;;
             BLOCK_EXTRA) BLOCK_EXTRA=$value ;;
+            IRAN_DIRECT) IRAN_DIRECT=$value ;;
             *) CONFIG_ISSUES+=("Unknown setting ignored in $CONFIG_FILE: $key") ;;
         esac
     done <"$CONFIG_FILE"
@@ -257,6 +263,9 @@ load_config() {
     fi
     if [[ $BLOCK_IRAN != yes && $BLOCK_IRAN != no ]]; then
         CONFIG_ISSUES+=("Invalid BLOCK_IRAN in $CONFIG_FILE; using no."); BLOCK_IRAN=no
+    fi
+    if [[ $IRAN_DIRECT != yes && $IRAN_DIRECT != no && $IRAN_DIRECT != no-android ]]; then
+        CONFIG_ISSUES+=("Invalid IRAN_DIRECT in $CONFIG_FILE; using no."); IRAN_DIRECT=no
     fi
     # Only the form of a range is checked here; geolist.py checks what each one is when the rules are written.
     if [[ -n $BLOCK_EXTRA && ! $BLOCK_EXTRA =~ ^([0-9]{1,3}(\.[0-9]{1,3}){3}/[0-9]{1,2})(\ [0-9]{1,3}(\.[0-9]{1,3}){3}/[0-9]{1,2})*$ ]]; then
@@ -4123,7 +4132,7 @@ save_config() {
     temp=$(mktemp "$CONFIG_DIR/.config.XXXXXXXX") || return 1
     darban_tmp_register "$temp"
     if [[ -f $CONFIG_FILE ]]; then
-        awk -F= '$1!="DOWNLOAD_SSH_HOST" && $1!="DOWNLOAD_SSH_PORT" && $1!="DOWNLOAD_SSH_USER" && $1!="CLIENT_CERT_DAYS" && $1!="LINK_PORT" && $1!="LINK_HOURS" && $1!="UPDATE_CHECK" && $1!="BLOCK_IRAN" && $1!="BLOCK_EXTRA"' "$CONFIG_FILE" >"$temp" || return 1
+        awk -F= '$1!="DOWNLOAD_SSH_HOST" && $1!="DOWNLOAD_SSH_PORT" && $1!="DOWNLOAD_SSH_USER" && $1!="CLIENT_CERT_DAYS" && $1!="LINK_PORT" && $1!="LINK_HOURS" && $1!="UPDATE_CHECK" && $1!="BLOCK_IRAN" && $1!="BLOCK_EXTRA" && $1!="IRAN_DIRECT"' "$CONFIG_FILE" >"$temp" || return 1
     fi
     printf 'DOWNLOAD_SSH_HOST=%s\nDOWNLOAD_SSH_PORT=%s\nDOWNLOAD_SSH_USER=%s\n' "$DOWNLOAD_SSH_HOST" "$DOWNLOAD_SSH_PORT" "$DOWNLOAD_SSH_USER" >>"$temp" || return 1
     if [[ -n $CLIENT_CERT_DAYS ]]; then printf 'CLIENT_CERT_DAYS=%s\n' "$CLIENT_CERT_DAYS" >>"$temp" || return 1; fi
@@ -4132,6 +4141,7 @@ save_config() {
     if [[ $UPDATE_CHECK == no ]]; then printf 'UPDATE_CHECK=no\n' >>"$temp" || return 1; fi
     if [[ $BLOCK_IRAN == yes ]]; then printf 'BLOCK_IRAN=yes\n' >>"$temp" || return 1; fi
     if [[ -n $BLOCK_EXTRA ]]; then printf 'BLOCK_EXTRA=%s\n' "$BLOCK_EXTRA" >>"$temp" || return 1; fi
+    if [[ $IRAN_DIRECT != no ]]; then printf 'IRAN_DIRECT=%s\n' "$IRAN_DIRECT" >>"$temp" || return 1; fi
     chmod 600 "$temp" && mv -f -- "$temp" "$CONFIG_FILE" || return 1
     if (( ! held )); then ca_unlock; fi
 }
@@ -5027,6 +5037,7 @@ blocked_summary() {
     local extra
     extra=$(blocked_extra_count)
     if [[ $BLOCK_IRAN == yes ]] && (( extra )); then printf 'Iran, and %s of your own' "$(address_label "$extra")"
+    elif [[ $BLOCK_IRAN == yes && $IRAN_DIRECT != no ]]; then printf 'Iran, outside the VPN'
     elif [[ $BLOCK_IRAN == yes ]]; then printf 'Iran'
     elif (( extra )); then printf '%s of your own' "$(address_label "$extra")"
     else printf 'none'; fi
@@ -5086,16 +5097,33 @@ blocked_apply() {
     critical_end
 }
 blocked_commit() {
-    # blocked_commit <yes|no> <own ranges>: the rules from these settings, then the settings saved. A save that
-    # fails takes the rules back, so the file and the kernel never disagree.
-    local old_iran=$BLOCK_IRAN old_extra=$BLOCK_EXTRA
+    # blocked_commit <yes|no> <own ranges> [no|yes|no-android]: the rules from these settings, then the settings
+    # saved, then the routes for Iranian sites outside the VPN. A save that fails takes the rules back, so the file
+    # and the kernel never disagree. Without Iran blocked, nothing goes outside the VPN either.
+    local old_iran=$BLOCK_IRAN old_extra=$BLOCK_EXTRA old_direct=$IRAN_DIRECT
     ca_lock || return 1
-    BLOCK_IRAN=$1 BLOCK_EXTRA=$2
-    if ! blocked_apply; then BLOCK_IRAN=$old_iran BLOCK_EXTRA=$old_extra; return 1; fi
+    BLOCK_IRAN=$1 BLOCK_EXTRA=$2 IRAN_DIRECT=${3:-$IRAN_DIRECT}
+    if [[ $BLOCK_IRAN != yes ]]; then IRAN_DIRECT=no; fi
+    if ! blocked_apply; then BLOCK_IRAN=$old_iran BLOCK_EXTRA=$old_extra IRAN_DIRECT=$old_direct; return 1; fi
     if ! save_config; then
-        BLOCK_IRAN=$old_iran BLOCK_EXTRA=$old_extra
+        BLOCK_IRAN=$old_iran BLOCK_EXTRA=$old_extra IRAN_DIRECT=$old_direct
         blocked_apply || true
         fail 'The setting could not be saved, so the previous rules were put back.'
+        return 1
+    fi
+    direct_write
+}
+direct_label() {
+    case $IRAN_DIRECT in yes) printf on ;; no-android) printf 'on, not for Android' ;; *) printf off ;; esac
+}
+direct_write() {
+    # The routes file from the list of Iran and the setting in memory, replaced in one step; gone when it is off.
+    # Clients get it when they next connect.
+    local android=yes
+    if [[ $BLOCK_IRAN != yes || $IRAN_DIRECT == no ]]; then rm -f -- "$DIRECT_ROUTES"; return 0; fi
+    if [[ $IRAN_DIRECT == no-android ]]; then android=no; fi
+    if ! python3 -I "$GEO_PY" routes --list "$IRAN_LIST" --out "$DIRECT_ROUTES" --android "$android" >/dev/null; then
+        fail "Could not write the routes for Iranian sites to $DIRECT_ROUTES; see: sudo darban status"
         return 1
     fi
 }
@@ -5118,10 +5146,11 @@ draw_blocked() {
     clear_screen
     title_bar "Settings $S_CRUMB Blocked destinations"
     printf ' %sVPN clients cannot reach these through this server, so they never see its address. Changes apply at once, without a restart.%s\n' "$C_DIM" "$C_RESET" || true
-    menu_item 1 "$(printf '%-24s %s' 'Iranian addresses' "$([[ $BLOCK_IRAN == yes ]] && printf blocked || printf 'not blocked')")"
-    menu_item 2 "$(printf '%-24s %s' 'Block an address' "$(address_label "$(blocked_extra_count)") of your own")"
+    menu_item 1 "$(printf '%-30s %s' 'Iranian addresses' "$([[ $BLOCK_IRAN == yes ]] && printf blocked || printf 'not blocked')")"
+    menu_item 2 "$(printf '%-30s %s' 'Block an address' "$(address_label "$(blocked_extra_count)") of your own")"
     menu_item 3 'Unblock an address'
-    menu_item 4 "$(printf '%-24s %s' 'Update the list of Iran' "$(iran_list_label)")"
+    menu_item 4 "$(printf '%-30s %s' 'Update the list of Iran' "$(iran_list_label)")"
+    menu_item 5 "$(printf '%-30s %s' 'Iranian sites outside the VPN' "$(direct_label)")"
     menu_item 0 'Back'
 }
 blocked_menu() {
@@ -5129,24 +5158,57 @@ blocked_menu() {
     while :; do
         if (( redraw )); then draw_blocked || true; fi
         redraw=1
-        ask 'Choose [0-4, Enter = back]: ' || return 0
+        ask 'Choose [0-5, Enter = back]: ' || return 0
         case $REPLY in
             1) menu_action 'Iranian addresses' set_block_iran ;;
             2) menu_action 'Block an address' block_address ;;
             3) menu_action 'Unblock an address' unblock_address ;;
             4) menu_action 'Update the list of Iran' update_iran_list ;;
+            5) menu_action 'Iranian sites outside the VPN' set_iran_direct ;;
             0|'') return 0 ;;
-            *) warn "Unknown option \"$REPLY\". Enter a number from 0 to 4."; redraw=0 ;;
+            *) warn "Unknown option \"$REPLY\". Enter a number from 0 to 5."; redraw=0 ;;
         esac
     done
+}
+valid_direct_choice() { [[ $1 =~ ^[1-3]$ ]]; }
+set_iran_direct() {
+    local choice
+    kv Now "$(direct_label)"
+    info "Iranian sites and apps then open while the VPN is connected: the client sends Iranian addresses through its own internet, outside the tunnel. They see the user's own address, as without the VPN, and never this server's."
+    bullet 'clients get it when they next connect; nothing restarts'
+    bullet 'OpenVPN Connect with an OpenVPN 3 core of 3.11.1 or newer, such as 3.7.3 on Android and 3.9.0 on Windows, and OpenVPN 2 take the routes; an older app gets none, and for it Iranian addresses stay blocked'
+    bullet 'Android 12 and older were not tested with so many routes; choose 3 if Android users cannot connect'
+    say
+    say "  ${C_KEY}1${C_RESET}  Off"
+    say "  ${C_KEY}2${C_RESET}  On, for every device"
+    say "  ${C_KEY}3${C_RESET}  On, except Android phones"
+    say
+    prompt_valid 'Choose 1-3 (Enter = cancel): ' valid_direct_choice 'Enter 1, 2 or 3.' || return 0
+    case $REPLY in 1) choice=no ;; 2) choice=yes ;; *) choice=no-android ;; esac
+    if [[ $choice == "$IRAN_DIRECT" ]]; then info 'Same as now; nothing changed.'; return 0; fi
+    if [[ $choice != no ]]; then
+        blocked_needs_full_tunnel || return 0
+        if [[ $BLOCK_IRAN != yes ]]; then
+            info "Turn on item 1 first, Iranian addresses: a device that does not take the routes then still cannot reach Iran through this server."
+            return 0
+        fi
+        if ! events_lines_on; then
+            fail 'Connection events are off, so OpenVPN does not run the script that gives clients the routes. Nothing was changed; see: sudo darban status'
+            return 1
+        fi
+    fi
+    blocked_commit "$BLOCK_IRAN" "$BLOCK_EXTRA" "$choice" || return 1
+    audit "blocked destinations: Iranian sites outside the VPN $(direct_label)"
+    ok "Saved: Iranian sites outside the VPN, $(direct_label). Clients get it when they next connect."
 }
 set_block_iran() {
     if [[ $BLOCK_IRAN == yes ]]; then
         kv Now blocked
         bullet 'VPN clients reach Iranian addresses through this server again, and those sites see its address'
+        if [[ $IRAN_DIRECT != no ]]; then bullet 'Iranian sites outside the VPN (item 5) turns off too'; fi
         say
         confirm_choice 'Stop blocking Iranian addresses?' 'No, keep them blocked' 'Stop blocking them' caution || { cancelled; return 0; }
-        blocked_commit no "$BLOCK_EXTRA" || return 1
+        blocked_commit no "$BLOCK_EXTRA" no || return 1
         systemctl disable --now darban-geo.timer >/dev/null 2>&1 || true
         audit 'blocked destinations: Iranian addresses no longer blocked'
         ok 'Iranian addresses are no longer blocked.'
@@ -5249,6 +5311,17 @@ blocked_health() {
         check warn "The list of Iran is $age days old: its daily update fails $S_ARROW sudo systemctl status darban-geo.service"
     elif ! systemctl is-active --quiet darban-geo.timer 2>/dev/null; then
         check warn "The daily update of the list of Iran is off $S_ARROW sudo systemctl enable --now darban-geo.timer"
+    fi
+    [[ $IRAN_DIRECT != no ]] || return 0
+    want=$(grep -c '^push "route ' "$DIRECT_ROUTES" 2>/dev/null) || want=0
+    if (( want == 0 )); then
+        check bad "Iranian sites outside the VPN is on, but its routes are not on this server, so every client sends Iran through the VPN, where it is blocked $S_ARROW sudo darban, then Settings > Blocked destinations > 4"
+    elif ! events_lines_on; then
+        check bad "Iranian sites outside the VPN is on, but connection events are off, so no client gets its routes $S_ARROW see Connection events below"
+    elif [[ $IRAN_DIRECT == no-android ]]; then
+        check ok "Iranian sites go outside the VPN: $want routes, given at connection to every client that can take them but Android phones"
+    else
+        check ok "Iranian sites go outside the VPN: $want routes, given at connection to every client that can take them"
     fi
 }
 # ---------- backup and restore of the CA ----------

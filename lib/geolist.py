@@ -11,6 +11,10 @@
   geolist.py entry <address or range>
       Prints the range a typed address stands for, such as 203.0.114.0/24. Exit 2, with the reason, when it
       cannot be blocked.
+  geolist.py routes --list <file> --out <file> --android <yes|no>
+      Writes the ranges of the list as OpenVPN options that send them outside the tunnel, one
+      push "route <network> <mask> net_gateway" per line, after a first line that says whether Android phones get
+      them. Readable by all: OpenVPN's own user reads it at each connection. Prints routes=<n>.
 
 Everything downloaded is data: each line must be an address range, and nothing else in it is used.
 """
@@ -83,20 +87,24 @@ def read_ranges(path):
         return [ipaddress.IPv4Network(line.strip()) for line in handle if line.strip()]
 
 
-def write_ranges(path, ranges):
+def write_lines(path, lines, mode=0o600):
     """Replaces the file in one step, so a reader sees the old list or the new one, never half of one."""
     folder = os.path.dirname(os.path.abspath(path))
     handle, temp = tempfile.mkstemp(dir=folder, prefix='.geolist.')
     try:
         with os.fdopen(handle, 'w', encoding='ascii') as out:
-            for net in ranges:
-                out.write('%s\n' % net)
-        os.chmod(temp, 0o600)
+            for line in lines:
+                out.write('%s\n' % line)
+        os.chmod(temp, mode)
         os.replace(temp, path)
     except BaseException:
         if os.path.exists(temp):
             os.unlink(temp)
         raise
+
+
+def write_ranges(path, ranges):
+    write_lines(path, ranges)
 
 
 def fetch(args):
@@ -149,6 +157,16 @@ def entry(args):
     print(net)
 
 
+def routes(args):
+    ranges = read_ranges(args.list)
+    if not ranges:
+        raise Refused('the list of Iran is empty')
+    lines = ['# darban-direct 1 android=%s' % args.android]
+    lines += ['push "route %s %s net_gateway"' % (n.network_address, n.netmask) for n in ranges]
+    write_lines(args.out, lines, 0o644)
+    print('routes=%d' % len(ranges))
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__.split('\n')[0])
     commands = parser.add_subparsers(dest='command', required=True)
@@ -161,9 +179,13 @@ def main():
     two.add_argument('--extra')
     three = commands.add_parser('entry')
     three.add_argument('value')
+    four = commands.add_parser('routes')
+    four.add_argument('--list', required=True)
+    four.add_argument('--out', required=True)
+    four.add_argument('--android', required=True, choices=('yes', 'no'))
     args = parser.parse_args()
     try:
-        {'fetch': fetch, 'merge': merge, 'entry': entry}[args.command](args)
+        {'fetch': fetch, 'merge': merge, 'entry': entry, 'routes': routes}[args.command](args)
     except Refused as reason:
         print(reason, file=sys.stderr)
         sys.exit(2)

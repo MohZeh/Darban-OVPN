@@ -161,8 +161,15 @@ The menu looks for a new release when it starts, at most once an hour, by asking
 | 2 | Block an address | A public IPv4 address, or a range no larger than `/8`, such as `203.0.114.0/24`; up to 200 |
 | 3 | Unblock an address | One of your own, from a numbered list |
 | 4 | Update the list of Iran | `darban-geo.timer` also does this every day. A list that looks wrong, such as one with less than half the ranges of the last, is refused, and the last good one stays in use |
+| 5 | Iranian sites outside the VPN | Off; on for every device; or on except Android phones. Needs item 1 and connection events. See below |
 
-Only IPv4 goes through the VPN, so only IPv4 is blocked. In a split tunnel no traffic to the internet passes this server, so nothing is blocked there. The ranges are written into `/etc/darban/nat.nft` itself, so they load at boot with NAT and stay when the VPN network changes. **Diagnostics** show how many ranges are refused, and warn when the list of Iran is more than a week old. The settings are `BLOCK_IRAN=yes` and `BLOCK_EXTRA` in `/etc/darban/config`.
+**Iranian sites outside the VPN.** Blocking keeps the server's address hidden, but Iranian sites then do not open while the VPN is connected. With item 5, each client that connects also gets the list of Iran as routes outside the tunnel: it sends Iranian addresses through its own internet, so those sites open, see the user's own address as without the VPN, and never see this server's. The routes are given by the script of connection events, from `/etc/openvpn/server/darban-direct.routes`, so a new list reaches each client at its next connection, without a restart.
+
+- Only clients that can take the whole list get it: OpenVPN 2, and OpenVPN 3 from `3.11.1`, which OpenVPN Connect `3.7.3` on Android and `3.9.0` on Windows have. An older OpenVPN 3 refuses a connection whose options pass 256 KiB, so it gets no routes, and for it Iranian addresses stay blocked: the server's address still never shows.
+- Tested on Android 13 or newer and on Windows: the connection took 3 to 7 seconds, and no traffic to Iran passed the server. Android 12 and older, which turn the list into many more routes, and iOS were not tested. If Android users cannot connect, choose **on except Android phones**.
+- An Iranian site hosted outside Iran, about one in five, is not in the list, and still goes through the VPN.
+
+Only IPv4 goes through the VPN, so only IPv4 is blocked. In a split tunnel no traffic to the internet passes this server, so nothing is blocked there. The ranges are written into `/etc/darban/nat.nft` itself, so they load at boot with NAT and stay when the VPN network changes. **Diagnostics** show how many ranges are refused, and warn when the list of Iran is more than a week old. The settings are `BLOCK_IRAN=yes`, `BLOCK_EXTRA` and `IRAN_DIRECT` in `/etc/darban/config`.
 
 ## Firewall ports
 
