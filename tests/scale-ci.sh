@@ -18,9 +18,9 @@ cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.."
 RESULTS=${3:-$(mktemp -d)}
 mkdir -p "$RESULTS"
 WORK=$(mktemp -d)
-# What OpenVPN's user reads: the list of fake connections.
-SHARED=$WORK/shared
-install -d -m 755 "$SHARED"
+# What OpenVPN's user reads, the list of fake connections, in a folder of its own: it cannot enter $WORK.
+SHARED=$(mktemp -d)
+chmod 755 "$SHARED"
 PKI=/root/pki
 EASYRSA=/usr/share/easy-rsa/easyrsa
 UNIT=openvpn-server@server.service
@@ -49,7 +49,7 @@ dump() {
     tail -n 40 /var/log/darban-setup.log 2>/dev/null || true
 }
 trap 'echo "FAILED at line $LINENO"; dump' ERR
-trap 'summary; rm -rf -- "$WORK"' EXIT
+trap 'summary; rm -rf -- "$WORK" "$SHARED"' EXIT
 
 now_us() { printf '%s\n' "${EPOCHREALTIME//[!0-9]/}"; }
 seconds() { printf '%d.%03d' $(( $1 / 1000000 )) $(( $1 / 1000 % 1000 )); }
@@ -211,11 +211,6 @@ GEN_CRL="env EASYRSA_PKI=$PKI EASYRSA_BATCH=1 $EASYRSA gen-crl"
 PUBLISH_CRL="source /usr/local/lib/darban/common.sh && darban_publish_crl $PKI/crl.pem"
 bash -c "$GEN_CRL" >/dev/null 2>&1
 bash -c "$PUBLISH_CRL"
-darban status >"$WORK/status-check.log" || { cat "$WORK/status-check.log"; echo 'FAIL: the diagnostics found a problem in the fake clients.'; exit 1; }
-darban list >"$WORK/list-check.log"
-grep "$CLIENTS valid" "$WORK/list-check.log" >/dev/null || { tail -n 5 "$WORK/list-check.log"; echo "FAIL: the list does not show $CLIENTS valid clients."; exit 1; }
-grep "$revoked revoked" "$WORK/list-check.log" >/dev/null || { tail -n 5 "$WORK/list-check.log"; echo "FAIL: the list does not show $revoked revoked clients."; exit 1; }
-echo "PASS: the diagnostics pass, and the list shows $CLIENTS valid and $revoked revoked clients."
 
 # ---------- connection events after a restart ----------
 # OpenVPN restarts, and its 253 clients connect again: each connection leaves an event, and the path unit starts
@@ -270,7 +265,6 @@ menu_open() {
     took=$(SCREEN_LOG=$WORK/menu.screen python3 tests/time-to-text.py "$LIMIT" 'Choose [0-9]' '0\r' -- darban) || return 1
     printf '%s\n' "$took" >"$WORK/menu.seconds"
 }
-menu_open
 runs=()
 for run in 1 2 3; do
     menu_open || { echo 'FAIL: the menu did not open.'; tail -n 30 "$WORK/menu.screen"; exit 1; }
@@ -280,7 +274,11 @@ for run in 1 2 3; do
 done
 record menu "open the menu, until it asks \"Choose [0-9]\"" "$(median "${runs[@]}")" "${#runs[@]}"
 measure list 'darban list' 3 'darban list'
+# The fake clients are what the tool sees: the list counts them, and the diagnostics, which fail on any problem, pass.
+grep "$CLIENTS valid" "$WORK/list.1.log" >/dev/null || { tail -n 5 "$WORK/list.1.log"; echo "FAIL: the list does not show $CLIENTS valid clients."; exit 1; }
+grep "$revoked revoked" "$WORK/list.1.log" >/dev/null || { tail -n 5 "$WORK/list.1.log"; echo "FAIL: the list does not show $revoked revoked clients."; exit 1; }
 measure status 'darban status' 3 'darban status'
+echo "PASS: the list shows $CLIENTS valid and $revoked revoked clients, and the diagnostics pass."
 
 # ---------- the CRL ----------
 measure gen-crl "gen-crl (Easy-RSA, $revoked revoked)" 3 "$GEN_CRL"
