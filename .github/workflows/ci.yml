@@ -259,6 +259,49 @@ jobs:
       - name: Backup, refused restores, and a restore on a new server
         run: sudo bash tests/restore-ci.sh --i-know
 
+  # How long the everyday commands take with many clients: the real setup, then the real CA filled to 10,000 rows,
+  # with 253 valid clients (a full /24 VPN network) or 1000. The times go to the summary and to an artifact, so a
+  # later change is judged by numbers. Nothing here fails on a slow time; a command that fails does.
+  scale:
+    name: Scale (Ubuntu ${{ matrix.ubuntu }}, ${{ matrix.clients }} clients)
+    needs: lint
+    if: needs.lint.outputs.code == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        ubuntu: ['24.04', '26.04']
+        clients: [253, 1000]
+    runs-on: ubuntu-${{ matrix.ubuntu }}
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # A mirror that is down or slow must not decide a test: the fastest one goes first.
+      - name: Fastest apt mirror first
+        run: sudo GITHUB_STEP_SUMMARY="$GITHUB_STEP_SUMMARY" bash scripts/ci-apt-mirrors.sh
+      - name: Confirm the Ubuntu version
+        env:
+          EXPECTED: ${{ matrix.ubuntu }}
+        run: |
+          . /etc/os-release
+          test "$VERSION_ID" = "$EXPECTED"
+          echo "Ubuntu $VERSION_ID, kernel $(uname -r), $(nproc) CPUs" >> "$GITHUB_STEP_SUMMARY"
+      - name: The runner must not already have a PKI or server
+        run: sudo test ! -e /root/pki && test ! -e /etc/openvpn/server/server.conf
+      - name: Real setup, ${{ matrix.clients }} clients, and the times
+        env:
+          CLIENTS: ${{ matrix.clients }}
+        run: sudo GITHUB_STEP_SUMMARY="$GITHUB_STEP_SUMMARY" bash tests/scale-ci.sh --i-know "$CLIENTS" "$RUNNER_TEMP/scale"
+      - name: Keep the times
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: scale-${{ matrix.ubuntu }}-${{ matrix.clients }}-clients
+          path: ${{ runner.temp }}/scale/scale.tsv
+          if-no-files-found: ignore
+          retention-days: 90
+
   # A real virtual machine, so a real reboot. Not on every push: it takes several minutes.
   reboot:
     name: Reboot test (Ubuntu ${{ matrix.ubuntu }})
@@ -281,7 +324,7 @@ jobs:
       - name: Set up, reboot and connect from outside
         env:
           UBUNTU: ${{ matrix.ubuntu }}
-        run: sudo bash tests/vm-reboot.sh --i-know "$UBUNTU"
+        run: sudo GITHUB_STEP_SUMMARY="$GITHUB_STEP_SUMMARY" bash tests/vm-reboot.sh --i-know "$UBUNTU"
 
   # arm64 runners are free only for public repositories. Not on every push: the code is the same.
   acceptance-arm:
@@ -305,7 +348,7 @@ jobs:
   result:
     name: ${{ inputs.vm_only && 'VM qualification result' || 'CI result' }}
     if: always()
-    needs: [lint, test, acceptance, short, restore, acceptance-arm, reboot]
+    needs: [lint, test, acceptance, short, restore, scale, acceptance-arm, reboot]
     runs-on: ubuntu-24.04
     timeout-minutes: 2
     steps:
@@ -317,13 +360,14 @@ jobs:
           ACCEPTANCE: ${{ needs.acceptance.result }}
           SHORT: ${{ needs.short.result }}
           RESTORE: ${{ needs.restore.result }}
+          SCALE: ${{ needs.scale.result }}
           ARM: ${{ needs.acceptance-arm.result }}
           REBOOT: ${{ needs.reboot.result }}
           VM_ONLY: ${{ inputs.vm_only && 'true' || 'false' }}
           DRAFT: ${{ github.event.pull_request.draft && 'true' || 'false' }}
           TREE: ${{ needs.lint.outputs.tree }}
         run: |
-          echo "Lint: $LINT, Test: $TEST, Acceptance: $ACCEPTANCE, terminal, public address and rc.10: $SHORT, restore: $RESTORE, arm64: $ARM, reboot: $REBOOT, code changed: $CODE, reboot and arm64 only: $VM_ONLY"
+          echo "Lint: $LINT, Test: $TEST, Acceptance: $ACCEPTANCE, terminal, public address and rc.10: $SHORT, restore: $RESTORE, scale: $SCALE, arm64: $ARM, reboot: $REBOOT, code changed: $CODE, reboot and arm64 only: $VM_ONLY"
           echo "Tree $TREE" >> "$GITHUB_STEP_SUMMARY"
           test "$LINT" = success
           # A draft is never a pass: its slow tests did not run, and a skipped required check would count as passed.
@@ -343,9 +387,11 @@ jobs:
             test "$ACCEPTANCE" = success
             test "$SHORT" = success
             test "$RESTORE" = success
+            test "$SCALE" = success
           else
             test "$TEST" = skipped
             test "$ACCEPTANCE" = skipped
             test "$SHORT" = skipped
             test "$RESTORE" = skipped
+            test "$SCALE" = skipped
           fi
