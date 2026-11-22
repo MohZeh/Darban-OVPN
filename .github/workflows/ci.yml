@@ -15,6 +15,10 @@ on:
         description: Only the reboot and arm64 tests, for a commit whose pull request runs the others
         type: boolean
         default: false
+      scale:
+        description: Only the scale measurements, for a commit whose pull request runs the other tests
+        type: boolean
+        default: false
   workflow_call:
 
 permissions:
@@ -37,8 +41,9 @@ jobs:
       pull-requests: read
     outputs:
       # The slow tests are skipped for documentation only, for a push to main whose exact files its pull request
-      # already tested green, for a manual run that asks for the reboot and arm64 tests only, and for a draft.
-      code: ${{ (steps.tested.outputs.tested == 'true' || inputs.vm_only || github.event.pull_request.draft) && 'false' || steps.scope.outputs.code }}
+      # already tested green, for a manual run that asks for the reboot and arm64 tests or the scale measurements
+      # only, and for a draft.
+      code: ${{ (steps.tested.outputs.tested == 'true' || inputs.vm_only || inputs.scale || github.event.pull_request.draft) && 'false' || steps.scope.outputs.code }}
       tree: ${{ steps.source.outputs.tree }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -55,6 +60,9 @@ jobs:
       - name: Only the reboot and arm64 tests
         if: inputs.vm_only
         run: echo 'This manual run asked for the reboot and arm64 tests only. The other tests are not run here on purpose; the pull request runs them.' >> "$GITHUB_STEP_SUMMARY"
+      - name: Only the scale measurements
+        if: inputs.scale && !inputs.vm_only
+        run: echo 'This manual run asked for the scale measurements only. The other tests are not run here on purpose; the pull request runs them.' >> "$GITHUB_STEP_SUMMARY"
       - name: Decide which tests this change needs
         id: scope
         env:
@@ -261,11 +269,13 @@ jobs:
 
   # How long the everyday commands take with many clients: the real setup, then the real CA filled to 10,000 rows,
   # with 253 valid clients (a full /24 VPN network) or 1000. The times go to the summary and to an artifact, so a
-  # later change is judged by numbers. Nothing here fails on a slow time; a command that fails does.
+  # later change is judged by numbers. Nothing here fails on a slow time; a command that fails does. A runner takes
+  # 20 to 30 minutes, so not on every pull request: only one labelled scale, the weekly run of main, and a manual run
+  # with scale. A label added later counts from the next push.
   scale:
     name: Scale (Ubuntu ${{ matrix.ubuntu }}, ${{ matrix.clients }} clients)
     needs: lint
-    if: needs.lint.outputs.code == 'true'
+    if: inputs.scale || (needs.lint.outputs.code == 'true' && (github.event_name == 'schedule' || contains(github.event.pull_request.labels.*.name, 'scale')))
     strategy:
       fail-fast: false
       matrix:
@@ -306,7 +316,8 @@ jobs:
   reboot:
     name: Reboot test (Ubuntu ${{ matrix.ubuntu }})
     needs: lint
-    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' || github.ref_type == 'tag'
+    # A manual run for the scale measurements only skips it.
+    if: github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && (inputs.vm_only || !inputs.scale)) || github.ref_type == 'tag'
     strategy:
       fail-fast: false
       matrix:
@@ -330,7 +341,7 @@ jobs:
   acceptance-arm:
     name: Acceptance (Ubuntu 24.04, arm64)
     needs: lint
-    if: ${{ !github.event.repository.private && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' || github.ref_type == 'tag') }}
+    if: ${{ !github.event.repository.private && (github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && (inputs.vm_only || !inputs.scale)) || github.ref_type == 'tag') }}
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 40
     steps:
@@ -343,10 +354,10 @@ jobs:
         run: sudo GITHUB_STEP_SUMMARY="$GITHUB_STEP_SUMMARY" bash tests/acceptance-ci.sh --i-know
 
   # The one check a branch rule requires. Matrix job names cannot be required reliably when they are skipped.
-  # A manual run for the reboot and arm64 tests only gets another name: it skips the other tests on purpose, so
-  # it must never stand in for the CI result of the commit.
+  # A manual run for the reboot and arm64 tests, or for the scale measurements, only gets another name: it skips
+  # the other tests on purpose, so it must never stand in for the CI result of the commit.
   result:
-    name: ${{ inputs.vm_only && 'VM qualification result' || 'CI result' }}
+    name: ${{ inputs.vm_only && 'VM qualification result' || inputs.scale && 'Scale measurement result' || 'CI result' }}
     if: always()
     needs: [lint, test, acceptance, short, restore, scale, acceptance-arm, reboot]
     runs-on: ubuntu-24.04
@@ -364,10 +375,11 @@ jobs:
           ARM: ${{ needs.acceptance-arm.result }}
           REBOOT: ${{ needs.reboot.result }}
           VM_ONLY: ${{ inputs.vm_only && 'true' || 'false' }}
+          SCALE_ONLY: ${{ inputs.scale && 'true' || 'false' }}
           DRAFT: ${{ github.event.pull_request.draft && 'true' || 'false' }}
           TREE: ${{ needs.lint.outputs.tree }}
         run: |
-          echo "Lint: $LINT, Test: $TEST, Acceptance: $ACCEPTANCE, terminal, public address and rc.10: $SHORT, restore: $RESTORE, scale: $SCALE, arm64: $ARM, reboot: $REBOOT, code changed: $CODE, reboot and arm64 only: $VM_ONLY"
+          echo "Lint: $LINT, Test: $TEST, Acceptance: $ACCEPTANCE, terminal, public address and rc.10: $SHORT, restore: $RESTORE, scale: $SCALE, arm64: $ARM, reboot: $REBOOT, code changed: $CODE, reboot and arm64 only: $VM_ONLY, scale only: $SCALE_ONLY"
           echo "Tree $TREE" >> "$GITHUB_STEP_SUMMARY"
           test "$LINT" = success
           # A draft is never a pass: its slow tests did not run, and a skipped required check would count as passed.
@@ -380,6 +392,11 @@ jobs:
             test "$REBOOT" = success
             test "$ARM" = success
           fi
+          if [ "$SCALE_ONLY" = true ]; then
+            test "$SCALE" = success
+          fi
+          # Scale runs only when asked for: with the label scale, weekly, or by hand.
+          test "$SCALE" = success || test "$SCALE" = skipped
           test "$ARM" = success || test "$ARM" = skipped
           test "$REBOOT" = success || test "$REBOOT" = skipped
           if [ "$CODE" = true ]; then
@@ -387,11 +404,9 @@ jobs:
             test "$ACCEPTANCE" = success
             test "$SHORT" = success
             test "$RESTORE" = success
-            test "$SCALE" = success
           else
             test "$TEST" = skipped
             test "$ACCEPTANCE" = skipped
             test "$SHORT" = skipped
             test "$RESTORE" = skipped
-            test "$SCALE" = skipped
           fi
