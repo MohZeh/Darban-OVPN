@@ -403,6 +403,13 @@ connect "$PROFILE" "$LOG/events-back.log"; disconnect
 echo 'PASS: a small process limit, script-security 1 or a failed restart keep the lines out, and nothing else changes.'
 
 darban list --all
+
+# T0 (#115): facts about OpenVPN 2.7 with a UDP and a TCP socket in one process, for the design of T1, from a
+# temporary OpenVPN of its own. The facts go to the summary as seen; it fails only if the installed server changed.
+bash tests/openvpn-facts-ci.sh --i-know
+systemctl is-active --quiet "$UNIT"
+connect "$PROFILE" "$LOG/after-facts.log"; disconnect
+echo 'PASS: after the facts test, the installed server still runs and a client connects.'
 fi
 
 # ---------- part 2: the settings, the network, links and files, certbot, the update and the removal ----------
