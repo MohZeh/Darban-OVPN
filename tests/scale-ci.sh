@@ -206,11 +206,13 @@ awk -v count="$revoked" -v expires="$(date -u -d '+700 days' +%y%m%d%H%M%SZ)" -v
 echo "Made $CLIENTS valid and $revoked revoked clients in $(seconds $(( $(now_us) - start ))) s."
 NOTES="index.txt: $ROWS rows: $CLIENTS valid clients, $revoked revoked, and the server. Kernel $kernel. $quota_note. The update check is off, so no time waits on the network. A time is the median of up to 3 runs; a command that took 20 s or more ran once."
 
+# ---------- the CRL ----------
 # The revoked clients are blocked, as on a real server: a CRL that lists them all, published the tool's own way.
+# This is also the one time the CRL is made and published, so these are its timed runs.
 GEN_CRL="env EASYRSA_PKI=$PKI EASYRSA_BATCH=1 $EASYRSA gen-crl"
 PUBLISH_CRL="source /usr/local/lib/darban/common.sh && darban_publish_crl $PKI/crl.pem"
-bash -c "$GEN_CRL" >/dev/null 2>&1
-bash -c "$PUBLISH_CRL"
+measure gen-crl "gen-crl (Easy-RSA, $revoked revoked)" 3 "$GEN_CRL"
+measure publish-crl 'publish the new CRL (verify and install it)' 3 "$PUBLISH_CRL"
 
 # ---------- connection events after a restart ----------
 # OpenVPN restarts, and its 253 clients connect again: each connection leaves an event, and the path unit starts
@@ -280,13 +282,11 @@ grep "$revoked revoked" "$WORK/list.1.log" >/dev/null || { tail -n 5 "$WORK/list
 measure status 'darban status' 3 'darban status'
 echo "PASS: the list shows $CLIENTS valid and $revoked revoked clients, and the diagnostics pass."
 
-# ---------- the CRL ----------
-measure gen-crl "gen-crl (Easy-RSA, $revoked revoked)" 3 "$GEN_CRL"
-measure publish-crl 'publish the new CRL (verify and install it)' 3 "$PUBLISH_CRL"
-
 # ---------- one more client ----------
 # From a script, as tests/vm-reboot.sh creates one: the menu opens, takes the name, and closes.
 measure create 'create one client, from opening the menu to leaving it' 1 "printf '1\\nscale-new\\n0\\n' | darban"
 [[ -s /root/openvpn-clients/scale-new.ovpn ]] || { echo 'FAIL: the new client has no profile.'; exit 1; }
-grep "$(( CLIENTS + 1 )) valid" <(darban list) >/dev/null
+# Read from the index itself: another darban list would take minutes and measure nothing.
+valid=$(awk -F '\t' '$1 == "V" && $6 ~ /\/CN=scale-/ {n++} $1 == "V" && $6 ~ /\/CN=scale-new$/ {new++} END {printf "%d %d\n", n, new}' "$PKI/index.txt")
+[[ $valid == "$(( CLIENTS + 1 )) 1" ]] || { echo "FAIL: index.txt has valid clients and rows of scale-new: $valid, not $(( CLIENTS + 1 )) 1."; exit 1; }
 echo 'PASS: every measurement ran.'
