@@ -2,20 +2,26 @@
 # How long the everyday commands take on a server with many clients, for a disposable Ubuntu 24.04 or 26.04
 # machine ONLY, such as a CI runner: it runs the real setup, then fills the real CA with fake clients. Run as root;
 # it refuses without --i-know. It measures, and changes nothing in the tool: later changes are judged by its numbers.
-#   scale-ci.sh --i-know <valid clients> [folder for the results]
+#   scale-ci.sh --i-know <valid clients> <part> [folder for the results]
 # The CA index then holds 10,000 rows: the server, the valid clients, and revoked clients for the rest, as a
 # server that has revoked many clients keeps them in its index for the CRL. The times go to the CI summary, and
-# as tab-separated lines to scale.tsv in the results folder.
+# as tab-separated lines to scale.tsv in the results folder. The measurements come in three parts, so CI runs each
+# on a runner of its own, every one after the same setup and data:
+#   commands  darban list and darban status
+#   menu      opening the menu, and creating one client
+#   crl       gen-crl and publishing the CRL, the connection events, and the client-connect script
 set -Eeuo pipefail
-[[ ${1:-} == --i-know && ${2:-} =~ ^[0-9]+$ ]] || { echo 'This reconfigures the machine. Use only on a disposable one: scale-ci.sh --i-know <valid clients> [results folder]' >&2; exit 2; }
-[[ $EUID == 0 ]] || { echo 'Run as root.' >&2; exit 2; }
+[[ ${1:-} == --i-know && ${2:-} =~ ^[0-9]+$ && -n ${3:-} ]] || { echo 'This reconfigures the machine. Use only on a disposable one: scale-ci.sh --i-know <valid clients> commands|menu|crl [results folder]' >&2; exit 2; }
 CLIENTS=$2
+PART=$3
+[[ $PART == commands || $PART == menu || $PART == crl ]] || { echo "No such part: $PART. The parts are commands, menu and crl." >&2; exit 2; }
+[[ $EUID == 0 ]] || { echo 'Run as root.' >&2; exit 2; }
 ROWS=10000
 # A server's VPN network is a /24: at most 253 clients are connected at once, so a restart brings back 253.
 CONNECTED=253
 (( CLIENTS >= CONNECTED && CLIENTS < ROWS )) || { echo "From $CONNECTED to $((ROWS - 2)) valid clients." >&2; exit 2; }
 cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.."
-RESULTS=${3:-$(mktemp -d)}
+RESULTS=${4:-$(mktemp -d)}
 mkdir -p "$RESULTS"
 WORK=$(mktemp -d)
 # What OpenVPN's user reads, the list of fake connections, in a folder of its own: it cannot enter $WORK.
@@ -27,6 +33,7 @@ UNIT=openvpn-server@server.service
 EVENT_SCRIPT=/usr/local/libexec/darban-ovpn-event
 EVENTS=/run/darban-events
 LEDGER=/var/lib/darban/clients
+CRL=/etc/openvpn/server/crl.pem
 # One command that takes longer than this is stopped, and its time is given as more than this.
 LIMIT=1200
 TSV=$RESULTS/scale.tsv
@@ -38,8 +45,8 @@ NOTES=''
 summary() {
     # Whatever was measured, also when a later step failed.
     local text
-    text=$(printf '### Scale: Ubuntu %s, %s valid clients\n\n%s\n\n| Measured | Seconds | Runs |\n|---|---:|---:|\n%s\n' \
-        "$VERSION_ID" "$CLIENTS" "${NOTES:-No data was made.}" "${ROWS_MD:-| nothing measured | | |}")
+    text=$(printf '### Scale: Ubuntu %s, %s valid clients, %s\n\n%s\n\n| Measured | Seconds | Runs |\n|---|---:|---:|\n%s\n' \
+        "$VERSION_ID" "$CLIENTS" "$PART" "${NOTES:-No data was made.}" "${ROWS_MD:-| nothing measured | | |}")
     printf '%s\n' "$text"
     if [[ -n ${GITHUB_STEP_SUMMARY:-} ]]; then printf '%s\n\n' "$text" >>"$GITHUB_STEP_SUMMARY"; fi
 }
@@ -120,9 +127,15 @@ ledger_after() {
     done <"$SHARED/connections"
     (( missing == 0 )) || { echo "FAIL: $missing of $CONNECTED connections did not reach the client records."; return 1; }
 }
+menu_open() {
+    # The menu in a real terminal: from starting darban until it asks "Choose [0-9]", then 0 to leave.
+    local took
+    took=$(SCREEN_LOG=$WORK/menu.screen python3 tests/time-to-text.py "$LIMIT" 'Choose [0-9]' '0\r' -- darban) || return 1
+    printf '%s\n' "$took" >"$WORK/menu.seconds"
+}
 
 # ---------- the real setup ----------
-echo "Ubuntu $VERSION_ID, kernel $(uname -r): setup"
+echo "Ubuntu $VERSION_ID, kernel $(uname -r): setup, then the $PART part"
 start=$(now_us)
 bash setup/server-setup.sh --yes --host 127.0.0.1 --port 1194
 bash setup/install.sh
@@ -204,20 +217,30 @@ awk -v count="$revoked" -v expires="$(date -u -d '+700 days' +%y%m%d%H%M%SZ)" -v
     'BEGIN {for (n = 1; n <= count; n++) printf "R\t%s\t%s\tDE%030X\tunknown\t/CN=gone-%05d\n", expires, revoked_at, n, n}' >>"$PKI/index.txt"
 [[ $(wc -l <"$PKI/index.txt") == "$ROWS" ]]
 echo "Made $CLIENTS valid and $revoked revoked clients in $(seconds $(( $(now_us) - start ))) s."
-NOTES="index.txt: $ROWS rows: $CLIENTS valid clients, $revoked revoked, and the server. Kernel $kernel. $quota_note. The update check is off, so no time waits on the network. A time is the median of up to 3 runs; a command that took 20 s or more ran once."
+NOTES="Part: $PART. index.txt: $ROWS rows: $CLIENTS valid clients, $revoked revoked, and the server. Kernel $kernel. $quota_note. The update check is off, so no time waits on the network. A time is the median of up to 3 runs; a command that took 20 s or more ran once."
 
 # ---------- the CRL ----------
-# The revoked clients are blocked, as on a real server: a CRL that lists them all, published the tool's own way.
-# This is also the one time the CRL is made and published, so these are its timed runs.
+# The revoked clients are blocked, as on a real server: a CRL that lists them all. The crl part publishes it the
+# tool's own way, and times that. The other parts install the same file where the tool publishes it, with the same
+# owner and mode, without the minutes its checks take: the diagnostics and the menu then find a CRL that agrees
+# with the index.
 GEN_CRL="env EASYRSA_PKI=$PKI EASYRSA_BATCH=1 $EASYRSA gen-crl"
 PUBLISH_CRL="source /usr/local/lib/darban/common.sh && darban_publish_crl $PKI/crl.pem"
-measure gen-crl "gen-crl (Easy-RSA, $revoked revoked)" 3 "$GEN_CRL"
-measure publish-crl 'publish the new CRL (verify and install it)' 3 "$PUBLISH_CRL"
+if [[ $PART == crl ]]; then
+    measure gen-crl "gen-crl (Easy-RSA, $revoked revoked)" 3 "$GEN_CRL"
+    measure publish-crl 'publish the new CRL (verify and install it)' 3 "$PUBLISH_CRL"
+else
+    bash -c "$GEN_CRL" >/dev/null 2>&1
+    temp=$(mktemp "${CRL%/*}/.darban-crl.XXXXXXXX")
+    install -o root -g root -m 644 "$PKI/crl.pem" "$temp"
+    mv -f -- "$temp" "$CRL"
+fi
 
 # ---------- connection events after a restart ----------
 # OpenVPN restarts, and its 253 clients connect again: each connection leaves an event, and the path unit starts
 # the worker that applies them. Measured from the first event written until the queue is empty and every client
-# record has its connection.
+# record has its connection. Every part does this, so the client records hold real connections; only the crl part
+# records its times.
 systemctl restart "$UNIT"
 for attempt in $(seq 1 30); do
     if darban connected >/dev/null 2>&1; then break; fi
@@ -232,61 +255,61 @@ wait_queue_empty 600
 took=$(( $(now_us) - start ))
 ledger_after "$start" 1
 [[ -z $(ls -A "$EVENTS/bad") ]] || { ls -la "$EVENTS/bad"; echo 'FAIL: connection events were set aside as malformed.'; exit 1; }
-record events-written "$CONNECTED connection events written by the client-connect script" "$written" 1
-record events-applied "$CONNECTED connection events after a restart, from the first written to all applied" "$took" 1
-# The worker alone, on 253 events already waiting in the queue: the path unit, and the five-minute check that
-# also takes what is left there, stay off meanwhile.
-systemctl stop darban-events.path darban-sweep.timer
-start=$(now_us)
-write_events 1
-measure events-worker "darban events applying $CONNECTED waiting events" 1 'darban events'
-queue_empty || { echo 'FAIL: darban events left events in the queue.'; exit 1; }
-ledger_after "$start" 1
-systemctl start darban-events.path darban-sweep.timer
 
-# ---------- one run of the client-connect script ----------
-# As OpenVPN runs it, as its own user, timed inside that user's shell so starting runuser does not count: the
-# first run, and the average of 100 more.
-runuser -u nobody -- env -i PATH=/usr/bin:/bin SCRIPT="$EVENT_SCRIPT" LIST="$SHARED/connections" bash -c '
-    read -r name serial <"$LIST"
-    file=$(mktemp)
-    run() { script_type=client-connect common_name=$name trusted_ip=198.51.100.7 tls_serial_hex_0=$serial IV_VER=2.6.12 IV_PLAT=linux "$SCRIPT" "$file"; }
-    start=${EPOCHREALTIME/./}; run; first=$(( ${EPOCHREALTIME/./} - start ))
-    start=${EPOCHREALTIME/./}; for (( n = 0; n < 100; n++ )); do run; done; rest=$(( (${EPOCHREALTIME/./} - start) / 100 ))
-    rm -f -- "$file"
-    printf "%s %s\n" "$first" "$rest"' >"$WORK/connect-script.txt"
-read -r first rest <"$WORK/connect-script.txt"
-record connect-script "one run of the client-connect script" "$first" 1
-record connect-script-mean "one run of the client-connect script, the average of 100" "$rest" 100
-wait_queue_empty 120
+if [[ $PART == crl ]]; then
+    record events-written "$CONNECTED connection events written by the client-connect script" "$written" 1
+    record events-applied "$CONNECTED connection events after a restart, from the first written to all applied" "$took" 1
+    # The worker alone, on 253 events already waiting in the queue: the path unit, and the five-minute check that
+    # also takes what is left there, stay off meanwhile.
+    systemctl stop darban-events.path darban-sweep.timer
+    start=$(now_us)
+    write_events 1
+    measure events-worker "darban events applying $CONNECTED waiting events" 1 'darban events'
+    queue_empty || { echo 'FAIL: darban events left events in the queue.'; exit 1; }
+    ledger_after "$start" 1
+    systemctl start darban-events.path darban-sweep.timer
 
-# ---------- the menu, the list and the diagnostics ----------
-# The menu in a real terminal: from starting darban until it asks "Choose [0-9]", then 0 to leave.
-menu_open() {
-    local took
-    took=$(SCREEN_LOG=$WORK/menu.screen python3 tests/time-to-text.py "$LIMIT" 'Choose [0-9]' '0\r' -- darban) || return 1
-    printf '%s\n' "$took" >"$WORK/menu.seconds"
-}
-runs=()
-for run in 1 2 3; do
-    menu_open || { echo 'FAIL: the menu did not open.'; tail -n 30 "$WORK/menu.screen"; exit 1; }
-    us=$(awk '{printf "%d", $1 * 1000000}' "$WORK/menu.seconds")
-    runs+=("$us")
-    (( us < 20000000 )) || break
-done
-record menu "open the menu, until it asks \"Choose [0-9]\"" "$(median "${runs[@]}")" "${#runs[@]}"
-measure list 'darban list' 3 'darban list'
-# The fake clients are what the tool sees: the list counts them, and the diagnostics, which fail on any problem, pass.
-grep "$CLIENTS valid" "$WORK/list.1.log" >/dev/null || { tail -n 5 "$WORK/list.1.log"; echo "FAIL: the list does not show $CLIENTS valid clients."; exit 1; }
-grep "$revoked revoked" "$WORK/list.1.log" >/dev/null || { tail -n 5 "$WORK/list.1.log"; echo "FAIL: the list does not show $revoked revoked clients."; exit 1; }
-measure status 'darban status' 3 'darban status'
-echo "PASS: the list shows $CLIENTS valid and $revoked revoked clients, and the diagnostics pass."
+    # One run of the client-connect script, as OpenVPN runs it, as its own user, timed inside that user's shell
+    # so starting runuser does not count: the first run, and the average of 100 more.
+    runuser -u nobody -- env -i PATH=/usr/bin:/bin SCRIPT="$EVENT_SCRIPT" LIST="$SHARED/connections" bash -c '
+        read -r name serial <"$LIST"
+        file=$(mktemp)
+        run() { script_type=client-connect common_name=$name trusted_ip=198.51.100.7 tls_serial_hex_0=$serial IV_VER=2.6.12 IV_PLAT=linux "$SCRIPT" "$file"; }
+        start=${EPOCHREALTIME/./}; run; first=$(( ${EPOCHREALTIME/./} - start ))
+        start=${EPOCHREALTIME/./}; for (( n = 0; n < 100; n++ )); do run; done; rest=$(( (${EPOCHREALTIME/./} - start) / 100 ))
+        rm -f -- "$file"
+        printf "%s %s\n" "$first" "$rest"' >"$WORK/connect-script.txt"
+    read -r first rest <"$WORK/connect-script.txt"
+    record connect-script "one run of the client-connect script" "$first" 1
+    record connect-script-mean "one run of the client-connect script, the average of 100" "$rest" 100
+    wait_queue_empty 120
+fi
 
-# ---------- one more client ----------
-# From a script, as tests/vm-reboot.sh creates one: the menu opens, takes the name, and closes.
-measure create 'create one client, from opening the menu to leaving it' 1 "printf '1\\nscale-new\\n0\\n' | darban"
-[[ -s /root/openvpn-clients/scale-new.ovpn ]] || { echo 'FAIL: the new client has no profile.'; exit 1; }
-# Read from the index itself: another darban list would take minutes and measure nothing.
-valid=$(awk -F '\t' '$1 == "V" && $6 ~ /\/CN=scale-/ {n++} $1 == "V" && $6 ~ /\/CN=scale-new$/ {new++} END {printf "%d %d\n", n, new}' "$PKI/index.txt")
-[[ $valid == "$(( CLIENTS + 1 )) 1" ]] || { echo "FAIL: index.txt has valid clients and rows of scale-new: $valid, not $(( CLIENTS + 1 )) 1."; exit 1; }
-echo 'PASS: every measurement ran.'
+# ---------- the menu, and one more client ----------
+if [[ $PART == menu ]]; then
+    runs=()
+    for run in 1 2 3; do
+        menu_open || { echo 'FAIL: the menu did not open.'; tail -n 30 "$WORK/menu.screen"; exit 1; }
+        us=$(awk '{printf "%d", $1 * 1000000}' "$WORK/menu.seconds")
+        runs+=("$us")
+        (( us < 20000000 )) || break
+    done
+    record menu "open the menu, until it asks \"Choose [0-9]\"" "$(median "${runs[@]}")" "${#runs[@]}"
+    # From a script, as tests/vm-reboot.sh creates one: the menu opens, takes the name, and closes.
+    measure create 'create one client, from opening the menu to leaving it' 1 "printf '1\\nscale-new\\n0\\n' | darban"
+    [[ -s /root/openvpn-clients/scale-new.ovpn ]] || { echo 'FAIL: the new client has no profile.'; exit 1; }
+    # Read from the index itself: a darban list would take minutes and measure nothing.
+    valid=$(awk -F '\t' '$1 == "V" && $6 ~ /\/CN=scale-/ {n++} $1 == "V" && $6 ~ /\/CN=scale-new$/ {new++} END {printf "%d %d\n", n, new}' "$PKI/index.txt")
+    [[ $valid == "$(( CLIENTS + 1 )) 1" ]] || { echo "FAIL: index.txt has valid clients and rows of scale-new: $valid, not $(( CLIENTS + 1 )) 1."; exit 1; }
+fi
+
+# ---------- the list and the diagnostics ----------
+if [[ $PART == commands ]]; then
+    measure list 'darban list' 3 'darban list'
+    # The fake clients are what the tool sees: the list counts them, and the diagnostics, which fail on any problem, pass.
+    grep "$CLIENTS valid" "$WORK/list.1.log" >/dev/null || { tail -n 5 "$WORK/list.1.log"; echo "FAIL: the list does not show $CLIENTS valid clients."; exit 1; }
+    grep "$revoked revoked" "$WORK/list.1.log" >/dev/null || { tail -n 5 "$WORK/list.1.log"; echo "FAIL: the list does not show $revoked revoked clients."; exit 1; }
+    measure status 'darban status' 3 'darban status'
+    echo "PASS: the list shows $CLIENTS valid and $revoked revoked clients, and the diagnostics pass."
+fi
+echo "PASS: every measurement of the $PART part ran."

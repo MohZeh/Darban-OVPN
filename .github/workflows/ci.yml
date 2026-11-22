@@ -269,11 +269,13 @@ jobs:
 
   # How long the everyday commands take with many clients: the real setup, then the real CA filled to 10,000 rows,
   # with 253 valid clients (a full /24 VPN network) or 1000. The times go to the summary and to an artifact, so a
-  # later change is judged by numbers. Nothing here fails on a slow time; a command that fails does. A runner takes
-  # about 20 minutes, so not on every pull request: only one labelled scale, the weekly run of main, and a manual run
-  # with scale. A label added later counts from the next push.
+  # later change is judged by numbers. Nothing here fails on a slow time; a command that fails does. The measurements
+  # come in three parts, each on a runner of its own after the same setup and data: the list and the diagnostics,
+  # the menu and a new client, and the CRL with the connection events. A part takes up to about 10 minutes, so not on
+  # every pull request: only one labelled scale, the weekly run of main, and a manual run with scale. A label added
+  # later counts from the next push.
   scale:
-    name: Scale (Ubuntu ${{ matrix.ubuntu }}, ${{ matrix.clients }} clients)
+    name: Scale (Ubuntu ${{ matrix.ubuntu }}, ${{ matrix.clients }} clients, ${{ matrix.part }})
     needs: lint
     if: inputs.scale || (needs.lint.outputs.code == 'true' && (github.event_name == 'schedule' || contains(github.event.pull_request.labels.*.name, 'scale')))
     strategy:
@@ -281,6 +283,7 @@ jobs:
       matrix:
         ubuntu: ['24.04', '26.04']
         clients: [253, 1000]
+        part: [commands, menu, crl]
     runs-on: ubuntu-${{ matrix.ubuntu }}
     timeout-minutes: 60
     steps:
@@ -299,15 +302,16 @@ jobs:
           echo "Ubuntu $VERSION_ID, kernel $(uname -r), $(nproc) CPUs" >> "$GITHUB_STEP_SUMMARY"
       - name: The runner must not already have a PKI or server
         run: sudo test ! -e /root/pki && test ! -e /etc/openvpn/server/server.conf
-      - name: Real setup, ${{ matrix.clients }} clients, and the times
+      - name: Real setup, ${{ matrix.clients }} clients, and the times of ${{ matrix.part }}
         env:
           CLIENTS: ${{ matrix.clients }}
-        run: sudo GITHUB_STEP_SUMMARY="$GITHUB_STEP_SUMMARY" bash tests/scale-ci.sh --i-know "$CLIENTS" "$RUNNER_TEMP/scale"
+          PART: ${{ matrix.part }}
+        run: sudo GITHUB_STEP_SUMMARY="$GITHUB_STEP_SUMMARY" bash tests/scale-ci.sh --i-know "$CLIENTS" "$PART" "$RUNNER_TEMP/scale"
       - name: Keep the times
         if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: scale-${{ matrix.ubuntu }}-${{ matrix.clients }}-clients
+          name: scale-${{ matrix.ubuntu }}-${{ matrix.clients }}-clients-${{ matrix.part }}
           path: ${{ runner.temp }}/scale/scale.tsv
           if-no-files-found: ignore
           retention-days: 90
