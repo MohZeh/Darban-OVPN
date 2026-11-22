@@ -17,6 +17,8 @@ PKI=/root/pki
 EASYRSA_BIN=/usr/share/easy-rsa/easyrsa
 SERVER_DIR=/etc/openvpn/server
 CONFIG_DIR=/etc/darban
+# The TCP MSS of the NAT rules comes from the tool's config file there, when one is kept from before.
+DARBAN_CONFIG=$CONFIG_DIR/config
 APT_KEY=/etc/apt/keyrings/openvpn-repo-public.asc
 APT_LIST=/etc/apt/sources.list.d/openvpn-aptrepo.list
 SYSCTL_FILE=/etc/sysctl.d/99-darban.conf

@@ -63,8 +63,14 @@ cp /root/openvpn-clients/up2.ovpn "$LOG/up2.ovpn"
 echo "PASS: $RC from its release sets up the server, and a client connects."
 
 # E11: updating turns connection events on, with one restart of OpenVPN, and a link then ends by the event.
+grep 'maxseg size set 1280' /etc/darban/nat.nft >/dev/null
 start=$(date +%s); sleep 1
 bash setup/install.sh | tee "$LOG/upgrade.log"
+# rc.10, like v1.0.1, limits TCP MSS to 1280; the update moves every rule to 1330, the default now.
+grep 'TCP MSS for VPN traffic is limited to 1330\.$' "$LOG/upgrade.log" >/dev/null
+[[ $(grep -c -F 'tcp option maxseg size > 1330 tcp option maxseg size set 1330' /etc/darban/nat.nft) == 4 ]]
+if grep 'maxseg size set 1280' /etc/darban/nat.nft >/dev/null; then echo 'FAIL: the update left a TCP MSS rule of 1280.'; exit 1; fi
+nft list chain ip darban forward | grep 'maxseg size set 1330' >/dev/null
 grep 'Turning on connection events: OpenVPN restarts once' "$LOG/upgrade.log" >/dev/null
 grep 'Connection events are on: a link now ends at the first connection' "$LOG/upgrade.log" >/dev/null
 grep -qx "client-connect $EVENT_SCRIPT" "$CONF"

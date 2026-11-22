@@ -37,6 +37,9 @@ age-keygen -o "$LOG/owner.key" 2>/dev/null
 recipient=$(age-keygen -y "$LOG/owner.key")
 for name in a1 b1; do printf '1\n%s\n0\n' "$name" | darban >/dev/null; cp "$KEPT/$name.ovpn" "$LOG/$name.ovpn"; done
 printf '4\nb1\nb1\n0\n' | darban >/dev/null
+# A TCP MSS set in Settings > Advanced goes into the backup with the tool's settings.
+printf '7\n6\n9\n1400\n0\n0\n0\n' | darban >/dev/null
+grep -qx 'TCP_MSS=1400' /etc/darban/config
 
 # D5: Backup now with the owner's public key. The server encrypts it, and only the owner's key opens it.
 printf '8\n4\n%s\n0\n0\n' "$recipient" | darban | tee "$LOG/backup.log"
@@ -123,6 +126,7 @@ bash /usr/local/lib/darban/remove-server.sh --yes >"$LOG/remove.log" 2>&1
 bash setup/server-setup.sh --yes --host 127.0.0.1 --port 1194 >"$LOG/setup2.log" 2>&1
 bash setup/install.sh >"$LOG/install2.log" 2>&1
 [[ $(fingerprint) != "$fp" ]]
+[[ $(grep -c -F 'tcp option maxseg size > 1330 tcp option maxseg size set 1330' /etc/darban/nat.nft) == 4 ]]
 if connect "$LOG/a1.ovpn" "$LOG/before-restore.log"; then echo 'FAIL: a profile of the old CA connected to the new one.'; exit 1; fi
 disconnect
 host=$(hostname -s | tr -cd 'A-Za-z0-9.-')
@@ -137,6 +141,12 @@ grep -qx "client-connect /usr/local/libexec/darban-ovpn-event" "$CONF"
 connect "$LOG/a1.ovpn" "$LOG/after-restore.log"
 disconnect
 echo 'PASS: on a new server, the backup comes back, and a profile made before connects.'
+grep -qx 'TCP_MSS=1400' /etc/darban/config
+[[ $(grep -c -F 'tcp option maxseg size > 1400 tcp option maxseg size set 1400' /etc/darban/nat.nft) == 4 ]]
+nft list chain ip darban forward | grep 'maxseg size set 1400' >/dev/null
+darban status >"$LOG/mss-status.log" 2>&1 || true
+grep 'TCP MSS for VPN traffic is limited to 1400 in both directions' "$LOG/mss-status.log" >/dev/null
+echo 'PASS: the TCP MSS set before the backup comes back with it, in the NAT rules too, and Diagnostics report it.'
 if connect "$LOG/b1.ovpn" "$LOG/revoked.log"; then echo 'FAIL: a client revoked before the backup connected.'; exit 1; fi
 disconnect
 journalctl -u "$UNIT" --since '-60s' --no-pager | grep -i 'certificate revoked' >/dev/null

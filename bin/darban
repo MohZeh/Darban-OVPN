@@ -75,6 +75,8 @@ LE_DIR=/etc/letsencrypt
 # Each link certificate Let's Encrypt issued here, so the weekly limit is known before asking. Kept with it.
 LINK_CERT_LOG=/var/lib/darban/link-certificates.log
 CONFIG_FILE=$CONFIG_DIR/config
+# lib/common.sh reads the TCP MSS of the NAT rules from it.
+DARBAN_CONFIG=$CONFIG_FILE
 # Blocked destinations: what NAT loads (lib/common.sh reads it), and the folder of the last good list of each country,
 # <code>.v4, with its date and size in <code>.info.
 DARBAN_BLOCKED=$CONFIG_DIR/blocked.v4
@@ -153,6 +155,9 @@ DNS_DNSSEC=yes
 NAME_LISTS=''
 NAMES_BLOCK=''
 NAMES_ALLOW=''
+# The largest TCP segment through the VPN, from Settings > Advanced; empty means the default of lib/common.sh. The
+# NAT rules read it from the file themselves (darban_mss), so the installer and a restore take it too.
+TCP_MSS=''
 CONFIG_ISSUES=()
 # Normalized serial of the certificate OpenVPN serves; never listed, exported or revoked.
 SERVER_SERIAL=''
@@ -256,6 +261,7 @@ load_config() {
     DOWNLOAD_SSH_HOST='' DOWNLOAD_SSH_PORT=22 DOWNLOAD_SSH_USER=root CLIENT_CERT_DAYS='' LINK_PORT='' LINK_HOURS=''
     UPDATE_CHECK=yes SHARE_ID_IN_PROFILE=no BLOCK_COUNTRIES='' BLOCK_EXTRA='' COUNTRY_DIRECT=no
     DNS_SERVER=no DNS_UPSTREAM='' DNS_TLS=no DNS_FORCE=yes DNS_DNSSEC=yes NAME_LISTS='' NAMES_BLOCK='' NAMES_ALLOW=''
+    TCP_MSS=''
     CONFIG_ISSUES=()
     [[ -f $CONFIG_FILE ]] || { CONFIG_ISSUES+=("$CONFIG_FILE is missing; download commands are disabled."); return 0; }
     # Parsed as data, never sourced.
@@ -282,6 +288,7 @@ load_config() {
             NAME_LISTS) NAME_LISTS=$value ;;
             NAMES_BLOCK) NAMES_BLOCK=$value ;;
             NAMES_ALLOW) NAMES_ALLOW=$value ;;
+            TCP_MSS) TCP_MSS=$value ;;
             IRAN_DIRECT) old_direct=$value ;;
             *) CONFIG_ISSUES+=("Unknown setting ignored in $CONFIG_FILE: $key") ;;
         esac
@@ -341,6 +348,10 @@ load_config() {
     if [[ -n $BLOCK_EXTRA && ! $BLOCK_EXTRA =~ ^([0-9]{1,3}(\.[0-9]{1,3}){3}/[0-9]{1,2})(\ [0-9]{1,3}(\.[0-9]{1,3}){3}/[0-9]{1,2})*$ ]]; then
         CONFIG_ISSUES+=("Invalid BLOCK_EXTRA in $CONFIG_FILE; it is not used."); BLOCK_EXTRA=''
     fi
+    if [[ -n $TCP_MSS ]] && ! darban_valid_mss "$TCP_MSS"; then
+        CONFIG_ISSUES+=("Invalid TCP_MSS in $CONFIG_FILE; using $DARBAN_MSS_DEFAULT."); TCP_MSS=''
+    fi
+    if [[ -n $TCP_MSS ]]; then TCP_MSS=$((10#$TCP_MSS)); fi
     if [[ -z $DOWNLOAD_SSH_HOST ]] && (( ${#CONFIG_ISSUES[@]} == 0 )); then
         CONFIG_ISSUES+=("DOWNLOAD_SSH_HOST is not set in $CONFIG_FILE; download commands are disabled.")
     fi
@@ -4213,6 +4224,61 @@ set_verb() {
     conf_set_directive verb "$value" "$CONF_TEMP"
     conf_apply "log detail $value" "$CONF_TEMP"
 }
+mss_label() { if [[ -z $TCP_MSS ]]; then printf '%s, the default' "$DARBAN_MSS_DEFAULT"; else printf '%s' "$TCP_MSS"; fi; }
+valid_mss_answer() { [[ $1 == 0 ]] || darban_valid_mss "$1"; }
+mss_apply() {
+    # mss_apply <value, or empty for the default>: NAT written with that TCP MSS, checked by nft, the setting saved,
+    # and the rules loaded in one transaction. When anything fails, the rules, the file and the setting stay as they
+    # were. Needs the lock.
+    local nat=$CONFIG_DIR/nat.nft net iface nat_new nat_old old=$TCP_MSS
+    if [[ ! -f $nat ]]; then
+        fail 'NAT on this server was not set up by this tool, so it has no TCP MSS rule to change. Nothing was changed.'
+        return 1
+    fi
+    net=$(darban_conf_net)
+    iface=$(darban_nat_iface "$nat" 2>/dev/null) || iface=''
+    if ! valid_ipv4 "${net:-}" || [[ ! $iface =~ ^[A-Za-z0-9_.@-]+$ ]]; then
+        fail 'server.conf has no single /24 VPN network, or NAT names no outgoing interface. Nothing was changed.'
+        return 1
+    fi
+    nat_new=$(mktemp "$CONFIG_DIR/.nat.XXXXXXXX") || return 1
+    darban_tmp_register "$nat_new"
+    nat_old=$(mktemp) || return 1
+    darban_tmp_register "$nat_old"
+    DARBAN_MSS=${1:-$DARBAN_MSS_DEFAULT} darban_nat_rules "$net" "$iface" >"$nat_new" && chmod 600 "$nat_new" || return 1
+    if ! nft -c -f "$nat_new" >/dev/null 2>&1; then fail 'nft refused the new rules. Nothing was changed.'; return 1; fi
+    cp -a -- "$nat" "$nat_old" || return 1
+    TCP_MSS=$1
+    if ! save_config; then TCP_MSS=$old; fail 'The setting could not be saved. Nothing was changed.'; return 1; fi
+    critical_begin
+    mv -f -- "$nat_new" "$nat"
+    if ! nft -f "$nat" >/dev/null 2>&1; then
+        cp -a -- "$nat_old" "$nat" || true
+        nft -f "$nat" >/dev/null 2>&1 || urgent 'Could not load the previous NAT rules again. Check: nft list ruleset'
+        TCP_MSS=$old
+        save_config || urgent "Could not put TCP_MSS in $CONFIG_FILE back. Check it."
+        critical_end
+        fail 'The new rules did not load. Nothing was changed.'
+        return 1
+    fi
+    critical_end
+}
+set_tcp_mss() {
+    local value
+    kv Current "$(mss_label)"
+    info "The largest piece of data in one TCP packet through the VPN, so the packet fits the tunnel and is never split: many mobile and home networks drop split packets, and then websites do not open while apps still work. $DARBAN_MSS_DEFAULT suits most networks. Lower it, for example to 1280 or 1200, only when websites still do not open on some network. No restart is needed."
+    say
+    prompt_valid "TCP MSS, $DARBAN_MSS_MIN to $DARBAN_MSS_MAX; 0 = the default, $DARBAN_MSS_DEFAULT (Enter = cancel): " valid_mss_answer \
+        "Enter a whole number from $DARBAN_MSS_MIN to $DARBAN_MSS_MAX, or 0 for the default." || return 0
+    value=''
+    if [[ $REPLY != 0 ]]; then value=$((10#$REPLY)); fi
+    if [[ $value == "$DARBAN_MSS_DEFAULT" ]]; then value=''; fi
+    if [[ $value == "$TCP_MSS" ]]; then info 'Same as the current TCP MSS; nothing changed.'; return 0; fi
+    ca_lock || return 1
+    mss_apply "$value" || return 1
+    audit "TCP MSS changed: ${value:-default $DARBAN_MSS_DEFAULT}"
+    saved "TCP MSS $(mss_label)" 'at once, to new TCP connections'
+}
 save_config() {
     # Unknown lines are kept; only the settings this tool owns are rewritten.
     local temp held=$CA_LOCKED
@@ -4220,7 +4286,7 @@ save_config() {
     temp=$(mktemp "$CONFIG_DIR/.config.XXXXXXXX") || return 1
     darban_tmp_register "$temp"
     if [[ -f $CONFIG_FILE ]]; then
-        awk -F= '$1!="DOWNLOAD_SSH_HOST" && $1!="DOWNLOAD_SSH_PORT" && $1!="DOWNLOAD_SSH_USER" && $1!="CLIENT_CERT_DAYS" && $1!="LINK_PORT" && $1!="LINK_HOURS" && $1!="UPDATE_CHECK" && $1!="BLOCK_IRAN" && $1!="BLOCK_EXTRA" && $1!="IRAN_DIRECT" && $1!="BLOCK_COUNTRIES" && $1!="COUNTRY_DIRECT" && $1!="DNS_SERVER" && $1!="DNS_UPSTREAM" && $1!="DNS_TLS" && $1!="DNS_FORCE" && $1!="DNS_DNSSEC" && $1!="NAME_LISTS" && $1!="NAMES_BLOCK" && $1!="NAMES_ALLOW"' "$CONFIG_FILE" >"$temp" || return 1
+        awk -F= '$1!="DOWNLOAD_SSH_HOST" && $1!="DOWNLOAD_SSH_PORT" && $1!="DOWNLOAD_SSH_USER" && $1!="CLIENT_CERT_DAYS" && $1!="LINK_PORT" && $1!="LINK_HOURS" && $1!="UPDATE_CHECK" && $1!="BLOCK_IRAN" && $1!="BLOCK_EXTRA" && $1!="IRAN_DIRECT" && $1!="BLOCK_COUNTRIES" && $1!="COUNTRY_DIRECT" && $1!="DNS_SERVER" && $1!="DNS_UPSTREAM" && $1!="DNS_TLS" && $1!="DNS_FORCE" && $1!="DNS_DNSSEC" && $1!="NAME_LISTS" && $1!="NAMES_BLOCK" && $1!="NAMES_ALLOW" && $1!="TCP_MSS"' "$CONFIG_FILE" >"$temp" || return 1
     fi
     printf 'DOWNLOAD_SSH_HOST=%s\nDOWNLOAD_SSH_PORT=%s\nDOWNLOAD_SSH_USER=%s\n' "$DOWNLOAD_SSH_HOST" "$DOWNLOAD_SSH_PORT" "$DOWNLOAD_SSH_USER" >>"$temp" || return 1
     if [[ -n $CLIENT_CERT_DAYS ]]; then printf 'CLIENT_CERT_DAYS=%s\n' "$CLIENT_CERT_DAYS" >>"$temp" || return 1; fi
@@ -4238,6 +4304,11 @@ save_config() {
     if [[ -n $NAME_LISTS ]]; then printf 'NAME_LISTS=%s\n' "$NAME_LISTS" >>"$temp" || return 1; fi
     if [[ -n $NAMES_BLOCK ]]; then printf 'NAMES_BLOCK=%s\n' "$NAMES_BLOCK" >>"$temp" || return 1; fi
     if [[ -n $NAMES_ALLOW ]]; then printf 'NAMES_ALLOW=%s\n' "$NAMES_ALLOW" >>"$temp" || return 1; fi
+    # Only a checked whole number reaches the file, and from there the NAT rules.
+    if [[ -n $TCP_MSS ]]; then
+        darban_valid_mss "$TCP_MSS" || return 1
+        printf 'TCP_MSS=%d\n' "$((10#$TCP_MSS))" >>"$temp" || return 1
+    fi
     chmod 600 "$temp" && mv -f -- "$temp" "$CONFIG_FILE" || return 1
     if (( ! held )); then ca_unlock; fi
 }
@@ -4737,7 +4808,7 @@ check_expiry() {
 }
 network_rules_health() {
     # What the kernel runs now is checked, not what a file says: a flushed chain or an old network must not pass.
-    local net nat=$CONFIG_DIR/nat.nft fix reinstall live_iface route_iface
+    local net nat=$CONFIG_DIR/nat.nft fix reinstall live_iface route_iface mss
     if ! nft list table ip darban >/dev/null 2>&1; then
         if [[ -f $nat ]]; then
             check bad "The NAT rules of this tool are not loaded $S_ARROW sudo systemctl restart darban-nat.service"
@@ -4784,10 +4855,11 @@ network_rules_health() {
     else
         check bad "VPN clients may reach each other, or the cloud metadata service $S_ARROW $fix"
     fi
+    mss=$(darban_mss)
     if darban_live_mss_ok "$net"; then
-        check ok "TCP MSS for VPN traffic is limited to $DARBAN_MSS in both directions"
+        check ok "TCP MSS for VPN traffic is limited to $mss in both directions"
     else
-        check warn "The TCP MSS rule for VPN traffic is missing or different; on some networks websites may not load $S_ARROW $reinstall"
+        check warn "The TCP MSS rule for VPN traffic is missing or different from the configured $mss; on some networks websites may not load $S_ARROW $reinstall"
     fi
     blocked_health "$net"
     dns_server_health "$net"
@@ -5075,6 +5147,8 @@ draw_advanced() {
     menu_group CLIENTS
     menu_item 7 "$(printf '%-24s %s' 'New client lifetime' "$days")"
     menu_item 8 "$(printf '%-24s %s' 'Download access' "$download")"
+    menu_group TRAFFIC
+    menu_item 9 "$(printf '%-24s %s' 'TCP MSS' "$(mss_label)")"
     menu_item 0 'Back'
     hr
     printf ' %s* restarts OpenVPN: connected users drop for a few seconds; a change that fails is rolled back.%s\n' "$C_DIM" "$C_RESET" || true
@@ -5084,7 +5158,7 @@ advanced_menu() {
     while :; do
         if (( redraw )); then draw_advanced || true; fi
         redraw=1
-        ask 'Choose [0-8, Enter = back]: ' || return 0
+        ask 'Choose [0-9, Enter = back]: ' || return 0
         case $REPLY in
             1) menu_action 'Traffic routing' set_routing ;;
             2) menu_action 'DNS for clients' set_dns ;;
@@ -5094,8 +5168,9 @@ advanced_menu() {
             6) menu_action 'Log detail' set_verb ;;
             7) menu_action 'New client lifetime' set_client_days ;;
             8) menu_action 'Download access' set_download_access ;;
+            9) menu_action 'TCP MSS' set_tcp_mss ;;
             0|'') return 0 ;;
-            *) warn "Unknown option \"$REPLY\". Enter a number from 0 to 8."; redraw=0 ;;
+            *) warn "Unknown option \"$REPLY\". Enter a number from 0 to 9."; redraw=0 ;;
         esac
     done
 }
