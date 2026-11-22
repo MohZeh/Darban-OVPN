@@ -240,7 +240,14 @@ fi
 # OpenVPN restarts, and its 253 clients connect again: each connection leaves an event, and the path unit starts
 # the worker that applies them. Measured from the first event written until the queue is empty and every client
 # record has its connection. Every part does this, so the client records hold real connections; only the crl part
-# records its times.
+# records its times. The five-minute check also applies the queue, and when it runs beside the path unit's worker,
+# one of them can find an event the other just applied and deleted, and set it aside as unreadable: it stays off
+# meanwhile, so the numbers are those of the worker alone and bad/ stays empty.
+systemctl stop darban-sweep.timer
+for attempt in $(seq 1 60); do
+    if ! systemctl is-active --quiet darban-sweep.service; then break; fi
+    sleep 1
+done
 systemctl restart "$UNIT"
 for attempt in $(seq 1 30); do
     if darban connected >/dev/null 2>&1; then break; fi
@@ -254,20 +261,20 @@ written=$(( $(now_us) - start ))
 wait_queue_empty 600
 took=$(( $(now_us) - start ))
 ledger_after "$start" 1
-[[ -z $(ls -A "$EVENTS/bad") ]] || { ls -la "$EVENTS/bad"; echo 'FAIL: connection events were set aside as malformed.'; exit 1; }
+[[ -z $(ls -A "$EVENTS/bad") ]] || { cat "$EVENTS"/bad/*.why | sort | uniq -c; echo 'FAIL: connection events were set aside as malformed.'; exit 1; }
 
 if [[ $PART == crl ]]; then
     record events-written "$CONNECTED connection events written by the client-connect script" "$written" 1
     record events-applied "$CONNECTED connection events after a restart, from the first written to all applied" "$took" 1
-    # The worker alone, on 253 events already waiting in the queue: the path unit, and the five-minute check that
-    # also takes what is left there, stay off meanwhile.
-    systemctl stop darban-events.path darban-sweep.timer
+    # The worker alone, on 253 events already waiting in the queue: the path unit stays off meanwhile, as the
+    # five-minute check still does.
+    systemctl stop darban-events.path
     start=$(now_us)
     write_events 1
     measure events-worker "darban events applying $CONNECTED waiting events" 1 'darban events'
     queue_empty || { echo 'FAIL: darban events left events in the queue.'; exit 1; }
     ledger_after "$start" 1
-    systemctl start darban-events.path darban-sweep.timer
+    systemctl start darban-events.path
 
     # One run of the client-connect script, as OpenVPN runs it, as its own user, timed inside that user's shell
     # so starting runuser does not count: the first run, and the average of 100 more.
@@ -284,6 +291,7 @@ if [[ $PART == crl ]]; then
     record connect-script-mean "one run of the client-connect script, the average of 100" "$rest" 100
     wait_queue_empty 120
 fi
+systemctl start darban-sweep.timer
 
 # ---------- the menu, and one more client ----------
 if [[ $PART == menu ]]; then
