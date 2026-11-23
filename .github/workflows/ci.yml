@@ -92,6 +92,12 @@ jobs:
         env:
           BASE: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before }}
         run: python3 scripts/check-stale-strings.py "$BASE"
+      # A refactor, by its title, moves code and keeps every function: the set is compared with the base.
+      - name: A refactor keeps the same functions
+        env:
+          BASE: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before }}
+          TITLE: ${{ github.event_name == 'pull_request' && github.event.pull_request.title || github.event.head_commit.message }}
+        run: python3 scripts/check-modules.py "$BASE"
       - name: Workflows (actionlint)
         env:
           VERSION: 1.7.12

@@ -206,7 +206,7 @@ def main():
 
     problems += setup_problems(root, setup_items(root))
     problems += parity_problems(root, guides['en'] & guides['fa'])
-    shell = [p for p in tracked if re.fullmatch(r'(bin/[^/]+|lib/[^/]+\.sh|setup/[^/]+\.sh)', p) and (root / p).is_file()
+    shell = [p for p in tracked if re.fullmatch(r'(bin/[^/]+|lib/(?:darban/(?:.+/)?)?[^/]+\.sh|setup/[^/]+\.sh)', p) and (root / p).is_file()
              and (p.endswith('.sh') or 'bash' in (root / p).read_text(encoding='utf-8', errors='replace').split('\n', 1)[0])]
     problems += subshell_global_problems(root, shell)
 

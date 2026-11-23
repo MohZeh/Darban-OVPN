@@ -3,9 +3,15 @@
 set -Eeuo pipefail
 cd -- "$(git -C "$(dirname -- "${BASH_SOURCE[0]}")" rev-parse --show-toplevel)"
 
-mapfile -t scripts < <(git ls-files 'setup/*.sh' 'bin/*' 'lib/*.sh' 'scripts/*.sh' 'tests/*.sh' 'docs/assets/*.sh')
+mapfile -t scripts < <(git ls-files 'setup/*.sh' 'bin/*' 'lib/*.sh' 'scripts/*.sh' 'tests/*.sh' 'docs/assets/*.sh' | grep -v '^lib/darban/')
 shellcheck --severity=warning "${scripts[@]}"
-printf 'ShellCheck: %d files clean.\n' "${#scripts[@]}"
+# The modules in lib/darban are parts of bin/darban, which sources them all, yet ShellCheck reads each file alone. So
+# for them only, it is not told what only the whole program can know: a function whose callers, with or without
+# arguments, are in another file (SC2120), and a variable assigned in another file (SC2154). SC2034, a variable used
+# in another file, is off for every file in .shellcheckrc. Everything else is checked as in the other files.
+mapfile -t modules < <(git ls-files 'lib/darban/*.sh')
+shellcheck --severity=warning --exclude=SC2120,SC2154 "${modules[@]}"
+printf 'ShellCheck: %d files and %d modules clean.\n' "${#scripts[@]}" "${#modules[@]}"
 # Every Python file compiles, read only: no __pycache__ is written.
 git ls-files -z '*.py' | python3 -c '
 import sys
@@ -16,6 +22,8 @@ for f in files:
 print(f"Python: {len(files)} files compile.")
 '
 python3 scripts/check-repo.py
+# How bin/darban sources its modules, and no function twice. CI also compares a refactor with its base.
+python3 scripts/check-modules.py
 # The suite's runner fails when its filter matches no test, so a mistyped name never passes with nothing run. This
 # ends before any test starts.
 if bash tests/run-tests.sh no_test_has_this_name >/dev/null 2>&1; then echo 'run-tests.sh passed a filter that matched no test' >&2; exit 1; fi
