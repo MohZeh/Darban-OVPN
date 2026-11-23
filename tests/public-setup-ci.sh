@@ -26,7 +26,8 @@ snap_retry_lines() {
     # "retry, then certbot installed" or "retry, still failed". Call it right after the setup. Never fails.
     local lines result='no retry'
     lines=$(grep -E 'trying once more|still installing certbot|snapd does not answer' /var/log/darban-setup.log 2>/dev/null || true)
-    if grep -qE 'trying once more|still installing certbot' <<<"$lines"; then
+    # Only "trying once more" is the second try; waiting for snapd to finish the first one is not.
+    if grep -q 'trying once more' <<<"$lines"; then
         if [[ -x /snap/bin/certbot ]]; then result='retry, then certbot installed'; else result='retry, still failed'; fi
     fi
     printf 'Snap retry: %s\n%s\n' "$result" "$lines" || true
