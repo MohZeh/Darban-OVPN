@@ -5266,6 +5266,33 @@ test_workers_take_turns_on_the_real_lock() {
     ok_if 'and none waits for the lock' test -z "$(find "$E/events/work" -name '*.next')"
 }
 
+test_one_worker_at_a_time() {
+    # While a worker holds the queue, another run reads none of it: an entry the worker took is neither set aside as
+    # unreadable when that worker deletes it, nor applied twice. The sweep goes on without the queue; darban events
+    # waits for the worker, then takes what is left.
+    local waited=0
+    events_here
+    real_flock
+    raw_event taken connect alice 5; mv "$E/events/new/taken" "$E/events/work/other-1"
+    raw_event q1 connect queued1 11; raw_event q2 connect queued2 12; raw_event q3 connect queued3 13
+    ( /usr/bin/flock 7; : > "$E/held"; while [[ -e $E/held ]]; do sleep 0.1; done ) 7>>"$E/events/.worker.lock" &
+    while [[ ! -e $E/held ]] && (( waited < 100 )); do sleep 0.1; waited=$((waited + 1)); done
+    : > "$STUB_LOG"
+    env PATH="$E/realflock:$PATH" bash "$E/manager.sh" sweep </dev/null >/dev/null 2>&1
+    ok_if 'the sweep leaves the entry the worker took' test -e "$E/events/work/other-1"
+    ok_if 'and what waits in new/' test -e "$E/events/new/q1"
+    ok_if 'and applies none of them' test -z "$(find "$E/varlib/clients" -name alice -o -name 'queued*' 2>/dev/null)"
+    ok_if 'and sets none aside' test -z "$(ls -A "$E/events/bad")"
+    grep -q 'set aside as malformed' "$STUB_LOG"; rc_is 'nor says so in the journal' 1 "$?"
+    ( sleep 1; rm -f "$E/held" ) &
+    env PATH="$E/realflock:$PATH" bash "$E/manager.sh" events </dev/null >/dev/null 2>&1
+    wait
+    ok_if 'darban events waits for the worker, then applies what is left' test -s "$E/varlib/clients/alice"
+    [[ $(find "$E/varlib/clients" -name 'queued*' | wc -l) == 3 ]]; rc_is 'every entry of it' 0 "$?"
+    ok_if 'and nothing is left' test -z "$(queue_left)"
+    ok_if 'and none is set aside' test -z "$(ls -A "$E/events/bad")"
+}
+
 test_an_event_never_ends_a_link_it_cannot_identify() {
     # C.12.4 and P08: a link whose certificate this tool cannot identify is not ended by a connection; it stays until
     # its time is up or it is deleted in menu 6, and the diagnostics name it.
