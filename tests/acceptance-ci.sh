@@ -138,6 +138,23 @@ fi
 
 bash setup/install.sh
 darban-crl-maintain --check
+# G2: darban-core is the one of this machine's architecture, and runs. On the arm64 runner this is the arm64 binary.
+ARCH=$(dpkg --print-architecture)
+CORE=/usr/local/lib/darban/darban-core
+core_machine() { od -An -t x1 -j 18 -N 2 "$1" | tr -d ' \n'; }
+# e_machine of the ELF header, little-endian: 0x3e is x86-64, 0xb7 is AArch64.
+case $ARCH in amd64) want_machine=3e00 ;; arm64) want_machine=b700 ;; *) echo "FAIL: no darban-core for $ARCH."; exit 1 ;; esac
+got_machine=$(core_machine "$CORE")
+core_says=$("$CORE" version)
+echo "darban-core on this $ARCH server: ELF e_machine bytes $got_machine (want $want_machine), version $core_says (VERSION $(cat VERSION))"
+if command -v file >/dev/null; then file -L "$CORE"; fi
+[[ $got_machine == "$want_machine" ]] || { echo "FAIL: the installed darban-core is not an $ARCH binary."; exit 1; }
+[[ $core_says == "$(cat VERSION)" ]] || { echo 'FAIL: the installed darban-core is not this version.'; exit 1; }
+darban list >/dev/null
+echo "PASS: the installed darban-core is the $ARCH binary of this version, and the list uses it."
+if [[ -n ${GITHUB_STEP_SUMMARY:-} ]]; then
+    echo "darban-core on $ARCH: e_machine $got_machine, version $core_says" >>"$GITHUB_STEP_SUMMARY"
+fi
 systemctl start darban-crl.service
 systemctl is-active --quiet darban-crl.timer
 systemctl is-active --quiet darban-nat.service
@@ -1055,14 +1072,33 @@ OTHER_CONF=/etc/letsencrypt/renewal/other-site.conf
 printf '[renewalparams]\nauthenticator = standalone\nrenew_hook = /usr/local/bin/other-hook\n' > "$OTHER_CONF"
 cp "$OTHER_CONF" "$LOG/other-site.before"
 
-# A real update and the way back. The new version is this one under another number.
+# G2: a new darban-core that does not run here is never put in place. The update stops before it replaces anything,
+# says why, and the installed version stays whole: a script that fails, and a binary cut short as by a broken download.
 current=$(darban version)
+broken=$(mktemp -d)
+cp -r setup bin lib systemd VERSION "$broken/"
+core_before=$(sha256sum <"$CORE")
+for kind in fails truncated; do
+    if [[ $kind == fails ]]; then printf '#!/bin/sh\nexit 1\n' >"$broken/bin/darban-core-$ARCH"; else head -c 65536 "bin/darban-core-$ARCH" >"$broken/bin/darban-core-$ARCH"; fi
+    if bash "$broken/setup/install.sh" >"$LOG/broken-core-$kind.log" 2>&1; then echo "FAIL: an install with a darban-core that $kind went on."; exit 1; fi
+    grep -F 'The new darban-core does not run on this server' "$LOG/broken-core-$kind.log" >/dev/null
+    grep -F 'The installed one stays; nothing was replaced.' "$LOG/broken-core-$kind.log" >/dev/null
+    [[ $(sha256sum <"$CORE") == "$core_before" ]] || { echo "FAIL: a darban-core that $kind replaced the installed one."; exit 1; }
+    [[ $(darban version) == "$current" && $(cat /usr/local/lib/darban/.installed) == "$current" ]]
+    [[ -z $(find /usr/local/lib/darban -maxdepth 1 -name '.darban-core.*') ]] || { echo 'FAIL: the trial copy was left behind.'; exit 1; }
+    darban list >/dev/null
+done
+rm -rf -- "$broken"
+echo 'PASS: a new darban-core that fails, or is cut short, leaves the installed one and the whole version in place.'
+
+# A real update and the way back. The new version is this one under another number, its darban-core built for it.
 next=$(mktemp -d)
-cp -r setup bin lib systemd VERSION "$next/"
+cp -r setup bin lib systemd VERSION scripts go.mod cmd internal "$next/"
 sed -i 's/^DARBAN_VERSION=.*/DARBAN_VERSION=9.9.9/' "$next/bin/darban"
 echo 9.9.9 > "$next/VERSION"
+bash "$next/scripts/build-core.sh" "$ARCH" >/dev/null
 bash "$next/setup/install.sh"
-[[ $(darban version) == 9.9.9 ]]
+[[ $(darban version) == 9.9.9 && $("$CORE" version) == 9.9.9 ]]
 # The update placed the manager's modules where bin/darban sources them.
 for module in "$next"/lib/darban/*.sh "$next"/lib/darban/screens/*.sh; do
     module=${module#"$next"/lib/darban/}
@@ -1083,10 +1119,40 @@ unmounted
 grep -qx "client-connect $EVENT_SCRIPT" "$CONF"
 connect "$PROFILE" "$LOG/restored.log"; disconnect
 darban status >/dev/null
+[[ $("$CORE" version) == "$current" ]] || { echo 'FAIL: Restore previous version did not bring back its darban-core.'; exit 1; }
 bash setup/install.sh | tee "$LOG/events-reinstall.log"
 grep 'Connection events are on.$' "$LOG/events-reinstall.log" >/dev/null
 systemctl is-active --quiet darban-events.path
 echo 'PASS: an update installs, Restore previous version goes back, and an older version keeps every client connecting.'
+
+# G2: a server of v1.0 updates itself with its own get.sh, which knows one archive, darban-ovpn.tar.gz. That get.sh,
+# from the v1.0.1 release, installs this version's release files, served by a stand-in for curl from a local folder,
+# and the archive it takes carries darban-core for both architectures: the one of this machine is the one installed.
+assets=$(mktemp -d)
+# As root, git would not read the runner's checkout; any time does for these files.
+SOURCE_DATE_EPOCH=$(date +%s) bash scripts/build-release.sh "$assets/release" >/dev/null
+curl -fsSL --retry 3 -o "$assets/get-v1.0.1.sh" https://github.com/MohZeh/Darban-OVPN/releases/download/v1.0.1/get.sh
+grep -qx 'ARCHIVE=darban-ovpn.tar.gz' "$assets/get-v1.0.1.sh"
+mkdir "$assets/bin"
+cat >"$assets/bin/curl" <<'STUB'
+#!/usr/bin/env bash
+out='' url=''
+while (( $# )); do case $1 in -o) out=$2; shift 2 ;; --proto|--proto-redir|--retry|--max-time) shift 2 ;; -*) shift ;; *) url=$1; shift ;; esac; done
+echo "$url" >>"$ASSETS/curl.log"
+[[ -e $ASSETS/release/${url##*/} ]] || exit 22
+cp "$ASSETS/release/${url##*/}" "$out"
+STUB
+chmod 755 "$assets/bin/curl"
+mkdir "$assets/universal"
+tar -xzf "$assets/release/darban-ovpn.tar.gz" -C "$assets/universal" "bin/darban-core-$ARCH"
+PATH="$assets/bin:$PATH" ASSETS=$assets bash "$assets/get-v1.0.1.sh" --version "v$current" </dev/null | tee "$LOG/v1.0-update.log"
+grep -x "https://github.com/MohZeh/Darban-OVPN/releases/download/v$current/darban-ovpn.tar.gz" "$assets/curl.log" >/dev/null
+cmp -s "$assets/universal/bin/darban-core-$ARCH" "$CORE" || { echo "FAIL: the update by v1.0's get.sh did not install the $ARCH darban-core."; exit 1; }
+[[ $(darban version) == "$current" && $("$CORE" version) == "$current" && $(core_machine "$CORE") == "$want_machine" ]]
+darban list >/dev/null
+darban status >/dev/null
+rm -rf -- "$assets"
+echo "PASS: the get.sh of v1.0.1 updates to this version from darban-ovpn.tar.gz, with the $ARCH darban-core."
 
 # Removing only the tool keeps the VPN running, and installing it again finds everything. The links' Let's Encrypt
 # certificate stays, and certbot renews it without this tool's hook; a new install gives the hook back.

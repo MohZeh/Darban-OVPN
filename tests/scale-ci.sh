@@ -418,6 +418,14 @@ if [[ $PART == commands ]]; then
     # The fake clients are what the tool sees: the list counts them, and the diagnostics, which fail on any problem, pass.
     grep "$CLIENTS valid" "$WORK/list.1.log" >/dev/null || { tail -n 5 "$WORK/list.1.log"; echo "FAIL: the list does not show $CLIENTS valid clients."; exit 1; }
     grep "$revoked revoked" "$WORK/list.1.log" >/dev/null || { tail -n 5 "$WORK/list.1.log"; echo "FAIL: the list does not show $revoked revoked clients."; exit 1; }
+    # G2's goal: with darban-core, the list of 1000 clients and 10,000 index rows in less than 300 ms. Said in the
+    # summary; like every time here, a slow one does not fail the job.
+    if (( CLIENTS == 1000 )); then
+        took=$(awk -F '\t' '$1 == "list" {print $3}' "$TSV")
+        if [[ $took =~ ^[0-9]+\.[0-9]{3}$ ]] && (( 10#${took/./} < 300 )); then goal='met'; else goal='**not met**'; fi
+        NOTES+=" Goal of G2, darban list with 1000 clients in less than 0.300 s: $goal ($took s)."
+        echo "GOAL: darban list with 1000 clients in less than 0.300 s: $goal ($took s)"
+    fi
     measure status 'darban status' 3 'darban status'
     echo "PASS: the list shows $CLIENTS valid and $revoked revoked clients, and the diagnostics pass."
     compare list 'darban list' '' 'darban list' "bash $BASE_DIR/darban list"

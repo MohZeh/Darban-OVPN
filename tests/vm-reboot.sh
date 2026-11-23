@@ -74,7 +74,9 @@ qemu-system-x86_64 -enable-kvm -cpu host -m 2048 -smp 2 -display none -daemonize
 wait_for_ssh
 in_vm 'cloud-init status --wait >/dev/null 2>&1 || true'
 
-git ls-files -z | tar --null -T - -czf "$WORK/repo.tar.gz"
+# The committed files, and darban-core, which CI builds for the machine (amd64) and git does not track.
+[[ -f bin/darban-core-amd64 ]] || { echo 'FAIL: no bin/darban-core-amd64; build it first: bash scripts/build-core.sh amd64'; exit 1; }
+{ git ls-files -z; printf 'bin/darban-core-amd64\0'; } | tar --null -T - -czf "$WORK/repo.tar.gz"
 in_vm 'mkdir -p repo && tar -xzf - -C repo' < "$WORK/repo.tar.gz"
 
 before=$(in_vm 'uname -r')

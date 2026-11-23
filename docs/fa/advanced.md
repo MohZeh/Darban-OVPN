@@ -28,6 +28,8 @@ sudo bash get.sh
 
 اگر به یک انتشار شک دارید، گیت‌هاب می‌تواند آن را با گواهی خودش بررسی کند: `gh release verify v1.0.1 --repo MohZeh/Darban-OVPN`، و برای فایلی که دانلود کرده‌اید `gh release verify-asset v1.0.0 get.sh --repo MohZeh/Darban-OVPN`. نصب‌کننده این بررسی‌ها را اجرا نمی‌کند.
 
+از نسخهٔ 1.1، هر فایل یک انتشار سند امضاشدهٔ ساخت (build provenance) هم دارد که نشان می‌دهد گردش‌کار انتشار همین مخزن آن را از commit برچسب‌خورده ساخته است. برای فایلی که دانلود کرده‌اید: `gh attestation verify darban-ovpn-amd64.tar.gz --repo MohZeh/Darban-OVPN`.
+
 ## نصب یک نسخهٔ مشخص
 
 از آدرس همان نسخه استفاده کنید؛ این دستور همان نسخه را نصب می‌کند:

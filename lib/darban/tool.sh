@@ -216,7 +216,7 @@ update_tool() {
 }
 restore_previous() {
     # Backups are named by time, so the last one is what the latest update replaced.
-    local newest='' dir version without_events=0
+    local newest='' dir version without_events=0 core_new=''
     if [[ -d $BACKUP_ROOT ]]; then
         for dir in "$BACKUP_ROOT"/*; do
             if [[ -f $dir/sbin/darban ]]; then newest=$dir; fi
@@ -239,6 +239,12 @@ restore_previous() {
     say
     confirm_choice "Go back to v${version:-unknown}?" 'No, keep this version' 'Restore the previous version' caution restore || { cancelled; return 0; }
     ca_lock || return 1
+    # Its darban-core, when it has one, runs once from a copy beside the installed one before anything changes: one
+    # that does not run here leaves this version whole. A version without one leaves this one's, which it never runs.
+    if [[ -e $newest/lib/darban-core ]]; then
+        core_new=$(darban_core_stage "$newest/lib/darban-core" "$DARBAN_CORE" "$version") || { fail 'Nothing was changed.'; return 1; }
+        darban_tmp_register "$core_new"
+    fi
     critical_begin
     # The timer for the next kept file first: the version restored sets its own, if it knows one.
     systemctl stop darban-expire.timer >/dev/null 2>&1 || true
@@ -251,7 +257,8 @@ restore_previous() {
         rm -f -- "$UNIT_DIR/darban-geo.timer" "$UNIT_DIR/darban-geo.service"
     fi
     # The library, with the modules of the manager, before the manager that sources them.
-    cp -a -- "$newest/lib/." "$DARBAN_LIB/" && cp -a -- "$newest/sbin/." "$SBIN_DIR/" && cp -a -- "$newest/units/." "$UNIT_DIR/" || {
+    # darban-core by one rename, the copy that ran, never by a copy over the running file.
+    find "$newest/lib" -mindepth 1 -maxdepth 1 ! -name darban-core -exec cp -a -t "$DARBAN_LIB/" -- {} + && darban_core_place "$core_new" "$DARBAN_CORE" && cp -a -- "$newest/sbin/." "$SBIN_DIR/" && cp -a -- "$newest/units/." "$UNIT_DIR/" || {
         critical_end
         urgent "The restore did not finish. The files are in $newest."
         return 1

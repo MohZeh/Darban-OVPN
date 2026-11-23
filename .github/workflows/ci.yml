@@ -33,7 +33,8 @@ jobs:
   lint:
     name: Lint
     runs-on: ubuntu-24.04
-    timeout-minutes: 5
+    # Building staticcheck and govulncheck takes a minute or two.
+    timeout-minutes: 10
     # Read-only, to find the pull request of a push to main and whether its CI passed.
     permissions:
       contents: read
@@ -82,6 +83,35 @@ jobs:
           if grep -qx 'tested=true' "$GITHUB_OUTPUT"; then
             echo 'The pull request of this commit already tested these exact files, and passed: the slow tests are not run again.' >> "$GITHUB_STEP_SUMMARY"
           fi
+      # The toolchain go.mod pins, for darban-core. No module cache: it has no dependency.
+      - uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0
+        with:
+          go-version-file: go.mod
+          cache: false
+      # darban-core uses the standard library only, so there is no go.sum and no module but its own. The tools are
+      # for CI only, each at a pinned version.
+      - name: 'Go: gofmt, go vet, staticcheck, govulncheck, the standard library only'
+        env:
+          STATICCHECK: v0.8.2
+          GOVULNCHECK: v1.9.0
+        run: |
+          test ! -e go.sum
+          test "$(go list -m all)" = github.com/MohZeh/Darban-OVPN
+          unformatted=$(gofmt -l .)
+          if [ -n "$unformatted" ]; then echo "Not formatted with gofmt: $unformatted"; exit 1; fi
+          go vet ./...
+          go install "honnef.co/go/tools/cmd/staticcheck@$STATICCHECK"
+          go install "golang.org/x/vuln/cmd/govulncheck@$GOVULNCHECK"
+          "$(go env GOPATH)/bin/staticcheck" ./...
+          "$(go env GOPATH)/bin/govulncheck" ./...
+      # In Lint, so a draft sees them: about half a minute. The race detector needs cgo; the release build has none.
+      - name: 'Go: go test -race'
+        env:
+          CGO_ENABLED: 1
+        run: go test -race -count=1 ./...
+      # The suite's runner, which lint.sh starts once, builds a fake server with it.
+      - name: Build darban-core
+        run: bash scripts/build-core.sh
       - name: ShellCheck, Python syntax, file modes and documentation
         run: |
           command -v shellcheck >/dev/null || { sudo apt-get update && sudo apt-get install -y shellcheck; }
@@ -142,6 +172,13 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      # The toolchain go.mod pins, for darban-core. No module cache: it has no dependency.
+      - uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0
+        with:
+          go-version-file: go.mod
+          cache: false
+      - name: Build darban-core
+        run: bash scripts/build-core.sh
       # A mirror that is down or slow must not decide a test: the fastest one goes first.
       - name: Fastest apt mirror first
         run: sudo GITHUB_STEP_SUMMARY="$GITHUB_STEP_SUMMARY" bash scripts/ci-apt-mirrors.sh
@@ -199,6 +236,13 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      # The toolchain go.mod pins, for darban-core. No module cache: it has no dependency.
+      - uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0
+        with:
+          go-version-file: go.mod
+          cache: false
+      - name: Build darban-core
+        run: bash scripts/build-core.sh
       # A mirror that is down or slow must not decide a test: the fastest one goes first.
       - name: Fastest apt mirror first
         run: sudo GITHUB_STEP_SUMMARY="$GITHUB_STEP_SUMMARY" bash scripts/ci-apt-mirrors.sh
@@ -215,7 +259,7 @@ jobs:
         # sudo keeps no variable, so the summary file is named: what a green run did not test is written there.
         env:
           PART: ${{ matrix.part }}
-        run: sudo GITHUB_STEP_SUMMARY="$GITHUB_STEP_SUMMARY" bash tests/acceptance-ci.sh --i-know "$PART"
+        run: sudo GO="$(command -v go)" GITHUB_STEP_SUMMARY="$GITHUB_STEP_SUMMARY" bash tests/acceptance-ci.sh --i-know "$PART"
 
   # Three checks of about a minute each, on one runner, so a run waits less for runners: the real-terminal tests,
   # which change nothing on the machine, then the setup on a public address, the path the acceptance run skips
@@ -235,6 +279,13 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      # The toolchain go.mod pins, for darban-core. No module cache: it has no dependency.
+      - uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0
+        with:
+          go-version-file: go.mod
+          cache: false
+      - name: Build darban-core
+        run: bash scripts/build-core.sh
       - name: Real-terminal key tests
         run: python3 tests/run-tty-tests.py </dev/null
       # A mirror that is down or slow must not decide a test: the fastest one goes first.
@@ -265,6 +316,13 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      # The toolchain go.mod pins, for darban-core. No module cache: it has no dependency.
+      - uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0
+        with:
+          go-version-file: go.mod
+          cache: false
+      - name: Build darban-core
+        run: bash scripts/build-core.sh
       # A mirror that is down or slow must not decide a test: the fastest one goes first.
       - name: Fastest apt mirror first
         run: sudo GITHUB_STEP_SUMMARY="$GITHUB_STEP_SUMMARY" bash scripts/ci-apt-mirrors.sh
@@ -299,6 +357,13 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      # The toolchain go.mod pins, for darban-core. No module cache: it has no dependency.
+      - uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0
+        with:
+          go-version-file: go.mod
+          cache: false
+      - name: Build darban-core
+        run: bash scripts/build-core.sh
       # bin/ and lib/ of the base commit, which tests/scale-ci.sh stages beside the change to compare them.
       - name: The manager of the base commit
         if: github.event_name == 'pull_request'
@@ -357,6 +422,14 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      # The virtual machine is amd64, as the runner.
+      # The toolchain go.mod pins, for darban-core. No module cache: it has no dependency.
+      - uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0
+        with:
+          go-version-file: go.mod
+          cache: false
+      - name: Build darban-core
+        run: bash scripts/build-core.sh amd64
       - name: Install the virtual machine tools and a client
         run: |
           sudo apt-get -o Acquire::Retries=3 update
@@ -377,10 +450,18 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      # Built on this arm64 runner, so the test installs and runs the arm64 binary.
+      # The toolchain go.mod pins, for darban-core. No module cache: it has no dependency.
+      - uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0
+        with:
+          go-version-file: go.mod
+          cache: false
+      - name: Build darban-core
+        run: bash scripts/build-core.sh arm64
       - name: The runner must not already have a PKI or server
         run: sudo test ! -e /root/pki && test ! -e /etc/openvpn/server/server.conf
       - name: Real setup and client on arm64
-        run: sudo GITHUB_STEP_SUMMARY="$GITHUB_STEP_SUMMARY" bash tests/acceptance-ci.sh --i-know
+        run: sudo GO="$(command -v go)" GITHUB_STEP_SUMMARY="$GITHUB_STEP_SUMMARY" bash tests/acceptance-ci.sh --i-know
 
   # The one check a branch rule requires. Matrix job names cannot be required reliably when they are skipped.
   # A manual run for the reboot and arm64 tests, or for the scale measurements, only gets another name: it skips
