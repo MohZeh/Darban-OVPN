@@ -3257,7 +3257,7 @@ test_tcp_mss_is_set_in_advanced() {
     [[ $(grep -c -F "$clamp" "$E/cfg/nat.nft") == 4 ]]; rc_is 'a fresh install limits TCP MSS to 1330 in all four rules' 0 "$?"
     out=$(menu '7\n6\n0\n0\n0\n')
     has 'Advanced shows the TCP MSS' 'TCP MSS                  1330, the default' "$out"
-    has 'and offers it as item 9' 'Choose [0-9, Enter = back]' "$out"
+    has 'and offers it as item 9' '9  TCP MSS' "$out"
 
     cp "$E/cfg/nat.nft" "$E/nat.before"
     : > "$STUB_LOG"
