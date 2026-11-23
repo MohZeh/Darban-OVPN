@@ -3422,6 +3422,8 @@ events_worker_lock() {
     return 1
 }
 events_worker_unlock() { flock -u 7 2>/dev/null || true; exec 7>&-; }
+# darban events: the worker, waiting for one already running.
+events_worker() { events_run "$EVENT_WORKER_WAIT"; }
 events_run() {
     # darban events (darban-events.service, started by the path unit while new/ holds something): takes what
     # OpenVPN left and applies it, until new/ is empty, or it has taken or applied EVENT_MAX entries, or
@@ -7307,7 +7309,7 @@ main() {
                 darban_require_root || exit 1
                 # The hours of Settings and the SSH user, for the files kept on the server.
                 load_config
-                case $1 in events) run_action events_run "$EVENT_WORKER_WAIT" ;; sweep) run_action sweep ;; *) run_action events_setup ;; esac
+                case $1 in events) run_action events_worker ;; sweep) run_action sweep ;; *) run_action events_setup ;; esac
                 exit "$ACTION_RC" ;;
             list|status|repair-crl|connected|update|uninstall|remove-all|welcome|enable-events) [[ -z $cmd ]] || { usage >&2; exit 2; }; cmd=$1 ;;
             *) printf 'Unknown argument: %s\n\n' "$1" >&2; usage >&2; exit 2 ;;
