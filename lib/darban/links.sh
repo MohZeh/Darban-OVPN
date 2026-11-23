@@ -33,7 +33,16 @@ tcp_port_program() {
 choose_link_port() {
     # The first free one is remembered, so links keep working on a port the firewall already allows. It is
     # checked again for each link: a panel installed later may have taken it.
-    local candidate
+    local candidate local_port
+    # With port-share, links use the OpenVPN TCP port, and the service listens on its local port only.
+    if port_share_on; then
+        local_port=$(conf_port_share)
+        if tcp_port_taken "$local_port"; then
+            fail "TCP $local_port on this server, where OpenVPN hands links to the link page, is used by $(safe_text "$(tcp_port_program "$local_port")"). Turn sharing off and on again for a new one: Settings $S_CRUMB 2 $S_CRUMB 5."
+            return 1
+        fi
+        return 0
+    fi
     if [[ -n $LINK_PORT ]]; then
         if tcp_port_taken "$LINK_PORT"; then
             fail "TCP $LINK_PORT, the port for links, is now used by $(safe_text "$(tcp_port_program "$LINK_PORT")"). Choose another one: Settings $S_CRUMB Link port."
@@ -60,6 +69,7 @@ next_link_port() {
 link_port_summary() {
     # For Settings: the saved port, or the one the first link will take.
     local next
+    if port_share_on; then printf '%s, shared with OpenVPN\n' "$(listener_port tcp)"; return; fi
     if [[ -n $LINK_PORT ]]; then printf '%s\n' "$LINK_PORT"; return; fi
     if next=$(next_link_port); then printf '%s\n' "$next"; else printf 'all of %s are in use\n' "${LINK_PORT_CHOICES// /, }"; fi
 }
@@ -143,20 +153,163 @@ start_link_service() {
     # port, reads each link when it is asked for, so it is not restarted: that would end a download in progress.
     # A reload brings it a certificate that changed, and it counts once the service answers with it. Anything else
     # is restarted.
-    local attempt running=''
+    local attempt running='' running_extra='' port extra=''
+    port=$(link_listen_port)
+    # With port-share the service listens on 127.0.0.1 only, reads the real address of each client from OpenVPN's
+    # files, and stays up while no link is open, so the shared port always answers with an HTTPS page.
+    if port_share_on; then extra="--bind 127.0.0.1 --port-share-dir $PORT_SHARE_DIR --idle-exit 0"; fi
     running=$(awk -F= '$1 == "LINK_PORT" {print $2; exit}' "$LINK_ENV" 2>/dev/null) || running=''
-    printf 'LINK_HOST=%s\nLINK_PORT=%s\n' "$1" "$LINK_PORT" >"$LINK_ENV" || return 1
+    running_extra=$(awk -F= '$1 == "LINK_EXTRA" {print substr($0, 12); exit}' "$LINK_ENV" 2>/dev/null) || running_extra=''
+    printf 'LINK_HOST=%s\nLINK_PORT=%s\nLINK_EXTRA=%s\n' "$1" "$port" "$extra" >"$LINK_ENV" || return 1
     chmod 600 "$LINK_ENV" || return 1
-    if [[ $running == "$LINK_PORT" ]] && links_locked link_service_stays && systemctl reload darban-links.service 2>/dev/null \
+    if [[ $running == "$port" && $running_extra == "$extra" ]] && links_locked link_service_stays && systemctl reload darban-links.service 2>/dev/null \
         && link_service_serves "$(cert_fingerprint "$LINK_CERT")"; then
         return 0
     fi
     systemctl restart darban-links.service || return 1
     for attempt in 1 2 3 4 5 6; do
-        if tcp_port_open "$LINK_PORT"; then return 0; fi
+        if tcp_port_open "$port"; then return 0; fi
         sleep 0.5
     done
     return 1
+}
+
+# ---------- port-share: the OpenVPN TCP port also serves the link page ----------
+port_share_on() {
+    # server.conf has this tool's port-share line, and OpenVPN listens on TCP.
+    conf_port_share >/dev/null 2>&1 && listener_port tcp >/dev/null 2>&1
+}
+link_listen_port() {
+    # The port the link service listens on: its local one with port-share, else the link port.
+    if port_share_on; then conf_port_share; else printf '%s\n' "$LINK_PORT"; fi
+}
+link_public_port() {
+    # The port in the address of a link: the OpenVPN TCP port with port-share, else the link port.
+    if port_share_on; then listener_port tcp; else printf '%s\n' "$LINK_PORT"; fi
+}
+port_share_dir_ready() {
+    # The folder OpenVPN writes a file in for each connection it hands over. OpenVPN's user owns it, and the link
+    # service, root without CAP_DAC_OVERRIDE, reads it through the group: setgid gives each file the group root.
+    # tmpfiles makes it again at each boot, before OpenVPN starts.
+    local user
+    user=$(darban_conf_single user 2>/dev/null) || user=root
+    [[ $user =~ ^[a-z_][a-z0-9_-]{0,31}$ ]] || return 1
+    # The folder of the links too: the link service starts at boot then, and its unit needs it.
+    printf '# Darban OVPN: the files of OpenVPN port-share, for the link service.\nd %s 2750 %s root -\nd %s 0700 root root -\n' \
+        "$PORT_SHARE_DIR" "$user" "$LINK_DIR" >"$PORT_SHARE_TMPFILES" || return 1
+    chmod 644 "$PORT_SHARE_TMPFILES" || return 1
+    systemd-tmpfiles --create "$PORT_SHARE_TMPFILES" >/dev/null 2>&1 || return 1
+    [[ -d $PORT_SHARE_DIR && ! -L $PORT_SHARE_DIR ]]
+}
+port_share_service_on() {
+    # port_share_service_on <host>: the link service listens on its local port, stays up, starts at boot, and
+    # starts again when it fails.
+    install -d -m 700 "$LINK_DIR" || return 1
+    install -d -m 755 "${LINK_UNIT_DROPIN%/*}" || return 1
+    printf '# Darban OVPN: while port-share is on, the link page stays up.\n[Service]\nRestart=on-failure\nRestartSec=2\n' >"$LINK_UNIT_DROPIN" || return 1
+    chmod 644 "$LINK_UNIT_DROPIN" || return 1
+    systemctl daemon-reload || return 1
+    systemctl enable darban-links.service >/dev/null 2>&1 || return 1
+    start_link_service "$1"
+}
+port_share_service_off() {
+    # Back to the service of a link: only while a link is open, on the link port, ending by itself. Under the lock.
+    local meta open=0
+    rm -f -- "$LINK_UNIT_DROPIN" "$PORT_SHARE_TMPFILES"
+    rmdir -- "${LINK_UNIT_DROPIN%/*}" 2>/dev/null || true
+    systemctl disable darban-links.service >/dev/null 2>&1 || true
+    systemctl daemon-reload || true
+    for meta in "$LINK_DIR"/*.meta; do if [[ -e $meta ]]; then open=1; break; fi; done
+    if (( open )) && choose_link_port && start_link_service "$(domain)"; then
+        info "Open links work on TCP $LINK_PORT again, the port of their own; addresses given before named the OpenVPN port, so share those again."
+    else
+        systemctl stop darban-links.service >/dev/null 2>&1 || true
+        if (( open )); then warn "The link service could not start on the link port, so open links do not open. Share them again (menu 5)."; fi
+    fi
+    rm -rf -- "$PORT_SHARE_DIR"
+}
+port_share_leftovers() {
+    # What turning port-share on set up is still there, while server.conf shares no port: after a restore, which does
+    # not bring the line back, or after the line was removed by hand. The link service would otherwise start at boot
+    # on a local port nothing reaches any more, and stay there. A line someone else wrote counts as a line.
+    local rc=0
+    conf_port_share >/dev/null 2>&1 || rc=$?
+    (( rc == 1 )) || return 1
+    [[ -e $LINK_UNIT_DROPIN || -e $PORT_SHARE_TMPFILES ]]
+}
+port_share_leftovers_clear() {
+    # The same cleanup as turning port-share off. Under the lock.
+    port_share_leftovers || return 0
+    info 'server.conf shares no TCP port, so the link page goes back to a port of its own, only while a link is open.'
+    port_share_service_off
+    audit 'port-share leftovers removed: server.conf has no port-share line'
+}
+set_port_share() {
+    # set_port_share <udp port or ''> <tcp port>: Settings > 2 > 5, shown only while OpenVPN listens on TCP.
+    local udp=$1 tcp=$2 host local_port rc=0
+    conf_port_share >/dev/null 2>&1 || rc=$?
+    if (( rc == 2 )); then warn 'server.conf has a port-share line this tool did not write. Change it by hand, or remove it first.'; return 1; fi
+    if (( rc == 0 )); then
+        kv Current "on: TCP $tcp also serves the link page"
+        info "Off, links get a port of their own again (Settings $S_CRUMB 4), which must be open in your provider firewall. Addresses of open links named TCP $tcp, so share those again."
+        say
+        restart_notice
+        say
+        confirm_choice "Stop sharing TCP $tcp with the link page?" 'No, keep sharing' 'Stop sharing' caution || { cancelled; return 0; }
+        ca_lock || return 1
+        apply_listeners 'port sharing off' "$udp" "$tcp" '' || return 1
+        port_share_service_off
+        audit 'port-share turned off'
+        ok "TCP $tcp is OpenVPN's alone again."
+        return 0
+    fi
+    kv Current off
+    info "On, a connection to TCP $tcp that is not OpenVPN goes to the link page: whoever probes the port sees an ordinary HTTPS site, and links use TCP $tcp instead of a port of their own. The link page then stays up all the time. It does not hide the VPN from a careful look."
+    say
+    command -v python3 >/dev/null || { fail 'python3 is needed for the link page. Install it: apt install python3'; return 1; }
+    host=$(domain)
+    [[ -n $host ]] && valid_endpoint "$host" || { warn "Set the server address first: Settings $S_CRUMB 1."; return 1; }
+    ensure_link_cert "$host" || return 1
+    local_port=$(darban_free_port tcp "$tcp" "$udp" "$LINK_PORT")
+    say
+    restart_notice
+    bullet "the link page listens on 127.0.0.1:$local_port, which only OpenVPN reaches"
+    say
+    confirm_choice "Share TCP $tcp with the link page?" 'No, keep it off' 'Share the port' caution || { cancelled; return 0; }
+    ca_lock || return 1
+    port_share_dir_ready || { fail "Could not make $PORT_SHARE_DIR for OpenVPN. Nothing was changed."; rm -f -- "$PORT_SHARE_TMPFILES"; return 1; }
+    if ! apply_listeners 'port sharing on' "$udp" "$tcp" "$local_port"; then
+        rm -f -- "$PORT_SHARE_TMPFILES"; rm -rf -- "$PORT_SHARE_DIR"
+        return 1
+    fi
+    if ! port_share_service_on "$host"; then
+        warn "OpenVPN shares TCP $tcp, but the link page did not start on 127.0.0.1:$local_port, so a probe gets no page. Check: $(cmd journalctl -u darban-links.service -n 30 --no-pager)"
+        audit 'port-share turned on; the link service did not start'
+        return 1
+    fi
+    audit "port-share turned on: TCP $tcp, link page on 127.0.0.1:$local_port"
+    ok "TCP $tcp now answers HTTPS with the link page, and new links use it."
+}
+port_share_health() {
+    # Diagnostics: the port is shared, its folder is there, and the link page answers on it.
+    local local_port rc=0
+    local_port=$(conf_port_share 2>/dev/null) || rc=$?
+    if (( rc == 2 )); then check warn 'server.conf has a port-share line this tool did not write'; return 0; fi
+    if (( rc == 1 )); then
+        if port_share_leftovers; then
+            check warn "The link page is still set up to stay behind a shared TCP port, but server.conf shares none, so after a reboot it waits on a port nothing reaches $S_ARROW open Settings $S_CRUMB 2 once, which removes it"
+        fi
+        return 0
+    fi
+    if ! listener_port tcp >/dev/null 2>&1; then check bad "server.conf shares a port, but OpenVPN does not listen on TCP $S_ARROW Settings $S_CRUMB 2"; return 0; fi
+    if [[ ! -d $PORT_SHARE_DIR ]]; then
+        check warn "The folder of port-share, $PORT_SHARE_DIR, is missing, so links count every visitor as 127.0.0.1 $S_ARROW sudo systemd-tmpfiles --create $PORT_SHARE_TMPFILES"
+    fi
+    if systemctl is-active --quiet darban-links.service 2>/dev/null && tcp_port_open "$local_port"; then
+        check ok "TCP $(listener_port tcp) is shared: other connections reach the link page on 127.0.0.1:$local_port"
+    else
+        check bad "TCP $(listener_port tcp) is shared, but the link page is not running, so a probe gets no page $S_ARROW sudo systemctl restart darban-links.service"
+    fi
 }
 links_locked() {
     # links_locked <command>...: changes the link files while holding the lock the link service takes too, so a

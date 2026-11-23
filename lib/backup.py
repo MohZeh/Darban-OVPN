@@ -248,8 +248,11 @@ def check(args):
 
 # server.conf. Lines of the template are written as the template has them; their value is never read, and a
 # difference is only reported. The parameters below are read, each with a strict pattern. Any other line refuses
-# the restore.
-TEMPLATE = ('proto', 'dev', 'topology', 'ca', 'cert', 'key', 'tls-crypt', 'crl-verify', 'dh', 'tls-version-min',
+# the restore. The listeners come in one of three forms: "port N" with "proto udp4" (UDP only) or "proto tcp4-server"
+# (TCP only), or two lines "local * N udp" and "local * M tcp" without either (both). explicit-exit-notify is
+# written with a UDP listener only. A port-share line is not restored: the link service it needs is set up again in
+# Settings.
+TEMPLATE = ('dev', 'topology', 'ca', 'cert', 'key', 'tls-crypt', 'crl-verify', 'dh', 'tls-version-min',
             'explicit-exit-notify', 'persist-key', 'persist-tun', 'user', 'group', 'management',
             'script-security', 'client-connect', 'client-disconnect')
 OCTET = r'(25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)'
@@ -270,7 +273,7 @@ def conf(args):
     if not lines or lines[0].strip() != MARK:
         raise Refused('server.conf in the backup was not made by this tool\'s setup')
     canonical = {
-        'proto': 'proto udp4', 'dev': 'dev tun', 'topology': 'topology subnet', 'ca': 'ca ca.crt',
+        'dev': 'dev tun', 'topology': 'topology subnet', 'ca': 'ca ca.crt',
         'cert': 'cert server.crt', 'key': 'key server.key', 'tls-crypt': 'tls-crypt tls-crypt.key',
         'crl-verify': 'crl-verify %s/crl.pem' % args.server_dir.rstrip('/'), 'dh': 'dh none',
         'tls-version-min': 'tls-version-min 1.2', 'explicit-exit-notify': 'explicit-exit-notify 1',
@@ -279,6 +282,7 @@ def conf(args):
     }
     values = {}
     push = []
+    local = {}
     refused = []
     notes = []
     for number, raw in enumerate(lines[1:], start=2):
@@ -292,7 +296,25 @@ def conf(args):
                 notes.append('line %d, %s, differs from the template; the template is used' % (number, word))
             continue
         ok = False
-        if word == 'port':
+        if word == 'local':
+            match = re.fullmatch(r'\* (\d{1,5}) (udp|tcp)', rest)
+            if match and 1 <= int(match.group(1)) <= 65535 and match.group(2) not in local:
+                local[match.group(2)] = str(int(match.group(1)))
+            elif match and match.group(2) in local:
+                refused.append('line %d, local, names %s twice' % (number, match.group(2)))
+            else:
+                refused.append('line %d, local' % number)
+            continue
+        if word == 'port-share':
+            if re.fullmatch(r'127\.0\.0\.1 \d{1,5} /[A-Za-z0-9/_.-]{1,200}', rest):
+                notes.append('line %d, port-share, is not restored; turn it on again in Settings > 2' % number)
+                continue
+        elif word == 'proto':
+            ok = rest in ('udp4', 'tcp4-server')
+            if not ok and re.fullmatch(r'udp[46]?', rest):
+                notes.append('line %d, proto, differs from the template; proto udp4 is used' % number)
+                rest, ok = 'udp4', True
+        elif word == 'port':
             ok = re.fullmatch(r'\d{1,5}', rest) is not None and 1 <= int(rest) <= 65535
         elif word == 'server':
             match = re.fullmatch(r'(%s) 255\.255\.255\.0' % IPV4, rest)
@@ -314,16 +336,27 @@ def conf(args):
             values[word] = rest
         else:
             refused.append('line %d, %s' % (number, word))
-    for need in ('port', 'server'):
-        if need not in values:
-            refused.append('%s is missing' % need)
+    if local:
+        if 'port' in values or 'proto' in values or len(local) != 2:
+            refused.append('the listeners are neither one port and proto, nor two local lines, one udp and one tcp')
+        listeners = ['local * %s udp' % local.get('udp', ''), 'local * %s tcp' % local.get('tcp', '')]
+        udp = True
+    else:
+        # A backup from before TCP may lack proto: the template had it, and it was never read.
+        if 'port' not in values:
+            refused.append('port is missing')
+        proto = values.get('proto', 'udp4')
+        listeners = ['port ' + values.get('port', ''), 'proto ' + proto]
+        udp = proto == 'udp4'
+    if 'server' not in values:
+        refused.append('server is missing')
     if refused:
         raise Refused('server.conf in the backup has lines this tool does not restore: ' + '; '.join(refused))
-    out = [MARK, 'port ' + values['port'], canonical['proto'], canonical['dev'], canonical['topology'],
+    out = [MARK] + listeners + [canonical['dev'], canonical['topology'],
            'server ' + values['server'], canonical['ca'], canonical['cert'], canonical['key'], canonical['tls-crypt'],
            canonical['crl-verify'], canonical['dh'], canonical['tls-version-min'],
            'data-ciphers ' + values.get('data-ciphers', 'AES-256-GCM:AES-128-GCM:CHACHA20-POLY1305'),
-           'keepalive ' + values.get('keepalive', '10 60'), canonical['explicit-exit-notify'],
+           'keepalive ' + values.get('keepalive', '10 60')] + ([canonical['explicit-exit-notify']] if udp else []) + [
            canonical['persist-key'], canonical['persist-tun'], canonical['user'], canonical['group'],
            canonical['management'], 'verb ' + values.get('verb', '3')] + push
     for note in notes:

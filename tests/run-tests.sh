@@ -153,6 +153,75 @@ test_index_missing_empty_or_malformed_is_rejected() {
     rc_not0 'index without the server certificate rejected' "$rc"
 }
 
+# darban_verify_crl of lib/common.sh on the CRL named: its errors, then its status.
+crl_check() { bash -c 'set -uo pipefail; source "$E/lib/common.sh"; darban_verify_crl "$1"; echo "status $?"' _ "$1" 2>&1; }
+crl_of() {
+    # crl_of <file> [openssl ca options]: a CRL of this CA from its index as it is now, signed with its key.
+    (cd "$PKI" && { [[ -s crlnumber ]] || echo 1000 > crlnumber; } && openssl ca -batch -config "$E/openssl.cnf" -gencrl -out "$1" "${@:2}" 2>/dev/null)
+}
+
+test_crl_check_names_each_problem() {
+    # G2: darban_verify_crl compares the CRL with the CA index through darban-core, for the CRL renewal, the installer,
+    # revoking, restore, the menu's header, Diagnostics and a new client alike. Each problem gets its own words, as
+    # before, and only a complete CRL passes.
+    local dir=$E/crl-cases out what want
+    mkdir -p "$dir"
+    easyrsa build-client-full bob nopass >/dev/null 2>&1
+    easyrsa build-client-full carol nopass >/dev/null 2>&1
+    easyrsa revoke bob >/dev/null 2>&1
+    crl_of "$dir/good.pem"
+    : > "$dir/empty.pem"
+    openssl crl -in "$dir/good.pem" -badsig -out "$dir/bad-signature.pem" 2>/dev/null
+    openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes -keyout "$dir/other.key" -out "$dir/other.crt" -subj /CN=OtherCA -days 30 2>/dev/null
+    crl_of "$dir/other-ca.pem" -keyfile "$dir/other.key" -cert "$dir/other.crt"
+    crl_of "$dir/expired.pem" -crl_lastupdate 20200101000000Z -crl_nextupdate 20200201000000Z
+    crl_of "$dir/not-yet-valid.pem" -crl_lastupdate 20991201000000Z -crl_nextupdate 20991231000000Z
+    # A CRL from before carol's revocation: a revoked client it does not list.
+    cp "$PKI/index.txt" "$dir/index.before-carol"
+    easyrsa revoke carol >/dev/null 2>&1
+    crl_of "$dir/complete.pem"
+    # The CRL revokes the server's own certificate, which the index lists as valid.
+    cp "$PKI/index.txt" "$dir/index.live"
+    awk -F '\t' 'BEGIN {OFS="\t"} $6 ~ /\/CN=server_abc123$/ {$1="R"; $3="261101000000Z"} {print}' "$dir/index.live" > "$PKI/index.txt"
+    crl_of "$dir/server-revoked.pem"
+    cp "$dir/index.live" "$PKI/index.txt"
+    local -a cases=(
+        "a complete CRL|$dir/complete.pem||status 0"
+        "a CRL that is missing|$dir/none.pem||ERROR: CRL missing: $dir/none.pem"
+        "an empty CRL file|$dir/empty.pem||ERROR: CRL missing: $dir/empty.pem"
+        "a CRL with a bad signature|$dir/bad-signature.pem||ERROR: CRL signature verification failed."
+        "a CRL signed by another CA|$dir/other-ca.pem||ERROR: CRL signature verification failed."
+        "an expired CRL|$dir/expired.pem||ERROR: CRL is expired, not yet valid, or has an inconsistent validity window."
+        "a CRL not yet valid|$dir/not-yet-valid.pem||ERROR: CRL is expired, not yet valid, or has an inconsistent validity window."
+        "a revoked client the CRL does not list|$dir/good.pem||ERROR: CRL is missing revoked CA serial: "
+        "the server certificate on the CRL|$dir/server-revoked.pem||ERROR: CRL revokes serial(s) the CA database does not: "
+        "a CRL revoking what the index calls valid|$dir/complete.pem|before-carol|looks older than the published CRL (restored backup?). Restore the current $PKI/index.txt."
+        "a malformed record in the index|$dir/complete.pem|garbage|ERROR: CA database has a malformed record: $PKI/index.txt"
+        "an index without the server certificate|$dir/complete.pem|no-server|ERROR: CA database does not contain the server certificate (serial "
+        "an index that is missing|$dir/complete.pem|missing|ERROR: CA database is missing or unreadable: $PKI/index.txt"
+    )
+    local entry file index
+    for entry in "${cases[@]}"; do
+        IFS='|' read -r what file index want <<<"$entry"
+        case $index in
+            before-carol) cp "$dir/index.before-carol" "$PKI/index.txt" ;;
+            garbage) { cat "$dir/index.live"; printf 'garbage line\n'; } > "$PKI/index.txt" ;;
+            no-server) grep -v server_abc123 "$dir/index.live" > "$PKI/index.txt" ;;
+            missing) rm -f "$PKI/index.txt" ;;
+        esac
+        out=$(crl_check "$file")
+        has "$what: named" "$want" "$out"
+        if [[ $want == 'status 0' ]]; then lacks "$what: passes" 'ERROR' "$out"; else has "$what: fails" 'status 1' "$out"; fi
+        cp "$dir/index.live" "$PKI/index.txt"
+    done
+    # Without darban-core the CRL is never called complete.
+    mv "$E/lib/darban-core" "$E/darban-core.away"
+    out=$(crl_check "$dir/complete.pem")
+    has 'no darban-core: the CRL fails' 'status 1' "$out"
+    has 'and it says why' 'darban-core is missing, so the CRL cannot be compared with the CA database' "$out"
+    mv "$E/darban-core.away" "$E/lib/darban-core"
+}
+
 test_index_rollback_cannot_unrevoke() {
     local out rc serial
     snapshot_index
@@ -563,6 +632,14 @@ test_setup_menu_and_commands() {
     [[ $(bash "$E/manager.sh" version </dev/null 2>&1) == "$(cat "$REPO/VERSION")" ]]; rc_is 'VERSION matches the manager' 0 "$?"
 }
 
+pack_release() {
+    # The fixture as a release: an archive for each architecture, one with both as v1.0 downloads it, and checksums.
+    local name
+    for name in darban-ovpn.tar.gz darban-ovpn-amd64.tar.gz darban-ovpn-arm64.tar.gz; do
+        tar -C "$E/fixture" -czf "$RELEASE/$name" setup VERSION
+    done
+    (cd "$RELEASE" && sha256sum darban-ovpn.tar.gz darban-ovpn-amd64.tar.gz darban-ovpn-arm64.tar.gz > SHA256SUMS)
+}
 fake_release() {
     # A release directory served by a stand-in curl; its installer only leaves a marker.
     local fixture=$E/fixture
@@ -570,9 +647,9 @@ fake_release() {
     mkdir -p "$fixture/setup" "$RELEASE"
     printf '#!/usr/bin/env bash\necho "installer ran" > "$MARKER"\n' > "$fixture/setup/install.sh"
     echo 9.9.9 > "$fixture/VERSION"
-    tar -C "$fixture" -czf "$RELEASE/darban-ovpn.tar.gz" setup VERSION
-    (cd "$RELEASE" && sha256sum darban-ovpn.tar.gz > SHA256SUMS)
+    pack_release
     echo 9.9.9 > "$RELEASE/VERSION"
+    # A file the release does not have is an HTTP error, as from GitHub: curl's 22.
     cat > "$E/bin/curl" <<'STUB'
 #!/usr/bin/env bash
 out=''; url=''; hdr=''
@@ -580,9 +657,16 @@ while (( $# )); do case $1 in -o) out=$2; shift 2 ;; --proto|--proto-redir|--tls
 echo "curl $url" >> "$STUB_LOG"
 if [[ -n ${hdr:-} && -n ${FAKE_HEADERS:-} ]]; then printf '%b' "$FAKE_HEADERS" > "$hdr"; fi
 if [[ -n ${CURL_FAIL:-} ]]; then exit "${CURL_RC:-22}"; fi
+[[ -e $RELEASE/${url##*/} ]] || exit 22
 if [[ -n $out ]]; then cp "$RELEASE/${url##*/}" "$out"; else cat "$RELEASE/${url##*/}"; fi
 STUB
-    chmod +x "$E/bin/curl"
+    # The architecture of the server: FAKE_ARCH, amd64 when unset.
+    cat > "$E/bin/dpkg" <<'STUB'
+#!/usr/bin/env bash
+if [[ ${1:-} == --print-architecture ]]; then echo "${FAKE_ARCH:-amd64}"; exit 0; fi
+exec /usr/bin/dpkg "$@"
+STUB
+    chmod +x "$E/bin/curl" "$E/bin/dpkg"
     # The test user is not root; everything else in get.sh runs unchanged.
     sed -e 's/^\( *\)\[\[ \$EUID == 0 \]\] .*/\1:/' -e "s#^SERVER_CONF=.*#SERVER_CONF=$SERVER_CONF#" \
         -e "s#^TOOL=.*#TOOL=$E/fake-tool#" -e "s#^SETUP_RECORD=.*#SETUP_RECORD=$E/cfg/.server-setup-started#" \
@@ -596,7 +680,8 @@ test_get_sh_verifies_before_installing() {
     out=$(bash "$E/get.sh" 2>&1 </dev/null); rc=$?
     rc_is 'a good release installs' 0 "$rc"
     ok_if 'the installer ran' test -s "$MARKER"
-    grep -q 'releases/latest/download/darban-ovpn.tar.gz' "$STUB_LOG"; rc_is 'default is the latest release' 0 "$?"
+    grep -q 'releases/latest/download/darban-ovpn-amd64.tar.gz' "$STUB_LOG"; rc_is 'default is the latest release' 0 "$?"
+    if grep -q 'darban-ovpn.tar.gz' "$STUB_LOG"; then result 0 'only the archive of this architecture is downloaded'; else result 1 'only the archive of this architecture is downloaded'; fi
 
     rm -f "$MARKER"; : > "$STUB_LOG"
     out=$(bash "$E/get.sh" --version v1.2.3 2>&1 </dev/null)
@@ -608,7 +693,7 @@ test_get_sh_verifies_before_installing() {
     rc_not0 'a malformed version is refused' "$rc"
 
     rm -f "$MARKER"
-    echo tampered >> "$RELEASE/darban-ovpn.tar.gz"
+    echo tampered >> "$RELEASE/darban-ovpn-amd64.tar.gz"
     out=$(bash "$E/get.sh" 2>&1 </dev/null); rc=$?
     rc_not0 'a changed archive is refused' "$rc"
     has 'it says why' 'Checksum mismatch' "$out"
@@ -625,12 +710,35 @@ test_get_sh_verifies_before_installing() {
     ok_if 'the installer did not run' test ! -e "$MARKER"
 }
 
+test_get_sh_picks_the_archive_of_this_architecture() {
+    # G2: darban-core is built for amd64 and arm64, so get.sh downloads the archive of this server's architecture,
+    # and refuses any other before downloading anything.
+    local out rc
+    fake_release
+    : > "$STUB_LOG"
+    out=$(FAKE_ARCH=arm64 bash "$E/get.sh" 2>&1 </dev/null); rc=$?
+    rc_is 'an arm64 server installs' 0 "$rc"
+    grep -q 'releases/latest/download/darban-ovpn-arm64.tar.gz' "$STUB_LOG"; rc_is 'with the arm64 archive' 0 "$?"
+    rm -f "$MARKER"; : > "$STUB_LOG"
+    out=$(FAKE_ARCH=i386 bash "$E/get.sh" 2>&1 </dev/null); rc=$?
+    rc_not0 'another architecture is refused' "$rc"
+    has 'it says why' 'runs on amd64 and arm64 servers; this one is i386. Nothing was downloaded.' "$out"
+    ok_if 'nothing was downloaded' test ! -s "$STUB_LOG"
+    ok_if 'the installer did not run' test ! -e "$MARKER"
+    # A release before v1.1 has one archive for every architecture, and going back to it still works.
+    rm -f "$RELEASE/darban-ovpn-amd64.tar.gz" "$RELEASE/darban-ovpn-arm64.tar.gz"
+    (cd "$RELEASE" && sha256sum darban-ovpn.tar.gz > SHA256SUMS)
+    out=$(bash "$E/get.sh" --version v1.0.1 2>&1 </dev/null); rc=$?
+    rc_is 'an older release installs' 0 "$rc"
+    grep -q 'releases/download/v1.0.1/darban-ovpn.tar.gz' "$STUB_LOG"; rc_is 'from its one archive' 0 "$?"
+    ok_if 'the installer ran' test -s "$MARKER"
+}
+
 test_get_sh_sets_up_a_server_only_when_there_is_none() {
     local out rc
     fake_release
     printf '#!/usr/bin/env bash\necho "server setup ran" >> "$MARKER.setup"\n' > "$E/fixture/setup/server-setup.sh"
-    tar -C "$E/fixture" -czf "$RELEASE/darban-ovpn.tar.gz" setup VERSION
-    (cd "$RELEASE" && sha256sum darban-ovpn.tar.gz > SHA256SUMS)
+    pack_release
     # The test has no terminal, so the fallback to the real terminal is replaced by the test's stdin.
     sed -i 's#</dev/tty#</dev/null#' "$E/get.sh"
 
@@ -988,7 +1096,8 @@ case " $* " in
 esac
 exit 0
 STUB
-    out=$(menu '7\n2\n21194\n21194\n0\n0\n')
+    # Settings > 2 > 4: a new UDP port, confirmed; every restart fails, so the rollback cannot bring it back.
+    out=$(menu '7\n2\n4\n21194\n2\n0\n0\n')
     lacks 'it never claims the port did not change' 'The port was NOT changed' "$out"
     has 'it says the rollback did not finish' 'The rollback did not finish' "$out"
 }
@@ -1305,7 +1414,7 @@ test_advanced_settings_are_applied_and_rolled_back() {
     has 'and the mark is explained' '* restarts OpenVPN' "$out"
     out=$(menu '7\n0\n0\n')
     has 'Settings says what it holds' 'What clients connect to, and how profiles are shared' "$out"
-    has 'the port is marked as a restart' 'OpenVPN UDP port *' "$out"
+    has 'the protocol is marked as a restart' 'OpenVPN protocol *' "$out"
 
     before=$(cat "$SERVER_CONF")
     cp "$E/cfg/nat.nft" "$E/nat.before"
@@ -2530,6 +2639,42 @@ test_restore_previous_version() {
     grep -q 'restored previous version' "$STUB_LOG"; rc_is 'the restore is audited' 0 "$?"
 }
 
+test_restore_previous_runs_its_darban_core_first() {
+    # G2: the darban-core of the version restored runs once, from a copy beside the installed one, before anything is
+    # replaced. One that does not run here, or that is another version, leaves this version whole.
+    local out backup=$E/backups-tool/20260101T000000 before kind
+    mkdir -p "$E/sbin" "$E/units" "$backup/sbin" "$backup/lib" "$backup/units"
+    printf '#!/usr/bin/env bash\nDARBAN_VERSION=0.9.0\n' > "$backup/sbin/darban"
+    echo 'old lib' > "$backup/lib/old-marker"
+    before=$(sha256sum < "$E/lib/darban-core")
+    for kind in fails truncated other-version; do
+        case $kind in
+            fails) printf '#!/bin/sh\nexit 1\n' > "$backup/lib/darban-core" ;;
+            truncated) head -c 4096 "$E/lib/darban-core" > "$backup/lib/darban-core" ;;
+            other-version) printf '#!/bin/sh\necho 0.8.0\n' > "$backup/lib/darban-core" ;;
+        esac
+        chmod 700 "$backup/lib/darban-core"
+        out=$(menu '9\n4\n2\n0\n0\n')
+        if [[ $kind == other-version ]]; then
+            has "$kind: it says why" 'The new darban-core is version 0.8.0, not 0.9.0. The installed one stays; nothing was replaced.' "$out"
+        else
+            has "$kind: it says why" 'The new darban-core does not run on this server' "$out"
+        fi
+        lacks "$kind: it restores nothing" 'Restored v0.9.0' "$out"
+        rc_is "$kind: the installed darban-core stays" "$before" "$(sha256sum < "$E/lib/darban-core")"
+        ok_if "$kind: and nothing else is restored" test ! -e "$E/lib/old-marker" -a ! -e "$E/sbin/darban" -a -d "$backup"
+        ok_if "$kind: no copy is left beside it" test -z "$(find "$E/lib" -maxdepth 1 -name '.darban-core.*')"
+    done
+    printf '#!/bin/sh\necho 0.9.0\n' > "$backup/lib/darban-core"
+    chmod 700 "$backup/lib/darban-core"
+    cp "$backup/lib/darban-core" "$E/core.wanted"
+    out=$(menu '9\n4\n2\n')
+    has 'one that runs is restored' 'Restored v0.9.0' "$out"
+    ok_if 'it took the place of the installed one' cmp -s "$E/core.wanted" "$E/lib/darban-core"
+    ok_if 'with the rest of the library' test -s "$E/lib/old-marker"
+    ok_if 'no copy is left beside it' test -z "$(find "$E/lib" -maxdepth 1 -name '.darban-core.*')"
+}
+
 tool_version() { printf '#!/usr/bin/env bash\necho %s\n' "$1" > "$E/fake-tool"; chmod +x "$E/fake-tool"; }
 
 test_get_sh_knows_install_from_update() {
@@ -2648,8 +2793,7 @@ test_get_sh_from_a_pipe() {
     local out rc
     fake_release
     printf '#!/usr/bin/env bash\necho "$*" >> "$MARKER.setup"\n' > "$E/fixture/setup/server-setup.sh"
-    tar -C "$E/fixture" -czf "$RELEASE/darban-ovpn.tar.gz" setup VERSION
-    (cd "$RELEASE" && sha256sum darban-ovpn.tar.gz > SHA256SUMS)
+    pack_release
     rm "$SERVER_CONF"
     out=$(cat "$E/get.sh" | setsid -w bash 2>&1); rc=$?
     rc_not0 'no terminal and no answers is an error' "$rc"
@@ -2694,6 +2838,16 @@ test_release_assets_know_their_version() {
         grep -qx "$module" <<<"$listed"; rc_is "the archive has the module $module" 0 "$?"
     done
     (cd "$out" && sha256sum --quiet -c SHA256SUMS >/dev/null); rc_is 'the checksums match' 0 "$?"
+    # G2: darban-core for both architectures in the archive v1.0 downloads, and the one of each in its own.
+    grep -qx 'bin/darban-core-amd64' <<<"$listed" && grep -qx 'bin/darban-core-arm64' <<<"$listed"; rc_is 'the archive for v1.0 has darban-core for both' 0 "$?"
+    local arch other own
+    for arch in amd64 arm64; do
+        other=arm64; [[ $arch == amd64 ]] || other=amd64
+        own=$(tar -tzf "$out/darban-ovpn-$arch.tar.gz")
+        grep -qx "bin/darban-core-$arch" <<<"$own" && ! grep -qx "bin/darban-core-$other" <<<"$own" && grep -qx 'setup/install.sh' <<<"$own"
+        rc_is "the $arch archive has its darban-core only" 0 "$?"
+        grep -q "  darban-ovpn-$arch.tar.gz\$" "$out/SHA256SUMS"; rc_is "the $arch archive has a checksum" 0 "$?"
+    done
 
     # Q12: every file carries the commit time, and a second build of the commit, from a copy whose files have
     # another time, gives the same bytes.
@@ -2704,7 +2858,7 @@ test_release_assets_know_their_version() {
     mkdir -p "$copy" && git -C "$REPO" archive HEAD | tar -x -C "$copy"; rc_is 'a copy of the commit' 0 "$?"
     find "$copy" -type f -exec touch -d '2001-02-03 04:05:06' {} +
     # The suite runs on the commit's own tree: only an uncommitted change could make the two builds differ.
-    if [[ -z $(git -C "$REPO" status --porcelain -- VERSION bin lib setup systemd scripts README.md README.fa.md CHANGELOG.md LICENSE) ]]; then
+    if [[ -z $(git -C "$REPO" status --porcelain -- VERSION bin lib setup systemd scripts README.md README.fa.md CHANGELOG.md LICENSE go.mod cmd internal) ]]; then
         SOURCE_DATE_EPOCH=$when bash "$copy/scripts/build-release.sh" "$WORK/release-again" >/dev/null 2>&1
         rc_is 'the second build' 0 "$?"
         rc_is 'two builds of one commit, one checksum' "$(sha256sum <"$out/SHA256SUMS")" "$(sha256sum <"$WORK/release-again/SHA256SUMS")"
@@ -2721,7 +2875,7 @@ test_an_update_places_the_modules_before_the_manager() {
     modules=$(grep -n '^for module in lib/darban/\*\.sh lib/darban/screens/\*\.sh; do$' "$REPO/setup/install.sh" | cut -d: -f1)
     manager=$(grep -n '^install .* bin/darban /usr/local/sbin/darban$' "$REPO/setup/install.sh" | cut -d: -f1)
     [[ -n $modules && -n $manager ]] && (( modules < manager )); rc_is 'install.sh places the modules before the manager' 0 "$?"
-    grep -qF 'cp -a -- "$newest/lib/." "$DARBAN_LIB/" && cp -a -- "$newest/sbin/." "$SBIN_DIR/"' "$REPO/lib/darban/tool.sh"
+    grep -qF -- '-exec cp -a -t "$DARBAN_LIB/" -- {} + && darban_core_place "$core_new" "$DARBAN_CORE" && cp -a -- "$newest/sbin/." "$SBIN_DIR/"' "$REPO/lib/darban/tool.sh"
     rc_is 'the previous version gets its library before its manager' 0 "$?"
     # The manager sources each module of lib/darban, its screens included, once, from where install.sh puts it,
     # paths.sh first.
@@ -7370,6 +7524,333 @@ test_the_download_panel_never_reads_a_file_without_a_record() {
     has 'the panel is shown' 'Server' "$out"
     has 'where it points is not known without a record' 'unknown' "$out"
     [[ $(stat -c %X "$E/clients/alice.ovpn") == "$before" ]]; rc_is 'the file is not read' 0 "$?"
+}
+
+# ---------- T1: UDP only, TCP only, or both ----------
+in_manager() {
+    # in_manager <function> [argument]...: one function of the manager, with every module loaded and nothing started.
+    bash -c 'source <(sed "\$d" "$E/manager.sh"); set +eu; "$@"' _ "$@" 2>&1
+}
+with_listeners() {
+    # with_listeners <line>...: the fake server.conf with these listener lines in place of its own.
+    local temp=$E/conf.listeners
+    printf '%s\n' "$@" >"$temp"
+    awk '$1!="port" && $1!="proto" && $1!="local" && $1!="explicit-exit-notify" && $1!="port-share"' "$SERVER_CONF" >>"$temp"
+    mv -f "$temp" "$SERVER_CONF"
+}
+openvpn_says() {
+    # openvpn_says <version>: the stand-in of openvpn --version.
+    printf '#!/usr/bin/env bash\necho "OpenVPN %s x86_64-pc-linux-gnu [SSL (OpenSSL)] [DCO]"\n' "$1" >"$E/bin/openvpn"
+    chmod +x "$E/bin/openvpn"
+}
+ports_in_order() {
+    # ports_in_order <port>...: the random choices of shuf, one by one.
+    printf '#!/usr/bin/env bash\nIFS= read -r p < "%s" || exit 1; sed -i 1d "%s"; echo "$p"\n' "$E/shuf-seq" "$E/shuf-seq" >"$E/bin/shuf"
+    chmod +x "$E/bin/shuf"
+    printf '%s\n' "$@" >"$E/shuf-seq"
+}
+refuses_listeners() {
+    # refuses_listeners <what> <line>...: server_listeners fails on that shape, and prints nothing.
+    local what=$1 out rc
+    shift
+    with_listeners "$@"
+    out=$(in_manager server_listeners); rc=$?
+    rc_is "refused: $what" 1 "$rc"
+    [[ -z $out ]]; rc_is "and nothing is printed for it: $what" 0 "$?"
+}
+
+test_t1_server_listeners_forms() {
+    local out
+    [[ $(in_manager server_listeners) == 'udp 1194' ]]; rc_is 'port and proto udp4: UDP only' 0 "$?"
+    [[ $(in_manager server_mode) == udp ]]; rc_is 'its mode is udp' 0 "$?"
+    with_listeners 'port 443' 'proto tcp4-server'
+    [[ $(in_manager server_listeners) == 'tcp 443' ]]; rc_is 'port and proto tcp4-server: TCP only' 0 "$?"
+    [[ $(in_manager server_port) == 443 ]]; rc_is 'server_port gives the only port' 0 "$?"
+    with_listeners 'local * 443 tcp' 'local * 1543 udp'
+    out=$(in_manager server_listeners)
+    [[ $out == $'udp 1543\ntcp 443' ]]; rc_is 'two local lines: both, UDP first in any order' 0 "$?"
+    [[ $(in_manager server_mode) == both ]]; rc_is 'its mode is both' 0 "$?"
+    [[ $(in_manager server_port) == 1543 ]]; rc_is 'server_port gives the UDP port of both' 0 "$?"
+    [[ $(in_manager listeners_label) == 'UDP 1543 + TCP 443' ]]; rc_is 'the label names both' 0 "$?"
+    [[ $(in_manager endpoint_label vpn.example.com) == 'vpn.example.com:1543/UDP + 443/TCP' ]]; rc_is 'and the endpoint too' 0 "$?"
+    has 'Settings shows the protocol' 'OpenVPN protocol *       UDP 1543 + TCP 443' "$(menu '7\n0\n0\n')"
+    has 'the status line shows both' 'vpn.example.com:1543/UDP + 443/TCP' "$(menu '0\n')"
+
+    refuses_listeners 'two port lines' 'port 1194' 'port 1195' 'proto udp4'
+    refuses_listeners 'local with port' 'local * 1543 udp' 'local * 443 tcp' 'port 1194'
+    refuses_listeners 'local with proto' 'local * 1543 udp' 'local * 443 tcp' 'proto udp4'
+    refuses_listeners 'two UDP local lines' 'local * 1543 udp' 'local * 1544 udp'
+    refuses_listeners 'one local line' 'local * 1543 udp'
+    refuses_listeners 'a local address' 'local 0.0.0.0 1543 udp' 'local * 443 tcp'
+    refuses_listeners 'an unknown protocol' 'port 1194' 'proto sctp'
+    refuses_listeners 'proto udp without 4' 'port 1194' 'proto udp'
+    refuses_listeners 'a port out of range' 'port 70000' 'proto udp4'
+    refuses_listeners 'no proto' 'port 1194'
+    has 'Diagnostics name a form this tool does not know' 'no listener form this tool knows' "$(mgr status)"
+}
+
+test_t1_profiles_of_each_mode() {
+    local profile
+    with_listeners 'port 1194' 'proto udp4'
+    menu '1\nudpone\n0\n' >/dev/null
+    profile=$(cat "$E/clients/udpone.ovpn")
+    has 'UDP only: proto udp4 and one remote' $'proto udp4\nremote vpn.example.com 1194\n' "$profile"
+    has 'a UDP remote has explicit-exit-notify' 'explicit-exit-notify 1' "$profile"
+    lacks 'one remote needs no server-poll-timeout' 'server-poll-timeout' "$profile"
+    has 'its record keeps the remote with its protocol' 'remote=remote vpn.example.com 1194 udp' "$(cat "$E/clients/udpone.share")"
+
+    with_listeners 'port 443' 'proto tcp4-server'
+    menu '1\ntcpone\n0\n' >/dev/null
+    profile=$(cat "$E/clients/tcpone.ovpn")
+    has 'TCP only: proto tcp4 and one remote' $'proto tcp4\nremote vpn.example.com 443\n' "$profile"
+    lacks 'a TCP-only profile has no explicit-exit-notify' 'explicit-exit-notify' "$profile"
+    lacks 'nor server-poll-timeout' 'server-poll-timeout' "$profile"
+    has 'its record says TCP' 'remote=remote vpn.example.com 443 tcp' "$(cat "$E/clients/tcpone.share")"
+
+    with_listeners 'local * 1543 udp' 'local * 443 tcp'
+    menu '1\nbothone\n0\n' >/dev/null
+    profile=$(cat "$E/clients/bothone.ovpn")
+    has 'both: UDP first, then TCP, 5 seconds each' \
+        $'remote vpn.example.com 1543 udp4\nremote vpn.example.com 443 tcp4\nserver-poll-timeout 5\nexplicit-exit-notify 1\n' "$profile"
+    [[ $(grep -c '^proto ' "$E/clients/bothone.ovpn") == 0 ]]; rc_is 'both: no proto line of its own' 0 "$?"
+    has 'the record keeps every remote' 'remote=remote vpn.example.com 1543 udp;remote vpn.example.com 443 tcp' "$(cat "$E/clients/bothone.share")"
+
+    # Nothing but a checked endpoint reaches a profile: no newline, no carriage return, no other protocol.
+    in_manager profile_transport $'vpn.example.com\r 1194 udp' >/dev/null; rc_is 'a carriage return is refused' 1 "$?"
+    in_manager profile_transport $'vpn.example.com 1194 udp\nbad;host 1 tcp' >/dev/null; rc_is 'a bad host is refused' 1 "$?"
+    in_manager profile_transport 'vpn.example.com 1194 sctp' >/dev/null; rc_is 'an unknown protocol is refused' 1 "$?"
+}
+
+test_t1_old_and_new_share_records() {
+    local out
+    [[ $(in_manager record_endpoints 'remote vpn.example.com 1194') == 'vpn.example.com 1194 udp' ]]
+    rc_is 'a record from before TCP reads as UDP' 0 "$?"
+    [[ $(in_manager record_endpoints 'remote h.example 1543 udp;remote h.example 443 tcp') == $'h.example 1543 udp\nh.example 443 tcp' ]]
+    rc_is 'a new record gives every remote, in order' 0 "$?"
+    [[ $(in_manager endpoints_label $'h.example 1543 udp\nh.example 443 tcp') == 'h.example:1543/UDP + 443/TCP' ]]
+    rc_is 'the download panel shows HOST:N/UDP + M/TCP' 0 "$?"
+    menu '1\nbob\n0\n' >/dev/null
+    has 'a profile of today points where the server is' 'vpn.example.com:1194/UDP' "$(menu '6\n1\n1\n0\n')"
+    lacks 'and is not called old' 'This file points to' "$(menu '6\n1\n1\n0\n')"
+    with_listeners 'local * 1194 udp' 'local * 443 tcp'
+    out=$(menu '6\n1\n1\n0\n')
+    has 'a UDP profile of a server with both now is old: every remote is compared' \
+        'This file points to vpn.example.com:1194/UDP but the server is now vpn.example.com:1194/UDP + 443/TCP' "$out"
+    sed -i 's/^remote=.*/remote=remote vpn.example.com 1194/' "$E/clients/bob.share"
+    with_listeners 'port 1194' 'proto udp4'
+    lacks 'an old record without a protocol matches a UDP server' 'This file points to' "$(menu '6\n1\n1\n0\n')"
+}
+
+test_t1_tcp_port_rule() {
+    local out
+    ports_in_order 1194 1500 1600 1700
+    [[ $(in_manager darban_free_port tcp 1600 1500) == 1700 ]]
+    rc_is 'never 1194, nor a port to avoid: the link port and the UDP port' 0 "$?"
+    ports_in_order 1300 1301
+    [[ $(FAKE_BUSY_TCP=1300 in_manager darban_free_port tcp) == 1301 ]]; rc_is 'never a port taken on TCP' 0 "$?"
+    ports_in_order 1300
+    [[ $(FAKE_BUSY_UDP=1300 in_manager darban_free_port tcp) == 1300 ]]; rc_is 'a port taken on UDP only is free on TCP' 0 "$?"
+    : >"$E/shuf-seq"
+    [[ $(FAKE_BUSY_TCP=1024 in_manager darban_free_port tcp 1025) == 1026 ]]; rc_is 'without shuf, the first usable one' 0 "$?"
+    rm -f "$E/bin/shuf"
+    out=$(in_manager darban_free_port tcp)
+    (( out >= 1024 && out <= 1999 && out != 1194 )); rc_is 'the real random choice is from 1024 to 1999, never 1194' 0 "$?"
+
+    [[ -z $(LINK_PORT='' in_manager tcp_port_problem 443) ]]; rc_is '443 is accepted' 0 "$?"
+    [[ -z $(in_manager tcp_port_problem 4443) ]]; rc_is 'a free port is accepted' 0 "$?"
+    [[ $(in_manager tcp_port_problem 1023) == range ]]; rc_is 'below 1024 and not 443 is refused' 0 "$?"
+    [[ $(FAKE_BUSY_TCP=4443 in_manager tcp_port_problem 4443) == busy ]]; rc_is 'a taken port is refused' 0 "$?"
+    printf 'LINK_PORT=9347\n' >>"$E/cfg/config"
+    [[ $(bash -c 'source <(sed "\$d" "$E/manager.sh"); set +eu; load_config; tcp_port_problem 9347' 2>&1) == link ]]
+    rc_is 'the link port is refused' 0 "$?"
+}
+
+test_t1_settings_protocol_screen() {
+    local out before
+    template_server
+    before=$(cat "$SERVER_CONF")
+    openvpn_says 2.7.9
+    out=$(menu '7\n2\n\n0\n0\n')
+    has 'the screen says TCP is for blocked UDP, not hiding' 'TCP is for networks that block UDP; it does not hide the VPN' "$out"
+    has 'UDP only is recommended' '1  UDP only (recommended)' "$out"
+    has 'both comes with its order' '3  Both: UDP first, TCP when UDP is blocked' "$out"
+    has 'a port can be changed' '4  Change a port' "$out"
+    lacks 'port sharing waits for TCP' 'Share the TCP port' "$out"
+    has 'Enter cancels' 'Cancelled; nothing changed' "$out"
+
+    # UDP only to TCP only: every profile stops working, so the default is No.
+    ports_in_order 1700
+    out=$(menu '7\n2\n2\n\n\n0\n0\n')
+    has 'the suggestion is a random free port' 'Press Enter to use 1700' "$out"
+    has '443 is named where only web ports are open' 'or 443 where only web ports are open' "$out"
+    has 'it warns that every profile stops' 'Every profile shared before uses UDP and STOPS WORKING' "$out"
+    has 'it names the port to open' 'Open TCP 1700 in your provider firewall BEFORE continuing' "$out"
+    [[ $before == "$(cat "$SERVER_CONF")" ]]; rc_is 'Enter at the question keeps server.conf' 0 "$?"
+    ports_in_order 1700
+    out=$(menu '7\n2\n2\n\n2\n0\n0\n')
+    has 'TCP only is applied' 'OpenVPN is listening on TCP 1700' "$out"
+    conf_has '^port 1700$' && conf_has '^proto tcp4-server$'; rc_is 'server.conf has port and proto tcp4-server' 0 "$?"
+    conf_has 'explicit-exit-notify'; rc_is 'TCP only has no explicit-exit-notify' 1 "$?"
+    has 'Settings shows it' 'OpenVPN protocol *       TCP 1700' "$(menu '7\n0\n0\n')"
+    has 'with TCP, port sharing is offered' 'Share the TCP port' "$(menu '7\n2\n\n0\n0\n')"
+
+    # Back to UDP only on the port of before: the file is the template again, byte for byte.
+    out=$(menu '7\n2\n1\n1194\n2\n0\n0\n')
+    has 'TCP to UDP warns too' 'Every profile shared before uses TCP and STOPS WORKING' "$out"
+    [[ $before == "$(cat "$SERVER_CONF")" ]]; rc_is 'UDP to TCP and back gives the same server.conf' 0 "$?"
+
+    # UDP only to both: old profiles still work; a TCP port the same as the UDP one is accepted.
+    out=$(menu '7\n2\n3\n1194\n2\n0\n0\n')
+    has 'old profiles still connect' 'Profiles shared before still connect over UDP' "$out"
+    has 'and sharing again gives the fallback' 'for the automatic fallback to TCP' "$out"
+    conf_has '^local \* 1194 udp$' && conf_has '^local \* 1194 tcp$'; rc_is 'both is two local lines' 0 "$?"
+    conf_has '^port \|^proto '; rc_is 'and no port or proto line' 1 "$?"
+    conf_has '^explicit-exit-notify 1$'; rc_is 'both keeps explicit-exit-notify for UDP' 0 "$?"
+
+    # Change a port asks which one with both; the link port and a taken port are refused, 443 is taken.
+    printf 'LINK_PORT=9347\n' >>"$E/cfg/config"
+    out=$(printf '7\n2\n4\n2\n9347\n5555\n443\n2\n0\n0\n' | FAKE_BUSY_TCP=5555 bash "$E/manager.sh" 2>&1)
+    # A prompt shows only in a terminal; the two ports it chooses between show everywhere.
+    has 'it asks which port: both are listed' '2  TCP 1194' "$out"
+    has 'the link port is refused' 'TCP 9347 is the link port' "$out"
+    has 'a taken port is refused with a suggestion' 'Port 5555 is already in use. Suggested:' "$out"
+    has 'a TCP change warns about TCP-only profiles' 'Profiles that use TCP only stop working' "$out"
+    conf_has '^local \* 443 tcp$'; rc_is '443 is applied' 0 "$?"
+    has 'the link port setting refuses the OpenVPN TCP port' 'TCP 443 is the OpenVPN TCP port' "$(menu '7\n4\n443\n0\n0\n')"
+    has 'Diagnostics check each listener with its protocol' 'Listening on TCP 443' "$(mgr status)"
+
+    # Both to TCP only, and both with an OpenVPN that is too old.
+    out=$(menu '7\n2\n2\n2\n0\n0\n')
+    has 'both to TCP warns that automatic profiles connect later' 'Profiles with both connect about 5 seconds later' "$out"
+    conf_has '^port 443$' && conf_has '^proto tcp4-server$'; rc_is 'TCP only keeps the TCP port' 0 "$?"
+    openvpn_says 2.7.4
+    out=$(menu '7\n2\n3\n0\n0\n')
+    has 'both needs 2.7.5' 'Both needs OpenVPN 2.7.5 or newer; this server has 2.7.4' "$out"
+    conf_has '^local '; rc_is 'and nothing changed' 1 "$?"
+    with_listeners 'local * 1194 udp' 'local * 443 tcp'
+    has 'Diagnostics say both needs 2.7.5' 'UDP and TCP together need OpenVPN 2.7.5 or newer' "$(mgr status)"
+}
+
+test_t1_rollback_when_a_listener_does_not_come() {
+    local out before
+    template_server
+    openvpn_says 2.7.9
+    before=$(cat "$SERVER_CONF")
+    fail_restart_when 'tcp4-server'
+    out=$(menu '7\n2\n2\n4443\n2\n0\n0\n')
+    has 'a TCP port that does not come up is rolled back' 'Rolled back' "$out"
+    has 'and says nothing changed' 'Nothing was changed' "$out"
+    [[ $before == "$(cat "$SERVER_CONF")" ]]; rc_is 'server.conf is exactly as before' 0 "$?"
+}
+
+test_t1_restore_accepts_the_three_forms() {
+    local out conf=$E/backup-conf rc
+    template_server
+    restored() { python3 "$E/lib/backup.py" conf --conf "$conf" --server-dir "$E/server" 2>&1; }
+    cp "$SERVER_CONF" "$conf"
+    out=$(restored)
+    [[ $out == "$(cat "$SERVER_CONF")" ]]; rc_is 'a UDP server is written back byte for byte' 0 "$?"
+    sed -i 's/^proto udp4$/proto tcp4-server/' "$conf"
+    out=$(restored)
+    has 'TCP only keeps proto tcp4-server' $'port 1194\nproto tcp4-server\n' "$out"
+    lacks 'and has no explicit-exit-notify' 'explicit-exit-notify' "$out"
+    sed -i -e 's/^port 1194$/local * 1194 udp/' -e 's/^proto tcp4-server$/local * 443 tcp/' "$conf"
+    printf 'port-share 127.0.0.1 1500 /run/darban-port-share\n' >>"$conf"
+    out=$(restored)
+    has 'both is two local lines' $'local * 1194 udp\nlocal * 443 tcp\ndev tun' "$out"
+    has 'both keeps explicit-exit-notify' 'explicit-exit-notify 1' "$out"
+    lacks 'port-share is not restored' 'port-share 127' "$out"
+    has 'and says so' 'port-share, is not restored' "$out"
+    sed -i 's/^local \* 443 tcp$/local * 1195 udp/' "$conf"
+    out=$(restored); rc=$?
+    rc_is 'two UDP local lines refuse it' 2 "$rc"
+    has 'and say which' 'names udp twice' "$out"
+    cp "$SERVER_CONF" "$conf"; printf 'local * 443 tcp\n' >>"$conf"
+    out=$(restored); rc=$?
+    rc_is 'local with port refuses it' 2 "$rc"
+    cp "$SERVER_CONF" "$conf"; printf 'local 0.0.0.0 443 tcp\n' >>"$conf"
+    out=$(restored); rc=$?
+    rc_is 'a local address refuses it' 2 "$rc"
+    cp "$SERVER_CONF" "$conf"; sed -i 's/^proto udp4$/proto tcp6/' "$conf"
+    out=$(restored); rc=$?
+    rc_is 'an unknown proto refuses it' 2 "$rc"
+}
+
+test_t1_port_share_screen() {
+    local out
+    template_server
+    openvpn_says 2.7.9
+    with_listeners 'local * 1194 udp' 'local * 443 tcp'
+    has 'port sharing is offered while TCP is on' '5  Share the TCP port' "$(menu '7\n2\n\n0\n0\n')"
+    has 'it is off by default' 'off (link page on TCP 443)' "$(menu '7\n2\n\n0\n0\n')"
+    conf_has '^port-share '; rc_is 'nothing shares the port by default' 1 "$?"
+    printf 'port-share 10.0.0.1 80 /tmp\n' >>"$SERVER_CONF"
+    has 'a port-share line of someone else is left alone' 'a port-share line this tool did not write' "$(menu '7\n2\n5\n0\n0\n')"
+    [[ $(in_manager conf_port_share; echo "rc=$?") == *rc=2 ]]; rc_is 'and is told apart' 0 "$?"
+    sed -i '/^port-share /d' "$SERVER_CONF"
+    printf 'port-share 127.0.0.1 1500 %s\n' "$E/run/darban-port-share" >>"$SERVER_CONF"
+    [[ $(in_manager conf_port_share) == 1500 ]]; rc_is "this tool's line gives the local port of the link page" 0 "$?"
+    [[ $(in_manager link_public_port) == 443 ]]; rc_is 'links then use the OpenVPN TCP port' 0 "$?"
+    [[ $(in_manager link_listen_port) == 1500 ]]; rc_is 'and the link page listens on its local port' 0 "$?"
+    has 'the link port setting says so' 'Links use TCP 443, the port OpenVPN shares with the link page' "$(menu '7\n4\n0\n0\n')"
+    # A port change keeps the line; UDP only drops it.
+    out=$(menu '7\n2\n4\n2\n4443\n2\n0\n0\n')
+    conf_has "^port-share 127.0.0.1 1500 $E/run/darban-port-share$"; rc_is 'a TCP port change keeps port-share' 0 "$?"
+    out=$(menu '7\n2\n1\n2\n0\n0\n')
+    has 'UDP only ends port sharing, and says so' 'Sharing the TCP port with the link page ends with TCP' "$out"
+    conf_has '^port-share '; rc_is 'UDP only has no port-share line' 1 "$?"
+}
+port_share_leftovers_made() {
+    # What turning port-share on sets up beside server.conf, without its line: as after a restore, or a hand edit.
+    mkdir -p "$E/units/darban-links.service.d" "$E/run/darban-port-share"
+    printf '[Service]\nRestart=on-failure\n' >"$E/units/darban-links.service.d/darban-port-share.conf"
+    printf 'd %s 2750 nobody root -\n' "$E/run/darban-port-share" >"$E/tmpfiles/darban-port-share.conf"
+}
+port_share_leftovers_gone() {
+    [[ ! -e $E/units/darban-links.service.d/darban-port-share.conf && ! -e $E/tmpfiles/darban-port-share.conf && ! -e $E/run/darban-port-share ]]
+}
+
+test_t1_port_share_leftovers_go() {
+    local out fp
+    template_server
+    port_share_leftovers_made
+    has 'Diagnostics warn about a link page set up for a port nothing shares' \
+        'The link page is still set up to stay behind a shared TCP port, but server.conf shares none' "$(mgr status)"
+    out=$(menu '7\n2\n\n0\n0\n')
+    has 'Settings > 2 says it removes them' 'server.conf shares no TCP port, so the link page goes back' "$out"
+    port_share_leftovers_gone; rc_is 'and removes the drop-in, the tmpfiles entry and the folder' 0 "$?"
+    grep -q 'systemctl disable darban-links.service' "$STUB_LOG"; rc_is 'and the link service is no longer enabled' 0 "$?"
+    lacks 'Diagnostics are quiet after that' 'still set up to stay behind a shared TCP port' "$(mgr status)"
+
+    # A restore never brings the port-share line back, so what turning it on set up goes with the restore.
+    backed_up_server
+    fp=$(ca_fp)
+    port_share_leftovers_made
+    : >"$STUB_LOG"
+    out=$(printf '2\n' | bash "$E/manager.sh" restore "$E/backup.tar" --ca-fingerprint "$fp" 2>&1); rc_is 'the restore succeeds' 0 "$?"
+    has 'it is done' 'Restored the backup of' "$out"
+    port_share_leftovers_gone; rc_is 'and leaves nothing of port-share behind' 0 "$?"
+    grep -q 'systemctl disable darban-links.service' "$STUB_LOG"; rc_is 'and disables the always-on link service' 0 "$?"
+}
+test_t1_a_port_another_program_takes_rolls_back() {
+    # Another program takes the new port as OpenVPN restarts: its socket is there, but it is not OpenVPN's, so the
+    # change is rolled back, with UDP as with TCP. Diagnostics name that program.
+    local out before
+    template_server
+    openvpn_says 2.7.9
+    before=$(cat "$SERVER_CONF")
+    out=$(printf '7\n2\n4\n1500\n2\n0\n0\n' | FAKE_TAKE_ON_RESTART=1500 bash "$E/manager.sh" 2>&1)
+    has 'a UDP port another program took is rolled back' 'Rolled back' "$out"
+    lacks 'and never called applied' 'OpenVPN is listening on UDP 1500' "$out"
+    [[ $before == "$(cat "$SERVER_CONF")" ]]; rc_is 'server.conf is exactly as before' 0 "$?"
+    out=$(printf '7\n2\n3\n4443\n2\n0\n0\n' | FAKE_TAKE_ON_RESTART=4443 bash "$E/manager.sh" 2>&1)
+    has 'a TCP port another program took is rolled back' 'Rolled back' "$out"
+    lacks 'and never called applied' 'OpenVPN is listening on UDP 1194 + TCP 4443' "$out"
+    [[ $before == "$(cat "$SERVER_CONF")" ]]; rc_is 'and server.conf is as before' 0 "$?"
+    with_listeners 'local * 1194 udp' 'local * 4443 tcp'
+    out=$(mgr status)
+    has 'Diagnostics name the program on an OpenVPN port' 'nginx holds TCP 4443, so OpenVPN cannot listen there' "$out"
+    has 'and the other port is still OpenVPN' 'Listening on UDP 1194' "$out"
 }
 
 # RUN_TESTS_EXTRA=<file>: more tests, for Lint's checks of this runner itself.

@@ -74,7 +74,9 @@ qemu-system-x86_64 -enable-kvm -cpu host -m 2048 -smp 2 -display none -daemonize
 wait_for_ssh
 in_vm 'cloud-init status --wait >/dev/null 2>&1 || true'
 
-git ls-files -z | tar --null -T - -czf "$WORK/repo.tar.gz"
+# The committed files, and darban-core, which CI builds for the machine (amd64) and git does not track.
+[[ -f bin/darban-core-amd64 ]] || { echo 'FAIL: no bin/darban-core-amd64; build it first: bash scripts/build-core.sh amd64'; exit 1; }
+{ git ls-files -z; printf 'bin/darban-core-amd64\0'; } | tar --null -T - -czf "$WORK/repo.tar.gz"
 in_vm 'mkdir -p repo && tar -xzf - -C repo' < "$WORK/repo.tar.gz"
 
 before=$(in_vm 'uname -r')
@@ -178,8 +180,12 @@ done
 if in_vm 'sudo test -e /root/openvpn-clients/vmclient.ovpn'; then echo 'FAIL: the first connection after the reboot left the kept file.'; exit 1; fi
 ping -c 3 -W 5 -I tun9 10.8.0.1 >/dev/null
 echo 'PASS: a profile made before the reboot connects from outside, and data flows through the tunnel.'
-kill "$(cat "$CLIENT_PID")" 2>/dev/null || true
-sleep 1
+# A profile with explicit-exit-notify tells the server it leaves first, about a second: wait until the client has
+# ended, or the next one finds tun9 still taken.
+client=$(cat "$CLIENT_PID")
+kill "$client" 2>/dev/null || true
+for attempt in $(seq 1 100); do kill -0 "$client" 2>/dev/null || break; sleep 0.1; done
+sleep 0.5
 ip link del tun9 2>/dev/null || true
 
 # T65 and C.15.8: a restore stopped after each of its four renames, then a real reboot: OpenVPN stays off after the

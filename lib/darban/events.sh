@@ -615,17 +615,18 @@ events_health() {
     if (( HEALTH_BAD + HEALTH_WARN == before )); then check ok 'Connection events are seen: a link ends at the first connection'; fi
 }
 last_seen_label() {
-    # last_seen_label <name> <online list> <events on>: now, "12 min ago", "3 h ago", "5 d ago", never, or - when
-    # this server does not record it.
-    local us seconds
-    if [[ $2 == *$'\n'"$1"$'\n'* ]]; then printf 'now'; return 0; fi
-    if ! us=$(ledger_value "$1" last_seen) || [[ ! $us =~ ^[0-9]{16}$ ]]; then
-        if (( $3 )); then printf 'never'; else printf -- '-'; fi
+    # last_seen_label <variable> <name> <online list> <events on> <last_seen from the client's record, or -> <now>:
+    # sets the variable to now, "12 min ago", "3 h ago", "5 d ago", never, or - when this server does not record it.
+    # No subshell, so the list can call it for each of a thousand clients.
+    local seconds
+    if [[ $3 == *$'\n'"$2"$'\n'* ]]; then printf -v "$1" 'now'; return 0; fi
+    if [[ ! $5 =~ ^[0-9]{16}$ ]]; then
+        if (( $4 )); then printf -v "$1" 'never'; else printf -v "$1" -- '-'; fi
         return 0
     fi
-    seconds=$(( $(date -u +%s) - 10#$us / 1000000 ))
+    seconds=$(( $6 - 10#$5 / 1000000 ))
     (( seconds >= 0 )) || seconds=0
-    if (( seconds < 3600 )); then printf '%d min ago' $(( seconds < 60 ? 1 : seconds / 60 ))
-    elif (( seconds < 86400 )); then printf '%d h ago' $(( seconds / 3600 ))
-    else printf '%d d ago' $(( seconds / 86400 )); fi
+    if (( seconds < 3600 )); then printf -v "$1" '%d min ago' $(( seconds < 60 ? 1 : seconds / 60 ))
+    elif (( seconds < 86400 )); then printf -v "$1" '%d h ago' $(( seconds / 3600 ))
+    else printf -v "$1" '%d d ago' $(( seconds / 86400 )); fi
 }

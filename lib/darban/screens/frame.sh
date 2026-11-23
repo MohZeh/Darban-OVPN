@@ -8,15 +8,15 @@ title_bar() {
     hr
 }
 status_block() {
-    local host port state endpoint e valid revoked expired soon clients alert pending leftovers
+    local host listeners state endpoint e valid revoked expired soon clients alert pending leftovers
     host=$(domain)
-    port=$(server_port 2>/dev/null || printf '?')
+    listeners=$(listeners_label 2>/dev/null) || listeners='?'
     state=$(systemctl is-active "$DARBAN_UNIT" 2>/dev/null || true)
     if [[ $state == active ]]; then state="$C_GREEN$S_DOT active$C_RESET"; else state="$C_RED$S_DOT ${state:-not running}$C_RESET"; fi
     if valid_domain "$host"; then
-        endpoint="$host:$port/UDP"
+        endpoint=$(endpoint_label "$host") || true
     else
-        endpoint="${C_YELLOW}address not set $S_ARROW Settings $S_CRUMB 1$C_RESET (port $port/UDP)"
+        endpoint="${C_YELLOW}address not set $S_ARROW Settings $S_CRUMB 1$C_RESET ($listeners)"
     fi
     # A healthy blocklist is one word on the server line; a problem gets a line of its own.
     if { darban_crl_configured && darban_verify_crl "$DARBAN_CRL"; } >/dev/null 2>&1 && e=$(darban_crl_expiry_epoch "$DARBAN_CRL"); then

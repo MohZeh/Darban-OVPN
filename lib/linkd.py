@@ -21,11 +21,13 @@ import fcntl
 import hashlib
 import html
 import http.server
+import ipaddress
 import os
 import re
 import signal
 import socket
 import ssl
+import stat
 import sys
 import threading
 import time
@@ -38,6 +40,8 @@ NAME_RE = re.compile(r'^[A-Za-z0-9][A-Za-z0-9._@+-]{0,127}$')
 PATH_RE = re.compile(r'^/l/([0-9a-f]{64})(/file)?$')
 LANG_RE = re.compile(r'^\s*([A-Za-z]{1,8})(?:-[A-Za-z0-9]{1,8})*\s*(?:;\s*q\s*=\s*([0-9.]{1,5}))?\s*$')
 LOCAL_ADDRESSES = ('127.0.0.1', 'localhost', '::1')
+# What OpenVPN's port-share writes in each file: the address of the client it hands over, as [AF_INET]a.b.c.d:port.
+SHARED_RE = re.compile(r'^\[AF_INET6?\]([0-9A-Fa-f.:]{2,45}):[0-9]{1,5}$')
 
 
 def token_hash(token):
@@ -320,6 +324,41 @@ def device(agent):
     return 'desktop'
 
 
+def shared_address(directory, peer, tries=25, pause=0.02):
+    """With port-share, OpenVPN hands this service each connection to its TCP port that is not OpenVPN, from
+    127.0.0.1, and writes a file named by the address this service sees as its peer, which holds the client's real
+    address. It is read while the connection is open, since OpenVPN removes it when the connection closes; it may
+    come a moment after the connection, so it is looked for a few times. Only that file counts, never a header.
+    None when there is no file, or it holds no address."""
+    path = os.path.join(directory, '[AF_INET]%s:%d' % (peer[0], peer[1]))
+    for _ in range(tries):
+        try:
+            fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        except FileNotFoundError:
+            time.sleep(pause)
+            continue
+        except OSError:
+            return None
+        try:
+            if not stat.S_ISREG(os.fstat(fd).st_mode):
+                return None
+            data = os.read(fd, 128)
+        except OSError:
+            return None
+        finally:
+            os.close(fd)
+        match = SHARED_RE.match(data.decode('ascii', 'replace').strip())
+        if not match:
+            # Not written whole yet: OpenVPN writes it right after the connection.
+            time.sleep(pause)
+            continue
+        try:
+            return str(ipaddress.ip_address(match.group(1)))
+        except ValueError:
+            return None
+    return None
+
+
 class Handler(http.server.BaseHTTPRequestHandler):
     server_version = 'darban'
     sys_version = ''
@@ -362,7 +401,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             name, data = store.take(token)
             if name is None:
                 return self._gone()
-            print(f'profile downloaded: {name} from {self.client_address[0]}', flush=True)
+            print(f'profile downloaded: {name} from {self.server.address_of(self.request, self.client_address)}', flush=True)
             return self._send(200, data, 'application/x-openvpn-profile',
                               [('Content-Disposition', f'attachment; filename="{name}.ovpn"')])
         meta = store.find(token)
@@ -390,6 +429,8 @@ class Server(http.server.ThreadingHTTPServer):
     # Each connection has a thread of its own, and the unit allows 64 tasks. A client that sends its request a byte at
     # a time keeps its thread, so without a limit one address could hold them all and no link would open for anyone.
     per_address = 8
+    # With port-share: the folder of OpenVPN's files, which give the real address of a connection it hands over.
+    port_share_dir = None
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -397,14 +438,36 @@ class Server(http.server.ThreadingHTTPServer):
         self.counted = {}
         self.count_lock = threading.Lock()
 
-    def verify_request(self, request, client_address):
-        address = client_address[0]
+    def _shared(self, client_address):
+        return self.port_share_dir is not None and client_address[0] == '127.0.0.1'
+
+    def _count(self, request, address):
         with self.count_lock:
             if self.open_from.get(address, 0) >= self.per_address:
                 return False
             self.open_from[address] = self.open_from.get(address, 0) + 1
             self.counted[id(request)] = address
         return True
+
+    def address_of(self, request, client_address):
+        """The address a connection is counted for: the real one of a client OpenVPN handed over, else the peer."""
+        with self.count_lock:
+            return self.counted.get(id(request), client_address[0])
+
+    def verify_request(self, request, client_address):
+        # A connection OpenVPN hands over is counted in its own thread, once its file is read: the accept loop never
+        # waits for it.
+        if self._shared(client_address):
+            return True
+        return self._count(request, client_address[0])
+
+    def process_request_thread(self, request, client_address):
+        if self._shared(client_address):
+            address = shared_address(self.port_share_dir, client_address) or client_address[0]
+            if not self._count(request, address):
+                self.shutdown_request(request)
+                return
+        super().process_request_thread(request, client_address)
 
     def shutdown_request(self, request):
         # Also called for a connection verify_request refused, which was never counted.
@@ -446,7 +509,7 @@ def watch(server, store, idle_exit, interval, management, serving):
                     print(f'link ended: {name} connected', flush=True)
         elif idle_since is None:
             idle_since = time.time()
-        elif time.time() - idle_since >= idle_exit:
+        elif idle_exit and time.time() - idle_since >= idle_exit:
             if store.leave_if_empty(serving):
                 server.shutdown()
                 return
@@ -512,13 +575,19 @@ def main():
     parser.add_argument('--host', required=True)
     parser.add_argument('--port', required=True, type=int)
     parser.add_argument('--server-conf', default='/etc/openvpn/server/server.conf')
+    # 0: never ends by itself, while port-share sends the TCP port of OpenVPN here.
     parser.add_argument('--idle-exit', type=int, default=60)
+    parser.add_argument('--bind', default='0.0.0.0', choices=('0.0.0.0', '127.0.0.1'))
+    parser.add_argument('--port-share-dir', default='')
     parser.add_argument('--interval', type=float, default=10)
     parser.add_argument('--event-script', default=EVENT_SCRIPT)
     args = parser.parse_args()
 
     store = Store(args.dir)
-    server = Server(('0.0.0.0', args.port), Handler)
+    server = Server((args.bind, args.port), Handler)
+    # The files of OpenVPN count only for a service that only OpenVPN reaches.
+    if args.port_share_dir and args.bind == '127.0.0.1':
+        server.port_share_dir = args.port_share_dir
     server.store = store
     server.context = tls_context(args.cert, args.key)
     reload_on_hangup(server, args.cert, args.key, os.path.join(args.dir, '.reloadable'))
@@ -526,7 +595,7 @@ def main():
     serving = os.path.join(args.dir, '.serving')
     say_serving(serving)
     threading.Thread(target=watch, args=(server, store, args.idle_exit, args.interval, management, serving), daemon=True).start()
-    print(f'listening on TCP {args.port}', flush=True)
+    print(f'listening on TCP {args.bind}:{args.port}' + (', behind OpenVPN port-share' if server.port_share_dir else ''), flush=True)
     server.serve_forever()
     return 0
 

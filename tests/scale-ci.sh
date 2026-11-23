@@ -404,10 +404,17 @@ if [[ $PART == menu ]]; then
     compare menu 'open the menu until it asks "Choose [0-9]", then leave it' '' \
         "python3 tests/time-to-text.py $LIMIT 'Choose [0-9]' '0\r' -- darban" \
         "python3 tests/time-to-text.py $LIMIT 'Choose [0-9]' '0\r' -- bash $BASE_DIR/darban"
-    compare create 'create one client, from opening the menu to leaving it' '' \
+    # Each run starts with the same files kept on the server: every menu draw reads each kept profile against the
+    # index, so a run that finds one more than the run before it, as each new run does after the base's, is slower for
+    # that alone. The profiles of the runs before are put aside, and counted from there.
+    mkdir -p "$WORK/kept-cmp"
+    prepare_create() {
+        find /root/openvpn-clients -maxdepth 1 -name 'scale-cmp-*' -exec mv -t "$WORK/kept-cmp" -- {} +
+    }
+    compare create 'create one client, from opening the menu to leaving it' prepare_create \
         "printf '1\nscale-cmp-@RUN@\n0\n' | darban" "printf '1\nscale-cmp-@RUN@\n0\n' | bash $BASE_DIR/darban"
     if (( COMPARE )); then
-        made=$(find /root/openvpn-clients -maxdepth 1 -name 'scale-cmp-*.ovpn' -size +0 | wc -l)
+        made=$(find /root/openvpn-clients "$WORK/kept-cmp" -maxdepth 1 -name 'scale-cmp-*.ovpn' -size +0 | wc -l)
         (( made >= 4 )) || { echo "FAIL: the compared runs made $made profiles, not one each."; exit 1; }
     fi
 fi
@@ -418,6 +425,14 @@ if [[ $PART == commands ]]; then
     # The fake clients are what the tool sees: the list counts them, and the diagnostics, which fail on any problem, pass.
     grep "$CLIENTS valid" "$WORK/list.1.log" >/dev/null || { tail -n 5 "$WORK/list.1.log"; echo "FAIL: the list does not show $CLIENTS valid clients."; exit 1; }
     grep "$revoked revoked" "$WORK/list.1.log" >/dev/null || { tail -n 5 "$WORK/list.1.log"; echo "FAIL: the list does not show $revoked revoked clients."; exit 1; }
+    # G2's goal: with darban-core, the list of 1000 clients and 10,000 index rows in less than 300 ms. Said in the
+    # summary; like every time here, a slow one does not fail the job.
+    if (( CLIENTS == 1000 )); then
+        took=$(awk -F '\t' '$1 == "list" {print $3}' "$TSV")
+        if [[ $took =~ ^[0-9]+\.[0-9]{3}$ ]] && (( 10#${took/./} < 300 )); then goal='met'; else goal='**not met**'; fi
+        NOTES+=" Goal of G2, darban list with 1000 clients in less than 0.300 s: $goal ($took s)."
+        echo "GOAL: darban list with 1000 clients in less than 0.300 s: $goal ($took s)"
+    fi
     measure status 'darban status' 3 'darban status'
     echo "PASS: the list shows $CLIENTS valid and $revoked revoked clients, and the diagnostics pass."
     compare list 'darban list' '' 'darban list' "bash $BASE_DIR/darban list"

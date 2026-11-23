@@ -68,7 +68,17 @@ refused() {
     echo "FAIL: in 20 seconds the server neither let this client in nor said: $3"
     return 1
 }
-disconnect() { if [[ -s $PIDFILE ]]; then kill "$(cat "$PIDFILE")" 2>/dev/null || true; sleep 1; fi; }
+stop_client() {
+    # stop_client <pidfile>: SIGTERM, then wait until the client has ended. A profile with explicit-exit-notify first
+    # tells the server it leaves, which takes about a second, and only then gives its device back; the next client
+    # on that device would otherwise find it taken.
+    local pid attempt
+    [[ -s $1 ]] || return 0
+    pid=$(cat "$1")
+    kill "$pid" 2>/dev/null || return 0
+    for attempt in $(seq 1 100); do kill -0 "$pid" 2>/dev/null || return 0; sleep 0.1; done
+}
+disconnect() { if [[ -s $PIDFILE ]]; then stop_client "$PIDFILE"; sleep 0.5; fi; }
 in_terminal() {
     # in_terminal <name> <seconds> <command...>: answers the command from $LOG/<name>.keys in a real terminal.
     local name=$1 seconds=$2
@@ -138,6 +148,23 @@ fi
 
 bash setup/install.sh
 darban-crl-maintain --check
+# G2: darban-core is the one of this machine's architecture, and runs. On the arm64 runner this is the arm64 binary.
+ARCH=$(dpkg --print-architecture)
+CORE=/usr/local/lib/darban/darban-core
+core_machine() { od -An -t x1 -j 18 -N 2 "$1" | tr -d ' \n'; }
+# e_machine of the ELF header, little-endian: 0x3e is x86-64, 0xb7 is AArch64.
+case $ARCH in amd64) want_machine=3e00 ;; arm64) want_machine=b700 ;; *) echo "FAIL: no darban-core for $ARCH."; exit 1 ;; esac
+got_machine=$(core_machine "$CORE")
+core_says=$("$CORE" version)
+echo "darban-core on this $ARCH server: ELF e_machine bytes $got_machine (want $want_machine), version $core_says (VERSION $(cat VERSION))"
+if command -v file >/dev/null; then file -L "$CORE"; fi
+[[ $got_machine == "$want_machine" ]] || { echo "FAIL: the installed darban-core is not an $ARCH binary."; exit 1; }
+[[ $core_says == "$(cat VERSION)" ]] || { echo 'FAIL: the installed darban-core is not this version.'; exit 1; }
+darban list >/dev/null
+echo "PASS: the installed darban-core is the $ARCH binary of this version, and the list uses it."
+if [[ -n ${GITHUB_STEP_SUMMARY:-} ]]; then
+    echo "darban-core on $ARCH: e_machine $got_machine, version $core_says" >>"$GITHUB_STEP_SUMMARY"
+fi
 systemctl start darban-crl.service
 systemctl is-active --quiet darban-crl.timer
 systemctl is-active --quiet darban-nat.service
@@ -735,6 +762,185 @@ if (( ! USE_UFW )); then
     iptables -D FORWARD -o tun0 -j ACCEPT
 fi
 
+# ---------- T1 (#116): UDP only, TCP only, or both, against the real OpenVPN ----------
+T1_TCP=4443
+t1_summary() { if [[ -n ${GITHUB_STEP_SUMMARY:-} ]]; then printf '%s\n' "$*" >>"$GITHUB_STEP_SUMMARY"; fi; echo "$*"; }
+# t1_connect_ns <profile> <log> <seconds>: a client in the namespace; T1_SECONDS is how long it took to connect.
+T1_SECONDS=''
+t1_connect_ns() {
+    local start now
+    rm -f "$LOG/t1ns.pid"
+    start=$(date +%s%N)
+    ip netns exec "$NS-t" openvpn --config "$1" --route-nopull --dev tun7 --daemon --writepid "$LOG/t1ns.pid" --log "$2" --verb 3
+    while :; do
+        now=$(date +%s%N)
+        if grep -q 'Initialization Sequence Completed' "$2"; then T1_SECONDS=$(awk -v n=$(( (now - start) / 100000000 )) 'BEGIN {printf "%.1f", n / 10}'); return 0; fi
+        if (( (now - start) / 1000000000 >= $3 )); then T1_SECONDS="more than $3"; return 1; fi
+        sleep 0.2
+    done
+}
+t1_disconnect_ns() { stop_client "$LOG/t1ns.pid"; sleep 0.5; }
+# t1_transport <log>: the protocol a client log ended on.
+t1_transport() { if grep -q 'TCP connection established' "$1"; then echo TCP; elif grep -q 'UDPv4 link remote' "$1"; then echo UDP; else echo unknown; fi; }
+t1_conf_before=$(cat "$CONF")
+t1_summary '#### T1: UDP only, TCP only, or both'
+
+# Both, from the menu: UDP 1194 stays, and TCP comes beside it, each with its own socket.
+printf '7\n2\n3\n%s\n2\n0\n0\n0\n' "$T1_TCP" | darban | tee "$LOG/t1-both.log"
+grep -qx 'local \* 1194 udp' "$CONF" && grep -qx "local \\* $T1_TCP tcp" "$CONF"
+if grep -q '^port \|^proto ' "$CONF"; then echo 'FAIL: both left a port or proto line.'; exit 1; fi
+grep -qx 'explicit-exit-notify 1' "$CONF"
+ss -H -lun 'sport = :1194' | grep -q . && ss -H -ltn "sport = :$T1_TCP" | grep -q LISTEN
+if (( USE_UFW )); then ufw allow "$T1_TCP/tcp" >/dev/null; fi
+darban status >"$LOG/t1-status.log" 2>&1 || true
+grep "Listening on TCP $T1_TCP" "$LOG/t1-status.log" >/dev/null
+printf '1\nt1both\n0\n' | darban >/dev/null
+cp /root/openvpn-clients/t1both.ovpn "$LOG/t1both.ovpn"
+grep -qx "remote 127.0.0.1 $T1_TCP tcp4" "$LOG/t1both.ovpn" && grep -qx 'server-poll-timeout 5' "$LOG/t1both.ovpn"
+connect "$LOG/t1both.ovpn" "$LOG/t1-both-client.log"
+[[ $(t1_transport "$LOG/t1-both-client.log") == UDP ]] || { echo 'FAIL: a profile with both did not start on UDP.'; exit 1; }
+disconnect
+echo 'PASS: both listens on UDP and TCP, and a profile with both connects over UDP first.'
+
+# A TCP connection of a client ends its UDP connection: one OpenVPN knows each name once.
+sed -e "/ udp4$/d" -e '/^server-poll-timeout/d' "$LOG/t1both.ovpn" >"$LOG/t1both-tcp.ovpn"
+connect "$LOG/t1both.ovpn" "$LOG/t1-same-udp.log"
+connect "$LOG/t1both-tcp.ovpn" "$LOG/t1-same-tcp.log" tun8 "$LOG/t1-tcp.pid"
+[[ $(t1_transport "$LOG/t1-same-tcp.log") == TCP ]]
+# The rows of Connected now for t1both, with its PROTOCOL column (G27, #153).
+t1_rows() { darban connected 2>/dev/null | awk '$1 == "t1both"' || true; }
+# The UDP client tries again once it is dropped, and may take the name back for a moment: what counts is that the
+# name is never listed twice, and that its one session is the TCP one.
+seen_tcp=0
+for attempt in $(seq 1 30); do
+    rows=$(t1_rows)
+    if (( $(grep -c . <<<"$rows" || true) > 1 )); then echo 'FAIL: t1both is listed twice, over UDP and TCP at once.'; exit 1; fi
+    if awk '$3 == "TCP" {found = 1} END {exit !found}' <<<"$rows"; then seen_tcp=1; break; fi
+    sleep 0.5
+done
+(( seen_tcp )) || { echo "FAIL: the TCP connection of t1both did not take its session: $(t1_rows)"; exit 1; }
+stop_client "$LOG/t1-tcp.pid"
+disconnect
+echo 'PASS: a TCP connection of a client ends its UDP connection; the name is never listed twice.'
+
+# With UDP dropped in the client's own network, a profile with both reaches TCP.
+ip netns add "$NS-t"
+ip link add dt4 type veth peer name dt5
+ip link set dt5 netns "$NS-t"
+ip addr add 198.18.0.9/30 dev dt4
+ip link set dt4 up
+ip netns exec "$NS-t" ip link set lo up
+ip netns exec "$NS-t" ip addr add 198.18.0.10/30 dev dt5
+ip netns exec "$NS-t" ip link set dt5 up
+sed 's/^remote 127\.0\.0\.1 /remote 198.18.0.9 /' "$LOG/t1both.ovpn" >"$LOG/t1ns.ovpn"
+t1_connect_ns "$LOG/t1ns.ovpn" "$LOG/t1-ns-open.log" 30
+t1_summary "- UDP open, from a network namespace: connected in $T1_SECONDS s, over $(t1_transport "$LOG/t1-ns-open.log")."
+t1_disconnect_ns
+ip netns exec "$NS-t" nft add table inet t1drop
+ip netns exec "$NS-t" nft add chain inet t1drop out '{ type filter hook output priority 0; policy accept; }'
+ip netns exec "$NS-t" nft add rule inet t1drop out udp dport 1194 drop
+t1_connect_ns "$LOG/t1ns.ovpn" "$LOG/t1-ns-dropped.log" 60 || { echo "FAIL: with UDP dropped, the client did not reach TCP ($T1_SECONDS s)."; exit 1; }
+[[ $(t1_transport "$LOG/t1-ns-dropped.log") == TCP ]]
+t1_summary "- **UDP dropped in the client's network: reached TCP in $T1_SECONDS s.**"
+t1_disconnect_ns
+ip netns exec "$NS-t" nft delete table inet t1drop
+echo "PASS: with UDP dropped, a profile with both reaches TCP, in $T1_SECONDS s."
+
+# A measurement, never a failure: 300 ms more and 10% loss on UDP alone, and which protocol the client ends on.
+if ip netns exec "$NS-t" tc qdisc add dev dt5 root handle 1: prio 2>/dev/null \
+    && ip netns exec "$NS-t" tc qdisc add dev dt5 parent 1:3 handle 30: netem delay 300ms loss 10% 2>/dev/null \
+    && ip netns exec "$NS-t" tc filter add dev dt5 protocol ip parent 1:0 prio 3 u32 match ip protocol 17 0xff flowid 1:3 2>/dev/null; then
+    if t1_connect_ns "$LOG/t1ns.ovpn" "$LOG/t1-ns-netem.log" 90; then
+        sleep 20
+        t1_summary "- UDP with 300 ms delay and 10% loss (tc netem): connected in $T1_SECONDS s, over $(t1_transport "$LOG/t1-ns-netem.log"); after 20 s more: $(if grep -q 'SIGUSR1' "$LOG/t1-ns-netem.log"; then echo 'it restarted on the way'; else echo 'still on it'; fi). A measurement, not a check."
+    else
+        t1_summary "- UDP with 300 ms delay and 10% loss (tc netem): did not connect in 90 s. A measurement, not a check."
+    fi
+    t1_disconnect_ns
+    ip netns exec "$NS-t" tc qdisc del dev dt5 root 2>/dev/null || true
+else
+    t1_summary '- UDP with 300 ms delay and 10% loss: not measured, tc netem is not available here.'
+fi
+
+# TCP only, from the menu: the namespace client with a TCP-only profile connects.
+printf '7\n2\n2\n2\n0\n0\n0\n' | darban | tee "$LOG/t1-tcp.log"
+grep -qx "port $T1_TCP" "$CONF" && grep -qx 'proto tcp4-server' "$CONF"
+if grep -q 'explicit-exit-notify' "$CONF"; then echo 'FAIL: TCP only kept explicit-exit-notify.'; exit 1; fi
+printf '1\nt1tcp\n0\n' | darban >/dev/null
+cp /root/openvpn-clients/t1tcp.ovpn "$LOG/t1tcp.ovpn"
+grep -qx 'proto tcp4' "$LOG/t1tcp.ovpn"
+if grep -q 'explicit-exit-notify' "$LOG/t1tcp.ovpn"; then echo 'FAIL: a TCP-only profile has explicit-exit-notify.'; exit 1; fi
+connect "$LOG/t1tcp.ovpn" "$LOG/t1-tcp-client.log"
+[[ $(t1_transport "$LOG/t1-tcp-client.log") == TCP ]]
+disconnect
+echo 'PASS: TCP only listens on TCP alone, and a TCP-only profile connects.'
+
+# Rollback: a TCP port another program takes after the screen checked it, as one starting at that moment would, so
+# OpenVPN cannot bind it when it restarts.
+rm -f "$LOG/t1-in"; mkfifo "$LOG/t1-in"
+darban <"$LOG/t1-in" >"$LOG/t1-rollback.log" 2>&1 &
+t1_darban=$!
+exec 7>"$LOG/t1-in"
+printf '7\n2\n4\n4444\n' >&7
+for attempt in $(seq 1 60); do grep -q 'Apply TCP 4444 now?' "$LOG/t1-rollback.log" && break; sleep 0.5; done
+grep -q 'Apply TCP 4444 now?' "$LOG/t1-rollback.log"
+python3 -c 'import socket, time; s = socket.socket(); s.bind(("0.0.0.0", 4444)); s.listen(); time.sleep(60)' &
+holder=$!
+for attempt in $(seq 1 20); do ss -H -ltn 'sport = :4444' | grep -q LISTEN && break; sleep 0.2; done
+printf '2\n0\n0\n0\n' >&7
+exec 7>&-
+wait "$t1_darban" || true
+kill "$holder" 2>/dev/null || true; wait "$holder" 2>/dev/null || true
+cat "$LOG/t1-rollback.log"
+grep 'Rolled back' "$LOG/t1-rollback.log" >/dev/null
+grep -qx "port $T1_TCP" "$CONF"
+systemctl is-active --quiet "$UNIT"
+ss -H -ltn "sport = :$T1_TCP" | grep -q LISTEN
+echo 'PASS: a TCP port that is taken when OpenVPN restarts is rolled back.'
+
+# port-share: the OpenVPN TCP port also serves the link page. An OpenVPN client connects, an HTTPS request to the
+# same port gets the page, and the link service counts the real address, read from OpenVPN's file.
+t1_share_start=$(date +%s); sleep 1
+printf '7\n2\n5\n2\n0\n0\n0\n' | darban | tee "$LOG/t1-share.log"
+grep -Eq "^port-share 127\.0\.0\.1 [0-9]+ /run/darban-port-share$" "$CONF"
+local_port=$(awk '$1=="port-share" {print $3}' "$CONF")
+journalctl -u "$UNIT" --since "@$t1_share_start" --no-pager | grep 'PORT SHARE PROXY: proxy starting' >/dev/null
+[[ $(stat -c '%U %G %a' /run/darban-port-share) == 'nobody root 2750' ]]
+systemctl is-enabled --quiet darban-links.service
+systemctl is-active --quiet darban-links.service
+ss -H -ltn "sport = :$local_port" | grep -q '127.0.0.1'
+curl -ks -o "$LOG/t1-probe.html" -w '%{http_code}\n' "https://127.0.0.1:$T1_TCP/" | tee "$LOG/t1-probe.code"
+[[ $(cat "$LOG/t1-probe.code") == 410 ]]
+connect "$LOG/t1tcp.ovpn" "$LOG/t1-share-client.log"
+disconnect
+url=$(printf '5\nt1tcp\n1\n1\n0\n' | darban | grep -oE 'https://[^ ]+/l/[0-9a-f]{64}')
+[[ $url == "https://127.0.0.1:$T1_TCP/l/"* ]] || { echo "FAIL: the link does not use the shared port: $url"; exit 1; }
+# From the namespace, so the real address differs from the proxy's 127.0.0.1.
+ip netns exec "$NS-t" curl -ksf "https://198.18.0.9:$T1_TCP${url#https://127.0.0.1:$T1_TCP}/file" -o "$LOG/t1-share.ovpn"
+grep -q '^client$' "$LOG/t1-share.ovpn"
+journalctl -u darban-links.service -n 20 --no-pager | tee "$LOG/t1-links.log" | grep 'profile downloaded: t1tcp from 198.18.0.10' >/dev/null
+echo 'PASS: with port-share, a client connects, the same port answers HTTPS with the link page, and the link service sees the real address.'
+# Once the last link is gone, the page still answers, as the service stays up while the port is shared.
+rm -f /run/darban-links/*.meta /run/darban-links/*.ovpn /run/darban-links/*.url
+sleep 75
+systemctl is-active --quiet darban-links.service
+[[ $(curl -ks -o /dev/null -w '%{http_code}' "https://127.0.0.1:$T1_TCP/") == 410 ]]
+echo 'PASS: with port-share, the link page still answers after the last link is gone.'
+printf '7\n2\n5\n2\n0\n0\n0\n' | darban | tee "$LOG/t1-share-off.log"
+if grep -q '^port-share' "$CONF"; then echo 'FAIL: port-share stayed after it was turned off.'; exit 1; fi
+if systemctl is-enabled --quiet darban-links.service; then echo 'FAIL: the link service stayed enabled.'; exit 1; fi
+[[ ! -e /etc/tmpfiles.d/darban-port-share.conf && ! -e /etc/systemd/system/darban-links.service.d/darban-port-share.conf ]]
+echo 'PASS: port-share off: the line, the folder and the always-on link service go.'
+
+# Back to UDP 1194 alone: server.conf is as before T1, byte for byte.
+printf '7\n2\n1\n1194\n2\n0\n0\n0\n' | darban | tee "$LOG/t1-udp.log"
+[[ $(cat "$CONF") == "$t1_conf_before" ]] || { echo 'FAIL: back to UDP only, server.conf differs from before.'; diff <(printf '%s\n' "$t1_conf_before") "$CONF" || true; exit 1; }
+if (( USE_UFW )); then ufw delete allow "$T1_TCP/tcp" >/dev/null || true; fi
+ip netns del "$NS-t"
+ip link del dt4 2>/dev/null || true
+connect "$PROFILE" "$LOG/t1-back.log"; disconnect
+echo 'PASS: back to UDP only, server.conf is the same as before, byte for byte, and the first profile connects.'
+
 # A real temporary link: it can be opened again until the client connects, and then it ends.
 url=$(printf '5\naccept1\n1\n1\n0\n' | darban | grep -oE 'https://[^ ]+/l/[0-9a-f]{64}')
 curl -ksf "$url" | grep 'Download profile' >/dev/null
@@ -1055,14 +1261,33 @@ OTHER_CONF=/etc/letsencrypt/renewal/other-site.conf
 printf '[renewalparams]\nauthenticator = standalone\nrenew_hook = /usr/local/bin/other-hook\n' > "$OTHER_CONF"
 cp "$OTHER_CONF" "$LOG/other-site.before"
 
-# A real update and the way back. The new version is this one under another number.
+# G2: a new darban-core that does not run here is never put in place. The update stops before it replaces anything,
+# says why, and the installed version stays whole: a script that fails, and a binary cut short as by a broken download.
 current=$(darban version)
+broken=$(mktemp -d)
+cp -r setup bin lib systemd VERSION "$broken/"
+core_before=$(sha256sum <"$CORE")
+for kind in fails truncated; do
+    if [[ $kind == fails ]]; then printf '#!/bin/sh\nexit 1\n' >"$broken/bin/darban-core-$ARCH"; else head -c 65536 "bin/darban-core-$ARCH" >"$broken/bin/darban-core-$ARCH"; fi
+    if bash "$broken/setup/install.sh" >"$LOG/broken-core-$kind.log" 2>&1; then echo "FAIL: an install with a darban-core that $kind went on."; exit 1; fi
+    grep -F 'The new darban-core does not run on this server' "$LOG/broken-core-$kind.log" >/dev/null
+    grep -F 'The installed one stays; nothing was replaced.' "$LOG/broken-core-$kind.log" >/dev/null
+    [[ $(sha256sum <"$CORE") == "$core_before" ]] || { echo "FAIL: a darban-core that $kind replaced the installed one."; exit 1; }
+    [[ $(darban version) == "$current" && $(cat /usr/local/lib/darban/.installed) == "$current" ]]
+    [[ -z $(find /usr/local/lib/darban -maxdepth 1 -name '.darban-core.*') ]] || { echo 'FAIL: the trial copy was left behind.'; exit 1; }
+    darban list >/dev/null
+done
+rm -rf -- "$broken"
+echo 'PASS: a new darban-core that fails, or is cut short, leaves the installed one and the whole version in place.'
+
+# A real update and the way back. The new version is this one under another number, its darban-core built for it.
 next=$(mktemp -d)
-cp -r setup bin lib systemd VERSION "$next/"
+cp -r setup bin lib systemd VERSION scripts go.mod cmd internal "$next/"
 sed -i 's/^DARBAN_VERSION=.*/DARBAN_VERSION=9.9.9/' "$next/bin/darban"
 echo 9.9.9 > "$next/VERSION"
+bash "$next/scripts/build-core.sh" "$ARCH" >/dev/null
 bash "$next/setup/install.sh"
-[[ $(darban version) == 9.9.9 ]]
+[[ $(darban version) == 9.9.9 && $("$CORE" version) == 9.9.9 ]]
 # The update placed the manager's modules where bin/darban sources them.
 for module in "$next"/lib/darban/*.sh "$next"/lib/darban/screens/*.sh; do
     module=${module#"$next"/lib/darban/}
@@ -1083,10 +1308,40 @@ unmounted
 grep -qx "client-connect $EVENT_SCRIPT" "$CONF"
 connect "$PROFILE" "$LOG/restored.log"; disconnect
 darban status >/dev/null
+[[ $("$CORE" version) == "$current" ]] || { echo 'FAIL: Restore previous version did not bring back its darban-core.'; exit 1; }
 bash setup/install.sh | tee "$LOG/events-reinstall.log"
 grep 'Connection events are on.$' "$LOG/events-reinstall.log" >/dev/null
 systemctl is-active --quiet darban-events.path
 echo 'PASS: an update installs, Restore previous version goes back, and an older version keeps every client connecting.'
+
+# G2: a server of v1.0 updates itself with its own get.sh, which knows one archive, darban-ovpn.tar.gz. That get.sh,
+# from the v1.0.1 release, installs this version's release files, served by a stand-in for curl from a local folder,
+# and the archive it takes carries darban-core for both architectures: the one of this machine is the one installed.
+assets=$(mktemp -d)
+# As root, git would not read the runner's checkout; any time does for these files.
+SOURCE_DATE_EPOCH=$(date +%s) bash scripts/build-release.sh "$assets/release" >/dev/null
+curl -fsSL --retry 3 -o "$assets/get-v1.0.1.sh" https://github.com/MohZeh/Darban-OVPN/releases/download/v1.0.1/get.sh
+grep -qx 'ARCHIVE=darban-ovpn.tar.gz' "$assets/get-v1.0.1.sh"
+mkdir "$assets/bin"
+cat >"$assets/bin/curl" <<'STUB'
+#!/usr/bin/env bash
+out='' url=''
+while (( $# )); do case $1 in -o) out=$2; shift 2 ;; --proto|--proto-redir|--retry|--max-time) shift 2 ;; -*) shift ;; *) url=$1; shift ;; esac; done
+echo "$url" >>"$ASSETS/curl.log"
+[[ -e $ASSETS/release/${url##*/} ]] || exit 22
+cp "$ASSETS/release/${url##*/}" "$out"
+STUB
+chmod 755 "$assets/bin/curl"
+mkdir "$assets/universal"
+tar -xzf "$assets/release/darban-ovpn.tar.gz" -C "$assets/universal" "bin/darban-core-$ARCH"
+PATH="$assets/bin:$PATH" ASSETS=$assets bash "$assets/get-v1.0.1.sh" --version "v$current" </dev/null | tee "$LOG/v1.0-update.log"
+grep -x "https://github.com/MohZeh/Darban-OVPN/releases/download/v$current/darban-ovpn.tar.gz" "$assets/curl.log" >/dev/null
+cmp -s "$assets/universal/bin/darban-core-$ARCH" "$CORE" || { echo "FAIL: the update by v1.0's get.sh did not install the $ARCH darban-core."; exit 1; }
+[[ $(darban version) == "$current" && $("$CORE" version) == "$current" && $(core_machine "$CORE") == "$want_machine" ]]
+darban list >/dev/null
+darban status >/dev/null
+rm -rf -- "$assets"
+echo "PASS: the get.sh of v1.0.1 updates to this version from darban-ovpn.tar.gz, with the $ARCH darban-core."
 
 # Removing only the tool keeps the VPN running, and installing it again finds everything. The links' Let's Encrypt
 # certificate stays, and certbot renews it without this tool's hook; a new install gives the hook back.

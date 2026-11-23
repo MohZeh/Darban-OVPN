@@ -38,7 +38,7 @@ OUT_DIR=/root/openvpn-clients
 export DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=l
 
 die() { fail "$*"; exit 1; }
-port_busy() { [[ -n $(ss -H -lun "sport = :$1" 2>/dev/null) ]]; }
+port_busy() { darban_port_busy udp "$1"; }
 run_step() {
     # run_step <text> <function>...: one line on the screen, and the details in the log.
     local name=$1 work
@@ -63,22 +63,8 @@ public_address() {
     done
     return 1
 }
-PORT_FIRST=1024
-PORT_LAST=1999
-free_port() {
-    # A random free UDP port from 1024 to 1999, so the server does not stand out on 1194, the usual one.
-    local port tries
-    for (( tries = 0; tries < 50; tries++ )); do
-        port=$(shuf -n 1 -i "$PORT_FIRST-$PORT_LAST" 2>/dev/null) || port=''
-        [[ $port =~ ^[0-9]+$ ]] || break
-        if (( port != 1194 )) && ! port_busy "$port"; then printf '%s\n' "$port"; return 0; fi
-    done
-    # Without shuf, or with a crowded range: the first free one.
-    for (( port = PORT_FIRST; port <= PORT_LAST; port++ )); do
-        if (( port != 1194 )) && ! port_busy "$port"; then printf '%s\n' "$port"; return 0; fi
-    done
-    printf '%s\n' "$PORT_LAST"
-}
+# The random free UDP port of lib/common.sh, which Settings uses for TCP too.
+free_port() { darban_free_port udp; }
 easyrsa() { env EASYRSA_PKI="$PKI" EASYRSA_BATCH=1 "$EASYRSA_BIN" "$@" </dev/null >/dev/null; }
 timed() {
     # timed <label> <command...>: the command, with its start and how long it took written to the log, so a
