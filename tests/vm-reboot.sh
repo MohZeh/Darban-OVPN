@@ -178,8 +178,12 @@ done
 if in_vm 'sudo test -e /root/openvpn-clients/vmclient.ovpn'; then echo 'FAIL: the first connection after the reboot left the kept file.'; exit 1; fi
 ping -c 3 -W 5 -I tun9 10.8.0.1 >/dev/null
 echo 'PASS: a profile made before the reboot connects from outside, and data flows through the tunnel.'
-kill "$(cat "$CLIENT_PID")" 2>/dev/null || true
-sleep 1
+# A profile with explicit-exit-notify tells the server it leaves first, about a second: wait until the client has
+# ended, or the next one finds tun9 still taken.
+client=$(cat "$CLIENT_PID")
+kill "$client" 2>/dev/null || true
+for attempt in $(seq 1 100); do kill -0 "$client" 2>/dev/null || break; sleep 0.1; done
+sleep 0.5
 ip link del tun9 2>/dev/null || true
 
 # T65 and C.15.8: a restore stopped after each of its four renames, then a real reboot: OpenVPN stays off after the
