@@ -1,11 +1,14 @@
 #!/usr/bin/env python3
 """Checks how bin/darban is put together from its modules in lib/darban. It reads files; it runs no test.
 
-1. bin/darban sources every module of lib/darban once, paths.sh first, by its absolute path where setup/install.sh
-   places it (/usr/local/lib/darban/modules), each with a "# shellcheck source=" line naming the module.
+1. bin/darban sources every module of lib/darban once, its screens in lib/darban/screens included, paths.sh first
+   and config.sh second, by its absolute path where setup/install.sh places it (/usr/local/lib/darban/modules), each
+   with a "# shellcheck source=" line naming the module.
 2. No function is defined twice in the manager (bin/darban and its modules) and the libraries it sources
    (lib/common.sh, lib/ui.sh), except darban_error, which lib/ui.sh defines again on purpose.
-3. A change whose title is a refactor ("refactor: ..." or "refactor(scope): ...") keeps the same set of functions as
+3. Globals are assigned outside a function only in paths.sh and config.sh, and in bin/darban only DARBAN_VERSION,
+   which the release, the update and the way back read there. Every other module only defines functions.
+4. A change whose title is a refactor ("refactor: ..." or "refactor(scope): ...") keeps the same set of functions as
    the commit it starts from: code moved between files, nothing gained or lost. This needs that commit and the
    title: TITLE='refactor: ...' python3 scripts/check-modules.py <base>. Without them, only 1 and 2 run.
 """
@@ -25,6 +28,11 @@ OVERRIDDEN = {'darban_error'}
 SOURCE = re.compile(r'^source ' + re.escape(INSTALLED) + r'(\S+\.sh)$')
 FUNCTION = re.compile(r'^\s*(?:function\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*\(\)\s*\{')
 REFACTOR = re.compile(r'^refactor(\([^)]*\))?!?:')
+FIRST = ('paths.sh', 'config.sh')
+GLOBALS = {f'{MODULES}/{name}' for name in FIRST}
+MANAGER_GLOBALS = {'DARBAN_VERSION'}
+ASSIGNMENT = re.compile(r'^([A-Za-z_][A-Za-z0-9_]*)(?:\[[^]]*\])?\+?=')
+DECLARATION = re.compile(r'^(?:declare|typeset|readonly|export|local)\b')
 
 
 def git(*args):
@@ -57,9 +65,46 @@ def source_problems():
         problems.append(f'{MANAGER}: sources {INSTALLED}{name}, which {MODULES} does not have')
     for name in sorted(set(on_disk) - set(sourced)):
         problems.append(f'{MODULES}/{name}: {MANAGER} never sources it from {INSTALLED}')
-    if on_disk and (not sourced or sourced[0] != 'paths.sh'):
-        problems.append(f'{MANAGER}: paths.sh must be the first module it sources')
+    for place, name in enumerate(FIRST):
+        if name in on_disk and (len(sourced) <= place or sourced[place] != name):
+            problems.append(f'{MANAGER}: {name} must be module number {place + 1} of those it sources')
     return problems, len(sourced)
+
+
+def top_level(text):
+    """The lines outside every function, with their numbers, without comments and empty lines."""
+    lines = text.splitlines()
+    number = 0
+    while number < len(lines):
+        line = lines[number]
+        if FUNCTION.match(line) and not line[:1].isspace():
+            if not (line.rstrip().endswith('}') and line.count('{') <= line.count('}')):
+                number += 1
+                while number < len(lines) and lines[number].rstrip() != '}':
+                    number += 1
+            number += 1
+            continue
+        if line.strip() and not line.lstrip().startswith('#'):
+            yield number + 1, line
+        number += 1
+
+
+def global_problems(files):
+    problems = []
+    for path, text in files.items():
+        if path in GLOBALS or path in LIBRARIES:
+            continue
+        for number, line in top_level(text):
+            assigned = ASSIGNMENT.match(line)
+            if path == MANAGER:
+                if DECLARATION.match(line) or (assigned and assigned.group(1) not in MANAGER_GLOBALS):
+                    problems.append(f'{path}:{number}: a global outside a function; only {" and ".join(sorted(GLOBALS))} '
+                                    f'assign them, and {MANAGER} only {", ".join(sorted(MANAGER_GLOBALS))}')
+            elif assigned or DECLARATION.match(line):
+                problems.append(f'{path}:{number}: a global outside a function; only {" and ".join(sorted(GLOBALS))} assign them')
+            else:
+                problems.append(f'{path}:{number}: runs "{line.strip()[:60]}" when sourced; a module only defines functions')
+    return problems
 
 
 def duplicate_problems(files):
@@ -93,6 +138,7 @@ def main():
     files = {path: (ROOT / path).read_text(encoding='utf-8') for path in (MANAGER, *module_paths(), *LIBRARIES)}
     found, names = duplicate_problems(files)
     problems += found
+    problems += global_problems(files)
     compared = 'not compared with a base'
     if base and not re.fullmatch(r'0+', base) and REFACTOR.match(title):
         before = base_functions(base)

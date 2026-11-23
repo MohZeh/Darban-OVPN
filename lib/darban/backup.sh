@@ -5,8 +5,6 @@
 # A backup is one tar of a closed list of files (lib/backup.py), encrypted with age for the owner's public key: this
 # server can make one at any time and can never read one back. Beside it, a manifest says what it holds, readable
 # without the key. Only the owner's computer opens it; "darban restore" then takes the opened tar.
-BACKUP_MADE='' BACKUP_WHY='' RESTORE_WHY='' RESTORE_RENAMES=0 RESTORE_NEW_CRL=0 RESTORE_KEPT='' RESTORE_NAT_FAILED=0
-RESTORE_SAME_CA=no RESTORE_HISTORY=unknown RESTORE_UNDONE='' RESTORE_UNDONE_SERIALS='' RESTORE_REVOKED=''
 valid_age_key() { [[ $1 =~ ^age1[0-9a-z]{58}$ ]]; }
 backup_recipient() {
     local value

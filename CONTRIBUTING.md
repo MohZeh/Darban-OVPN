@@ -15,7 +15,7 @@ tests/     automated tests
 docs/      guides in English and Persian
 ```
 
-`bin/darban` sources its parts in `lib/darban/` in one fixed order, `paths.sh` first, by absolute path: `setup/install.sh` places them in `/usr/local/lib/darban/modules/`, before `bin/darban` itself, and the release archive carries them. The tests source a copy of `paths.sh` whose paths point into a fake server. Each function is defined in one file only; `scripts/check-modules.py` checks this in Lint, and for a pull request titled `refactor:` it also checks that the set of functions stays the same.
+`bin/darban` keeps only its version, the help and the reading of its arguments. It sources its parts in `lib/darban/` in one fixed order, `paths.sh` first and `config.sh` second, then the other parts, then its screens in `lib/darban/screens/`, by absolute path: `setup/install.sh` places them in `/usr/local/lib/darban/modules/`, before `bin/darban` itself, and the release archive carries them. The tests source a copy of `paths.sh` whose paths point into a fake server. Each function is defined in one file only. Outside a function, only `paths.sh` and `config.sh` assign globals, and `bin/darban` only `DARBAN_VERSION`; every other module only defines functions. `scripts/check-modules.py` checks all of this in Lint, and for a pull request titled `refactor:` it also checks that the set of functions stays the same.
 
 ## Running the tests
 

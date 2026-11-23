@@ -6,7 +6,7 @@ umask 077
 cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.."
 VERSION=$(cat VERSION)
 
-for file in setup/install.sh setup/server-setup.sh setup/get.sh setup/uninstall.sh setup/remove-server.sh bin/darban bin/darban-crl-maintain bin/darban-ovpn-event lib/common.sh lib/ui.sh lib/darban/*.sh; do
+for file in setup/install.sh setup/server-setup.sh setup/get.sh setup/uninstall.sh setup/remove-server.sh bin/darban bin/darban-crl-maintain bin/darban-ovpn-event lib/common.sh lib/ui.sh lib/darban/*.sh lib/darban/screens/*.sh; do
     bash -n "$file" || exit 1
 done
 for cmd in bash openssl awk grep date mktemp flock install mv systemctl ss sort timeout; do
@@ -74,9 +74,10 @@ install -o root -g root -m 700 setup/uninstall.sh "$LIB/uninstall.sh"
 install -o root -g root -m 700 setup/remove-server.sh "$LIB/remove-server.sh"
 # The manager's modules, which bin/darban sources from $LIB/modules. They come before the manager itself, so a run
 # that stops half way never leaves a manager that sources a module it does not have.
-install -d -o root -g root -m 700 "$LIB/modules"
-for module in lib/darban/*.sh; do
-    install -o root -g root -m 600 "$module" "$LIB/modules/${module##*/}"
+# The screens are in a folder of their own, as in lib/darban.
+install -d -o root -g root -m 700 "$LIB/modules" "$LIB/modules/screens"
+for module in lib/darban/*.sh lib/darban/screens/*.sh; do
+    install -o root -g root -m 600 "$module" "$LIB/modules/${module#lib/darban/}"
 done
 install -o root -g root -m 700 bin/darban-crl-maintain /usr/local/sbin/darban-crl-maintain
 install -o root -g root -m 700 bin/darban /usr/local/sbin/darban

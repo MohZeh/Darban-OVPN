@@ -60,11 +60,13 @@ def documented_commands(root):
 
 
 def setup_items(root):
-    """The Setup menu's items as {label: number}, read from bin/darban, or None when it has no Setup menu."""
+    """The Setup menu's items as {label: number}, read from bin/darban and its modules in lib/darban (the screens are
+    in lib/darban/screens), or None when it has no Setup menu."""
     usage = root / 'bin/darban'
     if not usage.exists():
         return None
-    code = usage.read_text(encoding='utf-8')
+    modules = sorted((root / 'lib/darban').rglob('*.sh')) if (root / 'lib/darban').is_dir() else []
+    code = '\n'.join(path.read_text(encoding='utf-8') for path in [usage, *modules])
     if 'draw_setup() {' not in code or 'setup_menu() {' not in code:
         return None
     block = code[code.index('draw_setup() {'):code.index('setup_menu() {')]

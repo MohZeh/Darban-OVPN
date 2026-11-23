@@ -1056,8 +1056,9 @@ echo 9.9.9 > "$next/VERSION"
 bash "$next/setup/install.sh"
 [[ $(darban version) == 9.9.9 ]]
 # The update placed the manager's modules where bin/darban sources them.
-for module in "$next"/lib/darban/*.sh; do
-    cmp -s "$module" "/usr/local/lib/darban/modules/${module##*/}" || { echo "FAIL: the update did not place ${module##*/}."; exit 1; }
+for module in "$next"/lib/darban/*.sh "$next"/lib/darban/screens/*.sh; do
+    module=${module#"$next"/lib/darban/}
+    cmp -s "$next/lib/darban/$module" "/usr/local/lib/darban/modules/$module" || { echo "FAIL: the update did not place $module."; exit 1; }
 done
 systemctl is-active --quiet "$UNIT"
 # T34 and C.12.12: the version restored here has no connection events, as rc.10: their units go first, and the
