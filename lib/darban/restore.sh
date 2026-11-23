@@ -284,6 +284,9 @@ restore_cleanup() {
     if [[ ! -e $dest/.restored ]]; then date -u +%s >"$dest/.restored" || return 1; restore_point restored; fi
     if [[ $(journal_value unverified) == yes ]]; then printf '%s\n' "$(journal_value created)" >"$RESTORE_WARN" || return 1; fi
     RESTORE_NAT_FAILED=$([[ $(journal_value nat) == failed ]] && echo 1 || echo 0)
+    # A port-share line is never restored: what turning it on set up on this server goes too, or the link service
+    # would start at boot behind a port nothing shares.
+    port_share_leftovers_clear || true
     audit "CA restored from the backup of $(journal_value created)"
     rm -rf -- "$stage"
     restore_point cleaned

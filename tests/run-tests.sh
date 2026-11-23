@@ -7390,6 +7390,38 @@ test_t1_port_share_screen() {
     has 'UDP only ends port sharing, and says so' 'Sharing the TCP port with the link page ends with TCP' "$out"
     conf_has '^port-share '; rc_is 'UDP only has no port-share line' 1 "$?"
 }
+port_share_leftovers_made() {
+    # What turning port-share on sets up beside server.conf, without its line: as after a restore, or a hand edit.
+    mkdir -p "$E/units/darban-links.service.d" "$E/run/darban-port-share"
+    printf '[Service]\nRestart=on-failure\n' >"$E/units/darban-links.service.d/darban-port-share.conf"
+    printf 'd %s 2750 nobody root -\n' "$E/run/darban-port-share" >"$E/tmpfiles/darban-port-share.conf"
+}
+port_share_leftovers_gone() {
+    [[ ! -e $E/units/darban-links.service.d/darban-port-share.conf && ! -e $E/tmpfiles/darban-port-share.conf && ! -e $E/run/darban-port-share ]]
+}
+
+test_t1_port_share_leftovers_go() {
+    local out fp
+    template_server
+    port_share_leftovers_made
+    has 'Diagnostics warn about a link page set up for a port nothing shares' \
+        'The link page is still set up to stay behind a shared TCP port, but server.conf shares none' "$(mgr status)"
+    out=$(menu '7\n2\n\n0\n0\n')
+    has 'Settings > 2 says it removes them' 'server.conf shares no TCP port, so the link page goes back' "$out"
+    port_share_leftovers_gone; rc_is 'and removes the drop-in, the tmpfiles entry and the folder' 0 "$?"
+    grep -q 'systemctl disable darban-links.service' "$STUB_LOG"; rc_is 'and the link service is no longer enabled' 0 "$?"
+    lacks 'Diagnostics are quiet after that' 'still set up to stay behind a shared TCP port' "$(mgr status)"
+
+    # A restore never brings the port-share line back, so what turning it on set up goes with the restore.
+    backed_up_server
+    fp=$(ca_fp)
+    port_share_leftovers_made
+    : >"$STUB_LOG"
+    out=$(printf '2\n' | bash "$E/manager.sh" restore "$E/backup.tar" --ca-fingerprint "$fp" 2>&1); rc_is 'the restore succeeds' 0 "$?"
+    has 'it is done' 'Restored the backup of' "$out"
+    port_share_leftovers_gone; rc_is 'and leaves nothing of port-share behind' 0 "$?"
+    grep -q 'systemctl disable darban-links.service' "$STUB_LOG"; rc_is 'and disables the always-on link service' 0 "$?"
+}
 
 # RUN_TESTS_EXTRA=<file>: more tests, for Lint's checks of this runner itself.
 # shellcheck source=/dev/null  # The file is named only at run time.

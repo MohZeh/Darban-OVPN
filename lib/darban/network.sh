@@ -205,6 +205,11 @@ set_protocol() {
     local mode udp tcp share=0 rc
     conf_ready || return 1
     mode=$(server_mode) || return 1
+    if port_share_leftovers; then
+        ca_lock || return 1
+        port_share_leftovers_clear
+        say
+    fi
     udp=$(listener_port udp) || udp=''
     tcp=$(listener_port tcp) || tcp=''
     conf_port_share >/dev/null 2>&1 && share=1

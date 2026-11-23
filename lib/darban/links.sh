@@ -228,6 +228,22 @@ port_share_service_off() {
     fi
     rm -rf -- "$PORT_SHARE_DIR"
 }
+port_share_leftovers() {
+    # What turning port-share on set up is still there, while server.conf shares no port: after a restore, which does
+    # not bring the line back, or after the line was removed by hand. The link service would otherwise start at boot
+    # on a local port nothing reaches any more, and stay there. A line someone else wrote counts as a line.
+    local rc=0
+    conf_port_share >/dev/null 2>&1 || rc=$?
+    (( rc == 1 )) || return 1
+    [[ -e $LINK_UNIT_DROPIN || -e $PORT_SHARE_TMPFILES ]]
+}
+port_share_leftovers_clear() {
+    # The same cleanup as turning port-share off. Under the lock.
+    port_share_leftovers || return 0
+    info 'server.conf shares no TCP port, so the link page goes back to a port of its own, only while a link is open.'
+    port_share_service_off
+    audit 'port-share leftovers removed: server.conf has no port-share line'
+}
 set_port_share() {
     # set_port_share <udp port or ''> <tcp port>: Settings > 2 > 5, shown only while OpenVPN listens on TCP.
     local udp=$1 tcp=$2 host local_port rc=0
@@ -279,7 +295,12 @@ port_share_health() {
     local local_port rc=0
     local_port=$(conf_port_share 2>/dev/null) || rc=$?
     if (( rc == 2 )); then check warn 'server.conf has a port-share line this tool did not write'; return 0; fi
-    (( rc == 0 )) || return 0
+    if (( rc == 1 )); then
+        if port_share_leftovers; then
+            check warn "The link page is still set up to stay behind a shared TCP port, but server.conf shares none, so after a reboot it waits on a port nothing reaches $S_ARROW open Settings $S_CRUMB 2 once, which removes it"
+        fi
+        return 0
+    fi
     if ! listener_port tcp >/dev/null 2>&1; then check bad "server.conf shares a port, but OpenVPN does not listen on TCP $S_ARROW Settings $S_CRUMB 2"; return 0; fi
     if [[ ! -d $PORT_SHARE_DIR ]]; then
         check warn "The folder of port-share, $PORT_SHARE_DIR, is missing, so links count every visitor as 127.0.0.1 $S_ARROW sudo systemd-tmpfiles --create $PORT_SHARE_TMPFILES"
