@@ -404,10 +404,17 @@ if [[ $PART == menu ]]; then
     compare menu 'open the menu until it asks "Choose [0-9]", then leave it' '' \
         "python3 tests/time-to-text.py $LIMIT 'Choose [0-9]' '0\r' -- darban" \
         "python3 tests/time-to-text.py $LIMIT 'Choose [0-9]' '0\r' -- bash $BASE_DIR/darban"
-    compare create 'create one client, from opening the menu to leaving it' '' \
+    # Each run starts with the same files kept on the server: every menu draw reads each kept profile against the
+    # index, so a run that finds one more than the run before it, as each new run does after the base's, is slower for
+    # that alone. The profiles of the runs before are put aside, and counted from there.
+    mkdir -p "$WORK/kept-cmp"
+    prepare_create() {
+        find /root/openvpn-clients -maxdepth 1 -name 'scale-cmp-*' -exec mv -t "$WORK/kept-cmp" -- {} +
+    }
+    compare create 'create one client, from opening the menu to leaving it' prepare_create \
         "printf '1\nscale-cmp-@RUN@\n0\n' | darban" "printf '1\nscale-cmp-@RUN@\n0\n' | bash $BASE_DIR/darban"
     if (( COMPARE )); then
-        made=$(find /root/openvpn-clients -maxdepth 1 -name 'scale-cmp-*.ovpn' -size +0 | wc -l)
+        made=$(find /root/openvpn-clients "$WORK/kept-cmp" -maxdepth 1 -name 'scale-cmp-*.ovpn' -size +0 | wc -l)
         (( made >= 4 )) || { echo "FAIL: the compared runs made $made profiles, not one each."; exit 1; }
     fi
 fi
