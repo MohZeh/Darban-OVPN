@@ -9,9 +9,18 @@ VERSION=$(cat VERSION)
 for file in setup/install.sh setup/server-setup.sh setup/get.sh setup/uninstall.sh setup/remove-server.sh bin/darban bin/darban-crl-maintain bin/darban-ovpn-event lib/common.sh lib/ui.sh lib/darban/*.sh lib/darban/screens/*.sh; do
     bash -n "$file" || exit 1
 done
-for cmd in bash openssl awk grep date mktemp flock install mv systemctl ss sort timeout; do
+for cmd in bash openssl awk grep date mktemp flock install mv systemctl ss sort timeout dpkg; do
     command -v "$cmd" >/dev/null || { echo "Missing dependency: $cmd" >&2; exit 1; }
 done
+# darban-core is built for amd64 and arm64. A release archive carries the one for this server, or both; a checkout
+# has the one scripts/build-core.sh built.
+ARCH=$(dpkg --print-architecture)
+case $ARCH in
+    amd64|arm64) ;;
+    *) echo "Darban OVPN runs on amd64 and arm64 servers; this one is ${ARCH//[^[:alnum:]_.-]/?}. Nothing was installed." >&2; exit 1 ;;
+esac
+CORE=bin/darban-core-$ARCH
+[[ -f $CORE ]] || { echo "This copy of Darban OVPN has no $CORE for this server. Nothing was installed. In a checkout, build it first: bash scripts/build-core.sh" >&2; exit 1; }
 source ./lib/common.sh
 darban_require_root
 server_checks() {
@@ -43,6 +52,11 @@ fi
 # Each update keeps the version it replaces, for Setup > Restore previous version.
 LIB=$DARBAN_LIB
 install -d -o root -g root -m 700 "$LIB"
+# The new darban-core runs once, from a copy beside where it goes, before anything is replaced: one that does not run
+# here, such as a broken download, leaves the installed version whole. The copy that ran is the one put in place.
+CORE_NEW=$(darban_core_stage "$CORE" "$LIB/darban-core" "$VERSION") || exit 1
+darban_tmp_register "$CORE_NEW"
+trap darban_tmp_cleanup EXIT
 # Written last, so a run that stops half way is repaired by the next one, even with the same version.
 rm -f -- "$LIB/.installed"
 if [[ -e /usr/local/sbin/darban && -e $LIB/common.sh ]]; then
@@ -53,6 +67,8 @@ if [[ -e /usr/local/sbin/darban && -e $LIB/common.sh ]]; then
         if [[ -e $file ]]; then cp -a -- "$file" "$backup_dir/sbin/"; fi
     done
     cp -a -- "$LIB/." "$backup_dir/lib/"
+    # The new darban-core waiting beside the old one is not part of the version replaced.
+    rm -f -- "$backup_dir/lib/${CORE_NEW##*/}"
     for file in /etc/systemd/system/darban-crl.service /etc/systemd/system/darban-crl.timer /etc/systemd/system/darban-links.service /etc/systemd/system/darban-backup.service /etc/systemd/system/darban-geo.service /etc/systemd/system/darban-geo.timer; do
         if [[ -e $file ]]; then cp -a -- "$file" "$backup_dir/units/"; fi
     done
@@ -79,6 +95,8 @@ install -d -o root -g root -m 700 "$LIB/modules" "$LIB/modules/screens"
 for module in lib/darban/*.sh lib/darban/screens/*.sh; do
     install -o root -g root -m 600 "$module" "$LIB/modules/${module#lib/darban/}"
 done
+# darban-core before the manager that runs it, by one rename.
+darban_core_place "$CORE_NEW" "$LIB/darban-core"
 install -o root -g root -m 700 bin/darban-crl-maintain /usr/local/sbin/darban-crl-maintain
 install -o root -g root -m 700 bin/darban /usr/local/sbin/darban
 install -o root -g root -m 644 systemd/darban-crl.service /etc/systemd/system/darban-crl.service

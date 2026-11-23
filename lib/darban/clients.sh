@@ -3,6 +3,12 @@
 # A part of bin/darban, which sources it after lib/darban/paths.sh and lib/darban/config.sh.
 
 # ---------- CA index ----------
+core_index() {
+    # core_index <view> [options]: what darban-core reads from the CA index, its certificates and the CRL, as
+    # tab-separated records (cmd/darban-core). It fails, and says why, on an index it cannot read whole.
+    [[ -x $DARBAN_CORE ]] || { darban_error "$DARBAN_CORE is missing. Install this version again: sudo bash -c 'curl -fsSL $DARBAN_URL/releases/download/v$DARBAN_VERSION/get.sh | bash -s -- --version v$DARBAN_VERSION'"; return 1; }
+    "$DARBAN_CORE" index --pki "$DARBAN_PKI" --view "$@"
+}
 client_index_rows() {
     # Never parse tab-separated CA records with shell read: empty fields cause shifts.
     awk -F '\t' 'NF>=6 && $6 ~ /\/CN=/ {
@@ -67,17 +73,29 @@ revoke_block_reason() {
     state=$(client_index_status "$name")
     case $state in
         V) ;;
-        AMBIGUOUS) printf 'several valid certificates share this name; this tool will not guess which one to revoke\n'; return 0 ;;
+        AMBIGUOUS) revoke_reason_text ambiguous; return 0 ;;
         *) return 0 ;;
     esac
-    if ! valid_existing_name "$name"; then printf 'this tool cannot manage this name safely\n'; return 0; fi
+    if ! valid_existing_name "$name"; then revoke_reason_text name; return 0; fi
     serial=$(client_index_serial "$name")
-    if [[ ! -s $crt ]]; then printf 'pki/issued/%s.crt is missing; restore it from pki/certs_by_serial/%s.pem\n' "$name" "$serial"; return 0; fi
-    if ! file_serial=$(openssl x509 -in "$crt" -noout -serial 2>/dev/null); then printf 'pki/issued/%s.crt is unreadable\n' "$name"; return 0; fi
+    if [[ ! -s $crt ]]; then revoke_reason_text missing "$name" "$serial"; return 0; fi
+    if ! file_serial=$(openssl x509 -in "$crt" -noout -serial 2>/dev/null); then revoke_reason_text unreadable "$name"; return 0; fi
     if [[ $(darban_norm_serial "${file_serial#serial=}") != "$(darban_norm_serial "$serial")" ]]; then
-        printf 'pki/issued/%s.crt is not the certificate the CA lists as valid (serial %s)\n' "$name" "$serial"; return 0
+        revoke_reason_text mismatch "$name" "$serial"; return 0
     fi
-    if ! client_cert_safe "$name"; then printf 'this certificate can act as a server, so this menu will not touch it\n'; fi
+    if ! client_cert_safe "$name"; then revoke_reason_text server; fi
+}
+revoke_reason_text() {
+    # revoke_reason_text <reason> [name] [serial]: the words for a reason of revoke_block_reason. darban-core gives
+    # the list the same reasons by these names.
+    case $1 in
+        ambiguous) printf 'several valid certificates share this name; this tool will not guess which one to revoke\n' ;;
+        name) printf 'this tool cannot manage this name safely\n' ;;
+        missing) printf 'pki/issued/%s.crt is missing; restore it from pki/certs_by_serial/%s.pem\n' "$2" "$3" ;;
+        unreadable) printf 'pki/issued/%s.crt is unreadable\n' "$2" ;;
+        mismatch) printf 'pki/issued/%s.crt is not the certificate the CA lists as valid (serial %s)\n' "$2" "$3" ;;
+        server) printf 'this certificate can act as a server, so this menu will not touch it\n' ;;
+    esac
 }
 export_block_reason() {
     # Why a valid certificate cannot be put into a profile; empty when it can be.
@@ -100,44 +118,23 @@ similar_names() {
     client_index_rows | awk -F '\t' -v t="$1" '$2=="V" && tolower($1)==tolower(t) && $1!=t {print $1}' | join_lines
 }
 revocation_pending_names() {
-    # Revoked, unexpired clients the active CRL does not list: revoked in the CA, not yet blocked by OpenVPN.
-    local cn status expiry serial norm now e list rows
-    local -A listed=()
-    now=$(date -u +%s)
-    if darban_crl_signature_ok "$DARBAN_CRL"; then
-        list=$(darban_crl_serials "$DARBAN_CRL") || return 1
-        while IFS= read -r serial; do
-            [[ -n $serial ]] || continue
-            norm=$(darban_norm_serial "$serial") || return 1
-            listed["$norm"]=1
-        done <<<"$list"
-    fi
-    rows=$(client_index_rows) || return 1
-    while IFS=$'\t' read -r cn status expiry serial; do
-        [[ $status == R ]] || continue
-        norm=$(darban_norm_serial "$serial") || return 1
-        [[ -v listed[$norm] ]] && continue
-        # An unreadable date counts as not expired.
-        e=$(darban_index_expiry_epoch "$expiry" 2>/dev/null) || e=$((now + 1))
-        if (( e > now )); then printf '%s\n' "$cn"; fi
-    done <<<"$rows"
+    # Revoked, unexpired clients the active CRL does not list: revoked in the CA, not yet blocked by OpenVPN. Only a
+    # CRL this CA signed counts as evidence; without one, every such client is pending. An unreadable date counts as
+    # not expired. darban-core reads the index and the CRL once.
+    local data kind name
+    local -a crl=()
+    if darban_crl_signature_ok "$DARBAN_CRL"; then crl=(--crl "$DARBAN_CRL"); fi
+    data=$(core_index pending --now "$(date -u +%s)" "${crl[@]}") || return 1
+    while IFS=$'\t' read -r kind name; do
+        if [[ $kind == pending ]]; then printf '%s\n' "$name"; fi
+    done <<<"$data"
 }
 client_stats() {
-    # Prints: valid revoked expired expiring-soon
-    local cn status expiry serial e now valid=0 revoked=0 expired=0 soon=0
-    now=$(date -u +%s)
-    while IFS=$'\t' read -r cn status expiry serial; do
-        if is_server_serial "$serial"; then continue; fi
-        e=$(darban_index_expiry_epoch "$expiry" 2>/dev/null || echo 0)
-        if [[ $status == R ]]; then
-            revoked=$((revoked + 1))
-        elif [[ $status == V ]] && (( e > now )); then
-            valid=$((valid + 1))
-            if (( e - now <= EXPIRY_WARN_DAYS * 86400 )); then soon=$((soon + 1)); fi
-        else
-            expired=$((expired + 1))
-        fi
-    done < <(client_index_rows)
+    # Prints: valid revoked expired expiring-soon. An index darban-core cannot read counts nothing; it says why.
+    local data kind valid=0 revoked=0 expired=0 soon=0
+    if data=$(core_index stats --now "$(date -u +%s)" --server-serial "$SERVER_SERIAL" --warn-days "$EXPIRY_WARN_DAYS"); then
+        IFS=$'\t' read -r kind valid revoked expired soon <<<"$data"
+    fi
     printf '%d %d %d %d\n' "$valid" "$revoked" "$expired" "$soon"
 }
 profile_path() {
@@ -338,28 +335,29 @@ download_command() {
     esac
 }
 list_clients() {
-    local cn status expiry serial e now label rank days name_w=6 out line cell color profile shown reason pending
-    local valid=0 revoked=0 expired=0 soon=0 hidden=0 online='' events=0 seen
-    local -a rows=()
+    # darban-core reads the index, the certificates and the records of when each client was seen, once; this lays
+    # out the table. Its rows come in the order of index.txt and are sorted here, in this locale, as before.
+    local kind cn label e day state us rank days name_w=6 out line cell color profile shown reason pending data
+    local valid=0 revoked=0 expired=0 soon=0 hidden=0 online='' events=0 seen code serial now
+    local -a rows=() blocks=() options=()
     now=$(date -u +%s)
     # Who is connected now, when the server can say: one look, not one per client.
     if mgmt_available; then online=$'\n'$(connected_rows 2>/dev/null | cut -f1)$'\n'; fi
     # When each was last seen, from its connection events; never means not since they were turned on.
     if events_lines_on; then events=1; fi
-    while IFS=$'\t' read -r cn status expiry serial; do
-        if is_server_serial "$serial"; then continue; fi
-        if [[ $status == R ]] && (( ! LIST_ALL )); then hidden=$((hidden + 1)); continue; fi
-        e=$(darban_index_expiry_epoch "$expiry" 2>/dev/null || echo 0)
-        case $status in
-            V) if (( e > now )); then label=VALID rank=1; else label=EXPIRED rank=2; fi ;;
-            R) label=REVOKED rank=3 ;;
-            E) label=EXPIRED rank=2 ;;
-            *) label=$status rank=4 ;;
+    options=(--now "$now" --server-serial "$SERVER_SERIAL" --ledger "$LEDGER_DIR")
+    if (( LIST_ALL )); then options+=(--all); fi
+    data=$(core_index list "${options[@]}") || return 1
+    while IFS=$'\t' read -r kind rank cn label e day state us; do
+        case $kind in
+            row)
+                rows+=("$rank"$'\t'"$cn"$'\t'"$label"$'\t'"$e"$'\t'"$day"$'\t'"$state"$'\t'"$us")
+                if (( ${#cn} > name_w )); then name_w=${#cn}; fi ;;
+            hidden) hidden=$rank ;;
+            # block <name> <reason> <serial>
+            block) blocks+=("$rank"$'\t'"$cn"$'\t'"$label") ;;
         esac
-        if (( e == 0 )); then label=BAD-DATE; fi
-        rows+=("$rank"$'\t'"$cn"$'\t'"$label"$'\t'"$e")
-        if (( ${#cn} > name_w )); then name_w=${#cn}; fi
-    done < <(client_index_rows)
+    done <<<"$data"
     LIST_HIDDEN=$hidden
     revoked=$hidden
     if (( ${#rows[@]} == 0 && hidden == 0 )); then info 'No clients yet. Create one with menu 1.'; return 0; fi
@@ -369,14 +367,15 @@ list_clients() {
     else
         out=$'  No active clients.\n'
     fi
-    while IFS=$'\t' read -r rank cn label e; do
+    while IFS=$'\t' read -r rank cn label e day state us; do
         [[ -n $cn ]] || continue
-        shown=$(safe_text "$cn")
+        # safe_text, without a subshell for each row.
+        shown=${cn//[^[:print:]]/?}
         if (( ${#shown} > name_w )); then shown="${shown:0:name_w-1}$S_ELL"; fi
         case $label in VALID) color=$C_GREEN ;; REVOKED) color=$C_DIM ;; *) color=$C_RED ;; esac
         printf -v cell '%-8s' "$label"
         printf -v line '  %-*s  %s%s%s  ' "$name_w" "$shown" "$color" "$cell" "$C_RESET"
-        if (( e > 0 )); then line+=$(date -u -d "@$e" +%Y-%m-%d); else line+='?         '; fi
+        if (( e > 0 )); then line+=$day; else line+='?         '; fi
         if [[ $label == VALID ]]; then
             days=$(( (e - now) / 86400 ))
             if (( days <= EXPIRY_WARN_DAYS )); then
@@ -390,12 +389,12 @@ list_clients() {
             if [[ $label == REVOKED ]]; then revoked=$((revoked + 1)); else expired=$((expired + 1)); fi
         fi
         seen='-'
-        if [[ $label == VALID ]]; then seen=$(last_seen_label "$cn" "$online" "$events"); fi
+        if [[ $label == VALID ]]; then last_seen_label seen "$cn" "$online" "$events" "$us" "$now"; fi
         printf -v cell '%-10s' "$seen"
         line+="  $cell"
         # The server copy belongs to a reissued name's valid certificate, not to its revoked history.
         profile='-'
-        if { [[ $label == VALID ]] || [[ $(client_index_status "$cn") != V ]]; } && profile_path "$cn" >/dev/null; then profile="$S_OK on server"; fi
+        if { [[ $label == VALID ]] || [[ $state != V ]]; } && profile_path "$cn" >/dev/null; then profile="$S_OK on server"; fi
         if [[ $label == VALID && $online == *$'\n'"$cn"$'\n'* ]]; then profile+="  $C_GREEN$S_DOT connected$C_RESET"; fi
         out+="$line  $profile"$'\n'
     done < <(printf '%s\n' "${rows[@]}" | sort -t $'\t' -k1,1n -k2,2)
@@ -409,11 +408,13 @@ list_clients() {
     else
         out+=$'\n'
     fi
-    while IFS=$'\t' read -r cn status expiry serial; do
-        if is_server_serial "$serial"; then continue; fi
-        reason=$(revoke_block_reason "$cn") || reason=''
-        if [[ -n $reason ]]; then out+=$'\n'"  $C_YELLOW$S_WARN$C_RESET $(safe_text "$cn") cannot be revoked here: $reason"; fi
-    done < <(client_effective_rows)
+    # By name, as the names were sorted before.
+    if (( ${#blocks[@]} > 0 )); then
+        while IFS=$'\t' read -r cn code serial; do
+            reason=$(revoke_reason_text "$code" "$cn" "$serial")
+            if [[ -n $reason ]]; then out+=$'\n'"  $C_YELLOW$S_WARN$C_RESET $(safe_text "$cn") cannot be revoked here: $reason"; fi
+        done < <(printf '%s\n' "${blocks[@]}" | sort -t $'\t' -k1,1)
+    fi
     pending=$(revocation_pending_names | join_lines) || pending=''
     if [[ -n $pending ]]; then out+=$'\n'"  $C_RED$S_WARN$C_RESET Revoked but NOT blocked yet: $(safe_text "$pending") $S_ARROW Maintenance $S_CRUMB 2"; fi
     out+=$'\n'
@@ -429,7 +430,7 @@ name_reuse_block_reason() {
     esac
     serial=$(client_index_serial "$name")
     if [[ -n $serial ]] && is_server_serial "$serial"; then printf 'it belongs to the server certificate.\n'; return 0; fi
-    if ! darban_verify_crl "$DARBAN_CRL" >/dev/null 2>&1; then printf 'the published CRL has a problem; fix it first: Maintenance %s 2.\n' "$S_CRUMB"; return 0; fi
+    if ! verify_published_crl "$DARBAN_CRL" >/dev/null 2>&1; then printf 'the published CRL has a problem; fix it first: Maintenance %s 2.\n' "$S_CRUMB"; return 0; fi
     # A link or file of an earlier certificate would leave two of them in use under one name.
     rows=$(share_rows 2>/dev/null) || rows=''
     if share_names revoked "$rows" | grep -Fx -- "$name" >/dev/null; then printf 'its revocation is unfinished; finish it first: Maintenance %s 2.\n' "$S_CRUMB"; return 0; fi

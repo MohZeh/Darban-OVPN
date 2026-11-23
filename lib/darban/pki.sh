@@ -2,6 +2,24 @@
 # Easy-RSA, the CRL and revoking a client.
 # A part of bin/darban, which sources it after lib/darban/paths.sh and lib/darban/config.sh.
 
+verify_published_crl() {
+    # verify_published_crl <CRL file>: darban_verify_crl of lib/common.sh, the same checks in the same order with
+    # the same words, for the screens that only read: the file, its signature and its dates by openssl as there,
+    # then darban-core compares it with the CA index in one reading of each, where the Bash loops took minutes with
+    # thousands of revoked clients. What changes the CRL still checks it with darban_verify_crl.
+    local file=$1 exp start now server_serial
+    [[ -s $file ]] || { darban_error "CRL missing: $file"; return 1; }
+    darban_crl_signature_ok "$file" || { darban_error 'CRL signature verification failed.'; return 1; }
+    exp=$(darban_crl_expiry_epoch "$file") || { darban_error 'Unreadable CRL nextUpdate.'; return 1; }
+    start=$(darban_crl_this_epoch "$file") || { darban_error 'Unreadable CRL lastUpdate.'; return 1; }
+    now=$(date -u +%s)
+    (( exp > now && start <= now + 300 && start < exp )) || {
+        darban_error 'CRL is expired, not yet valid, or has an inconsistent validity window.'; return 1;
+    }
+    # An unreadable index is named before the server certificate, as there; darban-core says both.
+    server_serial=$(darban_server_serial 2>/dev/null) || server_serial=''
+    core_index crl --crl "$file" --now "$now" --server-serial "$server_serial" >/dev/null
+}
 run_easyrsa() {
     # Easy-RSA's own notices (e.g. "now run gen-crl") contradict the automated flow and bury the
     # result, so its output is kept out of sight and shown only when it fails.

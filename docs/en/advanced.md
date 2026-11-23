@@ -22,6 +22,8 @@ The one-line command runs `curl` inside `sudo` on purpose. In the form `curl ...
 
 If you doubt a release, GitHub can check it with its own attestation: `gh release verify v1.0.1 --repo MohZeh/Darban-OVPN`, and for a file you downloaded, `gh release verify-asset v1.0.0 get.sh --repo MohZeh/Darban-OVPN`. The installer does not run these checks.
 
+From v1.1, a release also has signed build provenance for each file, which says that this repository's release workflow built it from the tagged commit. For a file you downloaded: `gh attestation verify darban-ovpn-amd64.tar.gz --repo MohZeh/Darban-OVPN`.
+
 ## Install a specific version
 
 Use the address of that release. It installs its own version:

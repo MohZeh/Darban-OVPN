@@ -62,6 +62,41 @@ darban_tmp_cleanup() {
     for file in "${DARBAN_TMP_FILES[@]}"; do rm -f -- "$file" || true; done
     DARBAN_TMP_FILES=()
 }
+darban_core_stage() {
+    # darban_core_stage <new darban-core> <target> [version]: copies the new binary to a temp file beside the
+    # target and runs "version" from that copy, which must print the version given, or any version without one.
+    # Prints the copy's path for darban_core_place. When the trial fails, the copy is gone, nothing was replaced, and
+    # the reason is said: a file that does not run on this server, such as one for another architecture or a broken
+    # download, never takes the place of one that does.
+    local new=$1 target=$2 want=${3:-} temp said rc=0 how
+    temp=$(mktemp "${target%/*}/.darban-core.XXXXXXXX") || { darban_error "Could not make a temp file beside $target."; return 1; }
+    if ! cp -- "$new" "$temp" || ! chmod 700 -- "$temp"; then
+        rm -f -- "$temp"
+        darban_error "Could not copy the new darban-core beside $target. The installed one stays; nothing was replaced."
+        return 1
+    fi
+    said=$(timeout 20 "$temp" version 2>/dev/null) || rc=$?
+    said=${said//[^[:print:]]/?}
+    if (( rc != 0 )) || ! [[ $said =~ ^[0-9]+\.[0-9]+\.[0-9]+(-(alpha|beta|rc)\.[0-9]+)?$ ]]; then
+        rm -f -- "$temp"
+        how="failed with status $rc"
+        if (( rc == 0 )); then how='gave no version'; fi
+        darban_error "The new darban-core does not run on this server (\"darban-core version\" $how). The installed one stays; nothing was replaced."
+        return 1
+    fi
+    if [[ -n $want && $said != "$want" ]]; then
+        rm -f -- "$temp"
+        darban_error "The new darban-core is version ${said:0:40}, not $want. The installed one stays; nothing was replaced."
+        return 1
+    fi
+    printf '%s\n' "$temp"
+}
+darban_core_place() {
+    # darban_core_place <copy from darban_core_stage, or nothing> <target>: one rename, so the target is always a
+    # whole binary, the old one or the new one.
+    [[ -n $1 ]] || return 0
+    mv -f -- "$1" "$2" || { rm -f -- "$1"; darban_error "Could not put the new darban-core in place at $2."; return 1; }
+}
 valid_port() { [[ $1 =~ ^[0-9]{1,5}$ ]] && (( 10#$1 >= 1024 && 10#$1 <= 65535 )); }
 valid_domain() {
     local d=$1 label
