@@ -153,6 +153,83 @@ test_index_missing_empty_or_malformed_is_rejected() {
     rc_not0 'index without the server certificate rejected' "$rc"
 }
 
+# The check of a published CRL by darban_verify_crl (lib/common.sh), and by verify_published_crl (pki.sh), which
+# compares the CRL with the index through darban-core. Each prints its errors, and the status, for the CRL named.
+bash_crl_check() { bash -c 'set -uo pipefail; source "$E/lib/common.sh"; darban_verify_crl "$1"; echo "status $?"' _ "$1" 2>&1; }
+core_crl_check() {
+    bash -c 'set -uo pipefail; DARBAN_VERSION=test; source "$E/lib/common.sh"
+        for module in paths config core clients pki; do source "$E/lib/modules/$module.sh"; done
+        verify_published_crl "$1"; echo "status $?"' _ "$1" 2>&1
+}
+crl_of() {
+    # crl_of <file> [openssl ca options]: a CRL of this CA from its index as it is now, signed with its key.
+    (cd "$PKI" && { [[ -s crlnumber ]] || echo 1000 > crlnumber; } && openssl ca -batch -config "$E/openssl.cnf" -gencrl -out "$1" "${@:2}" 2>/dev/null)
+}
+
+test_published_crl_check_matches_darban_verify_crl() {
+    # G2: the menu's header, Diagnostics and a new client trust verify_published_crl, so it must judge every CRL as
+    # darban_verify_crl does, with the same status and the same words. Each case runs both on the same files.
+    local dir=$E/crl-cases out_bash out_core what
+    mkdir -p "$dir"
+    easyrsa build-client-full bob nopass >/dev/null 2>&1
+    easyrsa build-client-full carol nopass >/dev/null 2>&1
+    easyrsa revoke bob >/dev/null 2>&1
+    crl_of "$dir/good.pem"
+    : > "$dir/empty.pem"
+    openssl crl -in "$dir/good.pem" -badsig -out "$dir/bad-signature.pem" 2>/dev/null
+    openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes -keyout "$dir/other.key" -out "$dir/other.crt" -subj /CN=OtherCA -days 30 2>/dev/null
+    crl_of "$dir/other-ca.pem" -keyfile "$dir/other.key" -cert "$dir/other.crt"
+    crl_of "$dir/expired.pem" -crl_lastupdate 20200101000000Z -crl_nextupdate 20200201000000Z
+    crl_of "$dir/not-yet-valid.pem" -crl_lastupdate 20991201000000Z -crl_nextupdate 20991231000000Z
+    # A CRL from before carol's revocation: a revoked client it does not list.
+    cp "$PKI/index.txt" "$dir/index.before-carol"
+    easyrsa revoke carol >/dev/null 2>&1
+    crl_of "$dir/complete.pem"
+    # The CRL revokes the server's own certificate, which the index lists as valid.
+    cp "$PKI/index.txt" "$dir/index.live"
+    awk -F '\t' 'BEGIN {OFS="\t"} $6 ~ /\/CN=server_abc123$/ {$1="R"; $3="261101000000Z"} {print}' "$dir/index.live" > "$PKI/index.txt"
+    crl_of "$dir/server-revoked.pem"
+    cp "$dir/index.live" "$PKI/index.txt"
+    local -a cases=(
+        "a complete CRL|$dir/complete.pem|"
+        "a CRL that is missing|$dir/none.pem|"
+        "an empty CRL file|$dir/empty.pem|"
+        "a CRL with a bad signature|$dir/bad-signature.pem|"
+        "a CRL signed by another CA|$dir/other-ca.pem|"
+        "an expired CRL|$dir/expired.pem|"
+        "a CRL not yet valid|$dir/not-yet-valid.pem|"
+        "a revoked client the CRL does not list|$dir/good.pem|"
+        "the server certificate on the CRL|$dir/server-revoked.pem|"
+        "a CRL revoking what the index calls valid|$dir/complete.pem|before-carol"
+        "a malformed record in the index|$dir/complete.pem|garbage"
+        "an index without the server certificate|$dir/complete.pem|no-server"
+        "an index that is missing|$dir/complete.pem|missing"
+    )
+    local entry file index
+    for entry in "${cases[@]}"; do
+        IFS='|' read -r what file index <<<"$entry"
+        case $index in
+            before-carol) cp "$dir/index.before-carol" "$PKI/index.txt" ;;
+            garbage) { cat "$dir/index.live"; printf 'garbage line\n'; } > "$PKI/index.txt" ;;
+            no-server) grep -v server_abc123 "$dir/index.live" > "$PKI/index.txt" ;;
+            missing) rm -f "$PKI/index.txt" ;;
+        esac
+        out_bash=$(bash_crl_check "$file")
+        out_core=$(core_crl_check "$file")
+        rc_is "$what: both give the same status and words" "$out_bash" "$out_core"
+        cp "$dir/index.live" "$PKI/index.txt"
+    done
+    # The cases reach what they are about: a valid CRL passes, and the others fail for their own reason.
+    has 'a complete CRL passes both' 'status 0' "$(core_crl_check "$dir/complete.pem")"
+    has 'a missing revocation is named' 'CRL is missing revoked CA serial' "$(core_crl_check "$dir/good.pem")"
+    has 'the revoked server certificate is named' 'CRL revokes serial(s) the CA database does not' "$(core_crl_check "$dir/server-revoked.pem")"
+    has 'an expired CRL is named' 'CRL is expired, not yet valid' "$(core_crl_check "$dir/expired.pem")"
+    has 'another CA is named' 'CRL signature verification failed' "$(core_crl_check "$dir/other-ca.pem")"
+    # On purpose, one way only can differ: the serials of a CRL are read by openssl crl -text in Bash and by Go's
+    # x509.ParseRevocationList in darban-core. A CRL that one can read and the other cannot would fail only
+    # verify_published_crl, as "Could not read the serials of the CRL.", so it errs on the side of a problem shown.
+}
+
 test_index_rollback_cannot_unrevoke() {
     local out rc serial
     snapshot_index

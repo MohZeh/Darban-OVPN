@@ -23,8 +23,7 @@ done
 common=(--force-local --format=gnu --owner=0 --group=0 --numeric-owner --mtime="@$when")
 # The modules of the manager, its screens in lib/darban/screens included, by path in the C locale, so the order in
 # the archive never depends on the machine.
-mapfile -t modules < <(printf '%s
-' lib/darban/*.sh lib/darban/screens/*.sh | LC_ALL=C sort)
+mapfile -t modules < <(printf '%s\n' lib/darban/*.sh lib/darban/screens/*.sh | LC_ALL=C sort)
 [[ -f ${modules[0]:-} ]] || { echo 'No modules in lib/darban.' >&2; exit 1; }
 pack() {
     # pack <archive> <architecture>...: the tool with darban-core for those architectures, in one fixed order.
