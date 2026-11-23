@@ -77,7 +77,7 @@ Run the install command again, or use **9 Setup**, then `2` **Check for updates*
 sudo darban update
 ```
 
-Only the tool changes, and clients stay as they are. OpenVPN does not restart, except once, when an update turns on [connection events](advanced.md#connection-events): connected users then drop for a few seconds and reconnect by themselves, and the update says so first. If the earlier install lacks a rule the new version needs, such as the TCP MSS limit, the update adds it. To go back, use **9 Setup**, then `4` **Restore previous version**. Going back to a version without connection events removes their units first; the event script and its lines in `server.conf` stay, so every client still connects, and the tool shows the command that removes them.
+Only the tool changes, and clients stay as they are. OpenVPN does not restart, except once, when an update turns on [connection events](advanced.md#connection-events): connected users then drop for a few seconds and reconnect by themselves, and the update says so first. If the earlier install lacks a rule the new version needs, such as the TCP MSS limit, the update adds it. It also moves the TCP MSS limit to the default, `1330`, unless you set another value in **Settings › Advanced › TCP MSS**. To go back, use **9 Setup**, then `4` **Restore previous version**. Going back to a version without connection events removes their units first; the event script and its lines in `server.conf` stay, so every client still connects, and the tool shows the command that removes them.
 
 ## Check the server
 
