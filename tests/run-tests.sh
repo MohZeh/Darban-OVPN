@@ -4091,10 +4091,10 @@ alice
 0
 ')
     has 'without snap it says why acme.sh gets it' 'This server has no snap for certbot 5.3 or newer, so acme.sh 3.1.6 gets it.' "$out"
-    grep -q 'curl .*https://github.com/acmesh-official/acme.sh/archive/refs/tags/3.1.6.tar.gz' "$STUB_LOG"; rc_is 'acme.sh comes from its release on GitHub, at the pinned version' 0 "$?"
+    grep -q 'curl .*https://raw.githubusercontent.com/acmesh-official/acme.sh/807da6498377ee5e0cf43a78091f46f12dc59a89/acme.sh' "$STUB_LOG"; rc_is 'acme.sh is its one file at the commit of the 3.1.6 tag' 0 "$?"
     has 'a wrong SHA-256 is refused' 'does not have the SHA-256 this tool knows for version 3.1.6' "$out"
     ok_if 'and nothing of it is installed' test ! -e "$E/acme-home/acme.sh-3.1.6"
-    has 'and it says what to do' 'This can be a change on GitHub' "$out"
+    has 'and it says what to do' 'If it fails again, update Darban' "$out"
     ok_if 'no folder is left that Remove everything would not know of' test ! -e "$E/acme-home"
     if grep -q '^acme_sh' "$E/cfg/.server-setup-started" 2>/dev/null; then result 0 'nor recorded'; else result 1 'nor recorded'; fi
     if grep -q 'pip\|venv\|get.acme.sh' "$STUB_LOG"; then result 0 'nothing comes from the Python Package Index or get.acme.sh'; else result 1 'nothing comes from the Python Package Index or get.acme.sh'; fi
@@ -4227,6 +4227,8 @@ test_acme_sh_gets_the_link_certificate_without_snap() {
     cmp -s "$E/cfg/link-cert.pem" "$E/acme-home/links/fullchain.pem"; rc_is 'and use its certificate' 0 "$?"
     ok_if 'its timer is set, not a line in a crontab' test -s "$E/units/darban-acme.timer"
     grep -qx 'NoNewPrivileges=true' "$E/units/darban-acme.service"; rc_is 'its service gains no privileges' 0 "$?"
+    # Only the one file acme.sh is installed: nothing may ask for its DNS, deploy or notify scripts.
+    if grep -qE -- '--dns|--deploy-hook|--notify|--set-notify|--upgrade|--install( |$)' "$STUB_LOG" "$E/units/darban-acme.service"; then result 0 'no DNS, deploy or notify script of acme.sh is used'; else result 1 'no DNS, deploy or notify script of acme.sh is used'; fi
     grep -q "ExecStart=$E/acme-home/acme.sh-3.1.6/acme.sh --cron --home $E/acme-home/acme.sh-3.1.6 --config-home $E/acme-home/data" "$E/units/darban-acme.service"; rc_is 'and it renews only what acme.sh got for the links' 0 "$?"
     grep -q ' 203.0.113.9 new$' "$E/varlib/link-certificates.log"; rc_is 'the new certificate counts in the weekly record' 0 "$?"
     out=$(menu '7\n5\n4\n0\n0\n')

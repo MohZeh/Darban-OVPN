@@ -230,37 +230,33 @@ acme_install_undo() {
     return 1
 }
 acme_install() {
-    # The pinned acme.sh, from its release on GitHub. It is put in place only when the tarball has the SHA-256
-    # written in config.sh, and recorded for Remove everything once it is there. Nothing is run before the check.
+    # The pinned acme.sh, its one file at the commit of its release on GitHub. It is put in place only when it has the
+    # SHA-256 written in config.sh, and recorded for Remove everything once it is there. Nothing is run before the
+    # check.
     local temp sum created=0
     [[ -x $ACME_BIN ]] && return 0
     [[ -d $ACME_HOME ]] || created=1
     install -d -m 700 "$ACME_HOME" || { warn "Could not create $ACME_HOME for acme.sh."; return 1; }
     temp=$(mktemp -d "$ACME_HOME/.download.XXXXXXXX") || { acme_install_undo '' "$created"; return 1; }
-    info "Downloading acme.sh $ACME_VERSION from its release on GitHub${S_ELL}"
-    if ! curl -fsSL --proto '=https' --proto-redir '=https' --max-time 120 --retry 2 -o "$temp/acme.sh.tar.gz" "$ACME_URL" 2>/dev/null; then
+    info "Downloading acme.sh $ACME_VERSION from GitHub${S_ELL}"
+    if ! curl -fsSL --proto '=https' --proto-redir '=https' --max-time 120 --retry 2 -o "$temp/acme.sh" "$ACME_URL" 2>/dev/null; then
         warn "Could not download acme.sh $ACME_VERSION from $ACME_URL."
         acme_install_undo "$temp" "$created"
         return 1
     fi
-    sum=$(sha256sum "$temp/acme.sh.tar.gz" 2>/dev/null | awk '{print $1}')
+    sum=$(sha256sum "$temp/acme.sh" 2>/dev/null | awk '{print $1}')
     if [[ $sum != "$ACME_SHA256" ]]; then
         warn "The acme.sh download does not have the SHA-256 this tool knows for version $ACME_VERSION, so it was not installed and nothing of it ran."
-        # GitHub makes the tarball of a tag itself, and has changed such files before: a new version of this tool
-        # knows the new value, and snap gives certbot instead.
-        info "This can be a change on GitHub's side, not an attack. Update Darban (Setup ${S_CRUMB} Check for updates), or install snap so certbot from the Certbot project can be used."
+        # The file at that commit never changes, so the download was cut short or altered on the way.
+        info "The download was cut short or changed on the way. Try again later. If it fails again, update Darban (Setup ${S_CRUMB} Check for updates), or install snap so certbot from the Certbot project can be used."
         audit "acme.sh $ACME_VERSION refused: SHA-256 ${sum:-unknown}, expected $ACME_SHA256"
         acme_install_undo "$temp" "$created"
         return 1
     fi
-    if ! tar -xzf "$temp/acme.sh.tar.gz" -C "$temp" --no-same-owner 2>/dev/null || [[ ! -f $temp/acme.sh-$ACME_VERSION/acme.sh ]]; then
-        warn "The acme.sh $ACME_VERSION tarball could not be unpacked."
-        acme_install_undo "$temp" "$created"
-        return 1
-    fi
-    chmod 700 "$temp/acme.sh-$ACME_VERSION/acme.sh"
+    chmod 700 "$temp/acme.sh"
     rm -rf -- "$ACME_PROGRAM_DIR"
-    if ! mv -T -- "$temp/acme.sh-$ACME_VERSION" "$ACME_PROGRAM_DIR"; then
+    if ! install -d -m 700 "$ACME_PROGRAM_DIR" || ! mv -f -- "$temp/acme.sh" "$ACME_BIN"; then
+        rm -rf -- "$ACME_PROGRAM_DIR"
         acme_install_undo "$temp" "$created"
         return 1
     fi

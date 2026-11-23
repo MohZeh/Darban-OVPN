@@ -38,6 +38,8 @@ issue)
     printf '7\n5\n2\n0\n0\n' | darban | tee "$LOG/acme-issue.log"
     grep 'acme.sh 3.1.6 is installed in /var/lib/darban-acme/acme.sh-3.1.6, checked by its SHA-256.' "$LOG/acme-issue.log" >/dev/null
     grep "New certificate from Let's Encrypt for $HOST, by acme.sh" "$LOG/acme-issue.log" >/dev/null
+    # The one file acme.sh is all of it here: no DNS, deploy or notify scripts.
+    [[ $(ls -A "$ACME_HOME/acme.sh-3.1.6") == acme.sh ]]
     [[ $(cat /etc/darban/link-cert/current/kind) == acme.sh ]]
     cmp -s /etc/darban/link-cert.pem "$ACME_HOME/links/fullchain.pem"
     openssl x509 -in /etc/darban/link-cert.pem -noout -checkip "$HOST" | grep 'does match' >/dev/null
