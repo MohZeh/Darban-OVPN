@@ -201,6 +201,14 @@ for attempt in $(seq 1 10); do
 done
 darban connected | grep accept1 >/dev/null
 echo 'PASS: the connected client is listed.'
+# G27: the row of the real session. OpenVPN 2.7 writes its address as udp4:127.0.0.1:<port>; the table shows the
+# address alone, the protocol, how long it is connected, and its traffic, which the handshake and pings already make.
+ping -c 3 -W 2 -I tun9 "$(ip -4 -o addr show dev tun9 | awk '{split($4, a, "/"); split(a[1], o, "."); print o[1] "." o[2] "." o[3] ".1"}')" >/dev/null 2>&1 || true
+row=$(darban connected | grep -E '^  accept1 ')
+printf '%s\n' "$row"
+[[ $row =~ ^\ \ accept1\ +127\.0\.0\.1\ +UDP\ +[0-9]+\ (min|h\ [0-9]+\ min|d\ [0-9]+\ h)\ +[0-9.]+\ [KMGT]?B\ /\ [0-9.]+\ [KMGT]?B$ ]]
+[[ $row != *udp4:* && $row != *'0 B / 0 B'* ]]
+echo 'PASS: Connected now shows the real address, the protocol, the duration and the traffic of the session.'
 
 # The tool waits for the connection after sharing, and another SSH user gets a copy it can read.
 cat > "$LOG/share.keys" <<'EOF'
