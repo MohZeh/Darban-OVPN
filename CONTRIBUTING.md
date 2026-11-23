@@ -7,12 +7,15 @@ Bug reports and focused improvements are welcome. For a larger change, please op
 ```text
 bin/       the darban menu and the CRL maintainer
 lib/       shared checks, terminal interface, link service
+lib/darban/  the parts of the darban menu: paths.sh, backup.sh, restore.sh
 setup/     get.sh, server-setup.sh, install.sh, uninstall.sh, remove-server.sh
 systemd/   units for CRL renewal and temporary links
 scripts/   release build
 tests/     automated tests
 docs/      guides in English and Persian
 ```
+
+`bin/darban` sources its parts in `lib/darban/` in one fixed order, `paths.sh` first, by absolute path: `setup/install.sh` places them in `/usr/local/lib/darban/modules/`, before `bin/darban` itself, and the release archive carries them. The tests source a copy of `paths.sh` whose paths point into a fake server. Each function is defined in one file only; `scripts/check-modules.py` checks this in Lint, and for a pull request titled `refactor:` it also checks that the set of functions stays the same.
 
 ## Running the tests
 

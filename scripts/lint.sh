@@ -16,6 +16,8 @@ for f in files:
 print(f"Python: {len(files)} files compile.")
 '
 python3 scripts/check-repo.py
+# How bin/darban sources its modules, and no function twice. CI also compares a refactor with its base.
+python3 scripts/check-modules.py
 # The suite's runner fails when its filter matches no test, so a mistyped name never passes with nothing run. This
 # ends before any test starts.
 if bash tests/run-tests.sh no_test_has_this_name >/dev/null 2>&1; then echo 'run-tests.sh passed a filter that matched no test' >&2; exit 1; fi

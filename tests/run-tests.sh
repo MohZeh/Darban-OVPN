@@ -970,7 +970,7 @@ test_server_certificate_expiry_is_in_the_header() {
     local out
     out=$(menu '0\n')
     lacks 'a long-lived server certificate gives no alert' 'Server certificate expires' "$out"
-    sed -i 's/^EXPIRY_WARN_DAYS=.*/EXPIRY_WARN_DAYS=5000/' "$E/manager.sh"
+    sed -i 's/^EXPIRY_WARN_DAYS=.*/EXPIRY_WARN_DAYS=5000/' "$E/lib/modules/paths.sh"
     out=$(menu '0\n')
     has 'a certificate near expiry gives an alert' 'Server certificate expires' "$out"
 }
@@ -2688,6 +2688,10 @@ test_release_assets_know_their_version() {
     listed=$(tar -tzf "$out/darban-ovpn.tar.gz")
     grep -qx 'lib/geolist.py' <<<"$listed"; rc_is 'the archive has the lists of blocked destinations' 0 "$?"
     grep -qx 'systemd/darban-geo.timer' <<<"$listed"; rc_is 'the archive has their daily update' 0 "$?"
+    local module
+    for module in "$REPO"/lib/darban/*.sh; do
+        grep -qx "lib/darban/${module##*/}" <<<"$listed"; rc_is "the archive has the module ${module##*/}" 0 "$?"
+    done
     (cd "$out" && sha256sum --quiet -c SHA256SUMS >/dev/null); rc_is 'the checksums match' 0 "$?"
 
     # Q12: every file carries the commit time, and a second build of the commit, from a copy whose files have
@@ -2707,6 +2711,24 @@ test_release_assets_know_their_version() {
     # Without git or SOURCE_DATE_EPOCH, there is no time to give the files, and nothing is built.
     out=$(env -u SOURCE_DATE_EPOCH bash "$copy/scripts/build-release.sh" "$WORK/release-nogit" 2>&1); rc_not0 'no commit time, no build' "$?"
     has 'it says what is missing' 'No commit time' "$out"
+}
+
+test_an_update_places_the_modules_before_the_manager() {
+    # G1a: bin/darban sources its modules, so an install or a way back that stops half way must never leave a
+    # manager whose modules are not there yet: the modules go first, the manager last.
+    local modules manager module sourced
+    modules=$(grep -n '^for module in lib/darban/\*\.sh; do$' "$REPO/setup/install.sh" | cut -d: -f1)
+    manager=$(grep -n '^install .* bin/darban /usr/local/sbin/darban$' "$REPO/setup/install.sh" | cut -d: -f1)
+    [[ -n $modules && -n $manager ]] && (( modules < manager )); rc_is 'install.sh places the modules before the manager' 0 "$?"
+    grep -qF 'cp -a -- "$newest/lib/." "$DARBAN_LIB/" && cp -a -- "$newest/sbin/." "$SBIN_DIR/"' "$REPO/bin/darban"
+    rc_is 'the previous version gets its library before its manager' 0 "$?"
+    # The manager sources each module of lib/darban once, from where install.sh puts it, paths.sh first.
+    sourced=$(sed -n 's#^source /usr/local/lib/darban/modules/\([a-z]*\.sh\)$#\1#p' "$REPO/bin/darban")
+    rc_is 'paths.sh is sourced first' paths.sh "$(head -n 1 <<<"$sourced")"
+    rc_is 'each module is sourced once' "$(cd "$REPO/lib/darban" && printf '%s\n' *.sh | sort)" "$(sort <<<"$sourced")"
+    for module in $sourced; do
+        [[ -s $E/lib/modules/$module ]]; rc_is "the fake server has $module where install.sh puts it" 0 "$?"
+    done
 }
 
 test_server_setup_continues_after_a_failure() {
@@ -6161,7 +6183,7 @@ test_a_backup_hook_that_ignores_its_time_is_killed() {
     local start took
     template_server
     backup_key_set
-    sed -i 's/^BACKUP_HOOK_SECONDS=.*/BACKUP_HOOK_SECONDS=1/' "$E/manager.sh"
+    sed -i 's/^BACKUP_HOOK_SECONDS=.*/BACKUP_HOOK_SECONDS=1/' "$E/lib/modules/paths.sh"
     mkdir -m 700 "$E/cfg/backup-hooks"
     printf '#!/bin/bash\ntrap "" TERM\nsleep 60\n' > "$E/cfg/backup-hooks/stubborn"; chmod 700 "$E/cfg/backup-hooks/stubborn"
     start=$(date +%s)
@@ -6469,10 +6491,11 @@ test_no_backup_hook_starts_once_a_restore_began() {
 }
 
 test_every_test_variable_of_the_product_is_listed() {
-    # R18-16: the manager names each variable it reads for the tests, in one list near its top.
+    # R18-16: the manager names each variable it reads for the tests, in one list: in lib/darban/paths.sh, which
+    # bin/darban sources first. The manager is bin/darban and its modules in lib/darban.
     local listed used name
-    listed=$(sed -n '/^# Variables for the tests only/,/^# tests\/run-tests.sh checks/p' "$REPO/bin/darban" | grep -oE 'DARBAN_TEST_[A-Z_]+' | sort -u)
-    used=$(grep -v '^ *#' "$REPO/bin/darban" | grep -oE 'DARBAN_TEST_[A-Z_]+' | sort -u)
+    listed=$(sed -n '/^# Variables for the tests only/,/^# tests\/run-tests.sh checks/p' "$REPO/lib/darban/paths.sh" | grep -oE 'DARBAN_TEST_[A-Z_]+' | sort -u)
+    used=$(grep -rhv '^ *#' "$REPO/bin/darban" "$REPO/lib/darban" | grep -oE 'DARBAN_TEST_[A-Z_]+' | sort -u)
     [[ -n $listed ]]; rc_is 'the list is there' 0 "$?"
     for name in $used; do
         grep -qx "$name" <<<"$listed"; rc_is "$name is listed" 0 "$?"
@@ -6480,7 +6503,7 @@ test_every_test_variable_of_the_product_is_listed() {
     for name in $listed; do
         grep -qx "$name" <<<"$used"; rc_is "$name is still read" 0 "$?"
     done
-    used=$(grep -rhoE 'DARBAN_TEST_[A-Z_]+' "$REPO/lib" "$REPO/setup" "$REPO/systemd" | sort -u)
+    used=$(grep -rhoE --exclude-dir=darban 'DARBAN_TEST_[A-Z_]+' "$REPO/lib" "$REPO/setup" "$REPO/systemd" | sort -u)
     [[ -z $used ]]; rc_is 'no other part of the product reads one' 0 "$?"
 }
 

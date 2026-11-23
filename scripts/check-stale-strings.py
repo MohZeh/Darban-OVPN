@@ -51,7 +51,8 @@ def removed_texts(base):
 
 def main():
     base = sys.argv[1] if len(sys.argv) > 1 else ''
-    code = read(p for d in ('bin', 'lib', 'setup', 'systemd') for p in sorted((ROOT / d).glob('*')) if p.is_file())
+    # The modules of the manager in lib/darban are code too.
+    code = read(p for d in ('bin', 'lib', 'setup', 'systemd') for p in sorted((ROOT / d).rglob('*')) if p.is_file())
     tests = read(sorted(p for p in (ROOT / 'tests').glob('*') if p.suffix in ('.sh', '.py')))
     removed = removed_texts(base)
     stale = sorted(t for t in removed or () if t not in code and t in tests)

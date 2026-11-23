@@ -16,7 +16,10 @@ mkdir -p "$out"
 tarfile=$(mktemp -d)/release.tar
 common=(--force-local --format=gnu --owner=0 --group=0 --numeric-owner --mtime="@$when")
 tar "${common[@]}" --mode=700 -cf "$tarfile" setup/install.sh setup/server-setup.sh setup/get.sh setup/uninstall.sh setup/remove-server.sh bin/darban bin/darban-crl-maintain bin/darban-ovpn-event
-tar "${common[@]}" --mode=644 -rf "$tarfile" lib/common.sh lib/ui.sh lib/linkd.py lib/backup.py lib/geolist.py systemd/darban-crl.service systemd/darban-backup.service systemd/darban-geo.service systemd/darban-geo.timer systemd/darban-crl.timer systemd/darban-links.service systemd/darban-events.mount systemd/darban-events-setup.service systemd/darban-events.path systemd/darban-events.service systemd/darban-sweep.timer systemd/darban-sweep.service systemd/darban-expire.service README.md README.fa.md CHANGELOG.md LICENSE VERSION
+# The modules of the manager, by name in the C locale, so the order in the archive never depends on the machine.
+mapfile -t modules < <(printf '%s\n' lib/darban/*.sh | LC_ALL=C sort)
+[[ -f ${modules[0]:-} ]] || { echo 'No modules in lib/darban.' >&2; exit 1; }
+tar "${common[@]}" --mode=644 -rf "$tarfile" lib/common.sh lib/ui.sh lib/linkd.py lib/backup.py lib/geolist.py "${modules[@]}" systemd/darban-crl.service systemd/darban-backup.service systemd/darban-geo.service systemd/darban-geo.timer systemd/darban-crl.timer systemd/darban-links.service systemd/darban-events.mount systemd/darban-events-setup.service systemd/darban-events.path systemd/darban-events.service systemd/darban-sweep.timer systemd/darban-sweep.service systemd/darban-expire.service README.md README.fa.md CHANGELOG.md LICENSE VERSION
 gzip -9n -c "$tarfile" > "$out/darban-ovpn.tar.gz"
 rm -rf -- "$(dirname -- "$tarfile")"
 # The published script installs its own release, so a link to any version does what it says.
