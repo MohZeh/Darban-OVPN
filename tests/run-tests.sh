@@ -3056,10 +3056,10 @@ STUB
     chmod +x "$E/bin/nft"
     source "$REPO/lib/common.sh"
     darban_nat_rules 10.8.0.0 eth0 > "$E/cfg/nat.nft"
-    printf '\t\tip saddr 10.8.0.0/24 tcp flags syn tcp option maxseg size > 1280 tcp option maxseg size set 1280\n' > "$E/live-input"
-    printf '\t\tip daddr 10.8.0.0/24 tcp flags syn tcp option maxseg size > 1280 tcp option maxseg size set 1280\n' > "$E/live-output"
+    printf '\t\tip saddr 10.8.0.0/24 tcp flags syn tcp option maxseg size > 1330 tcp option maxseg size set 1330\n' > "$E/live-input"
+    printf '\t\tip daddr 10.8.0.0/24 tcp flags syn tcp option maxseg size > 1330 tcp option maxseg size set 1330\n' > "$E/live-output"
     printf '\t\tip saddr 10.8.0.0/24 oifname "eth0" masquerade\n' > "$E/live-post"
-    printf '\t\tip saddr 10.8.0.0/24 ip daddr 10.8.0.0/24 drop\n\t\tip saddr 10.8.0.0/24 ip daddr 169.254.0.0/16 drop\n\t\tip saddr 10.8.0.0/24 tcp flags syn tcp option maxseg size > 1280 tcp option maxseg size set 1280\n\t\tip daddr 10.8.0.0/24 tcp flags syn tcp option maxseg size > 1280 tcp option maxseg size set 1280\n' > "$E/live-forward"
+    printf '\t\tip saddr 10.8.0.0/24 ip daddr 10.8.0.0/24 drop\n\t\tip saddr 10.8.0.0/24 ip daddr 169.254.0.0/16 drop\n\t\tip saddr 10.8.0.0/24 tcp flags syn tcp option maxseg size > 1330 tcp option maxseg size set 1330\n\t\tip daddr 10.8.0.0/24 tcp flags syn tcp option maxseg size > 1330 tcp option maxseg size set 1330\n' > "$E/live-forward"
     # The interfaces this server has, and the one of its default route.
     cat > "$E/bin/ip" <<'STUB'
 #!/usr/bin/env bash
@@ -3071,7 +3071,7 @@ STUB
     chmod +x "$E/bin/ip"
     out=$(mgr status)
     has 'both live rules pass' 'VPN clients are kept apart' "$out"
-    has 'the TCP size rule passes' 'TCP MSS for VPN traffic is limited to 1280 in both directions' "$out"
+    has 'the TCP size rule passes' 'TCP MSS for VPN traffic is limited to 1330 in both directions' "$out"
     # client-to-client: OpenVPN passes traffic between clients itself, past these rules, though they are there.
     printf 'client-to-client\n' >> "$SERVER_CONF"
     out=$(mgr status)
@@ -3081,13 +3081,24 @@ STUB
     has 'without it, they pass again' 'VPN clients are kept apart' "$(mgr status)"
     : > "$E/live-input"
     has 'a missing rule for connections to the server itself is reported' 'The TCP MSS rule for VPN traffic is missing or different' "$(mgr status)"
-    printf '\t\tip saddr 10.8.0.0/24 tcp flags syn tcp option maxseg size > 1280 tcp option maxseg size set 1280\n' > "$E/live-input"
+    printf '\t\tip saddr 10.8.0.0/24 tcp flags syn tcp option maxseg size > 1330 tcp option maxseg size set 1330\n' > "$E/live-input"
     sed -i '/maxseg/d' "$E/live-forward"
     out=$(mgr status)
     has 'a missing TCP size rule is reported, with the installer as the fix' 'The TCP MSS rule for VPN traffic is missing or different' "$out"
     has 'and the installer is named' '--version v' "$out"
-    lacks 'and it is not called fine' 'TCP MSS for VPN traffic is limited to 1280 in both directions' "$out"
+    lacks 'and it is not called fine' 'TCP MSS for VPN traffic is limited to 1330 in both directions' "$out"
     has 'the live NAT passes' 'NAT for the VPN network 10.8.0.0/24 present' "$out"
+    # Diagnostics compare with the MSS set in Settings > Advanced, not with the default.
+    printf '\t\tip saddr 10.8.0.0/24 ip daddr 10.8.0.0/24 drop\n\t\tip saddr 10.8.0.0/24 ip daddr 169.254.0.0/16 drop\n\t\tip saddr 10.8.0.0/24 tcp flags syn tcp option maxseg size > 1330 tcp option maxseg size set 1330\n\t\tip daddr 10.8.0.0/24 tcp flags syn tcp option maxseg size > 1330 tcp option maxseg size set 1330\n' > "$E/live-forward"
+    has 'the default MSS passes again' 'TCP MSS for VPN traffic is limited to 1330 in both directions' "$(mgr status)"
+    printf 'TCP_MSS=1400\n' >> "$E/cfg/config"
+    out=$(mgr status)
+    has 'rules with another MSS than the one set are reported' 'missing or different from the configured 1400' "$out"
+    lacks 'and the default is not called fine' 'TCP MSS for VPN traffic is limited to 1330' "$out"
+    sed -i 's/1330/1400/g' "$E/live-input" "$E/live-output" "$E/live-forward"
+    has 'Diagnostics report the MSS set' 'TCP MSS for VPN traffic is limited to 1400 in both directions' "$(mgr status)"
+    sed -i '/^TCP_MSS=/d' "$E/cfg/config"
+    sed -i 's/1400/1330/g' "$E/live-input" "$E/live-output" "$E/live-forward"
     printf '		ip saddr 10.8.0.0/24 oifname "eth0" accept
 ' > "$E/live-post"
     has 'a rule without masquerade does not pass' 'NAT does not match the VPN network 10.8.0.0/24' "$(mgr status)"
@@ -3209,7 +3220,7 @@ test_live_rule_checks_read_all_of_nft() {
     # is there must still pass.
     cat > "$E/bin/nft" <<'STUB'
 #!/usr/bin/env bash
-clamp='tcp flags syn tcp option maxseg size > 1280 tcp option maxseg size set 1280'
+clamp='tcp flags syn tcp option maxseg size > 1330 tcp option maxseg size set 1330'
 case "$*" in
     'list chain ip darban postrouting') printf '\t\tip saddr 10.8.0.0/24 oifname "eth0" masquerade\n' ;;
     'list chain ip darban forward') printf '\t\tip saddr 10.8.0.0/24 ip daddr 10.8.0.0/24 drop\n\t\tip saddr 10.8.0.0/24 ip daddr 169.254.0.0/16 drop\n\t\tip saddr 10.8.0.0/24 %s\n\t\tip daddr 10.8.0.0/24 %s\n' "$clamp" "$clamp" ;;
@@ -3235,6 +3246,66 @@ test_advanced_menu_prints_only_itself() {
     out=$(menu '7\n6\n0\n0\n0\n')
     has 'the Advanced menu opens' 'Download access' "$out"
     lacks 'and prints no shell variables' 'BASH_VERSION=' "$out"
+}
+
+test_tcp_mss_is_set_in_advanced() {
+    # The TCP MSS of the NAT rules: 1330 by default, another number from Settings > Advanced, kept where the installer
+    # and a restore write NAT again, and nothing but a checked whole number reaches the file or the rules.
+    local out clamp
+    built_server
+    clamp='tcp flags syn tcp option maxseg size > 1330 tcp option maxseg size set 1330'
+    [[ $(grep -c -F "$clamp" "$E/cfg/nat.nft") == 4 ]]; rc_is 'a fresh install limits TCP MSS to 1330 in all four rules' 0 "$?"
+    out=$(menu '7\n6\n0\n0\n0\n')
+    has 'Advanced shows the TCP MSS' 'TCP MSS                  1330, the default' "$out"
+    has 'and offers it as item 9' '9  TCP MSS' "$out"
+
+    cp "$E/cfg/nat.nft" "$E/nat.before"
+    : > "$STUB_LOG"
+    out=$(menu '7\n6\n9\n2000\n500\nabc\n1400; rm -rf /\n\n0\n0\n0\n')
+    has 'it says what the MSS does' 'many mobile and home networks drop split packets' "$out"
+    has 'a value out of range is refused' 'Enter a whole number from 536 to 1460, or 0 for the default.' "$out"
+    if grep -q '^TCP_MSS=' "$E/cfg/config"; then result 0 'a refused value is not saved'; else result 1 'a refused value is not saved'; fi
+    cmp -s "$E/cfg/nat.nft" "$E/nat.before"; rc_is 'and NAT is unchanged' 0 "$?"
+    if grep -q '^nft -f' "$STUB_LOG"; then result 0 'and no rules are loaded'; else result 1 'and no rules are loaded'; fi
+
+    out=$(menu '7\n6\n9\n1400\n0\n0\n0\n')
+    has 'a value in range is saved' 'Saved: TCP MSS 1400. It applies at once, to new TCP connections.' "$out"
+    grep -qx 'TCP_MSS=1400' "$E/cfg/config"; rc_is 'the config file holds the number' 0 "$?"
+    [[ $(grep -c -F 'tcp flags syn tcp option maxseg size > 1400 tcp option maxseg size set 1400' "$E/cfg/nat.nft") == 4 ]]
+    rc_is 'all four rules use it' 0 "$?"
+    grep -q "^nft -f $E/cfg/nat.nft" "$STUB_LOG"; rc_is 'the rules are loaded at once' 0 "$?"
+    if grep -q 'systemctl restart' "$STUB_LOG"; then result 0 'OpenVPN does not restart'; else result 1 'OpenVPN does not restart'; fi
+    grep -q 'TCP MSS changed: 1400' "$STUB_LOG"; rc_is 'the change is audited' 0 "$?"
+    has 'Advanced shows the new value at once' 'TCP MSS                  1400' "$(menu '7\n6\n0\n0\n0\n')"
+    # The installer, an update and a restore write NAT again with darban_nat_rules: a number set here stays.
+    out=$(bash -c 'source "$E/lib/common.sh"; darban_nat_rules 10.8.0.0 eth0')
+    has 'NAT written again keeps the number set' 'maxseg size > 1400 tcp option maxseg size set 1400' "$out"
+    has 'Same as the current value changes nothing' 'Same as the current TCP MSS; nothing changed.' "$(menu '7\n6\n9\n1400\n0\n0\n0\n')"
+
+    # nft refuses to load the new rules: the rules, the file and the setting stay as they were.
+    cp "$E/cfg/nat.nft" "$E/nat.before"
+    printf '#!/usr/bin/env bash\necho "nft $*" >> "$STUB_LOG"\nif [[ $1 == -f && ! -e $E/nft-loads ]]; then exit 1; fi\n' > "$E/bin/nft"
+    chmod +x "$E/bin/nft"
+    out=$(menu '7\n6\n9\n1280\n0\n0\n0\n')
+    has 'rules that do not load change nothing' 'The new rules did not load. Nothing was changed.' "$out"
+    grep -qx 'TCP_MSS=1400' "$E/cfg/config"; rc_is 'the setting stays' 0 "$?"
+    cmp -s "$E/cfg/nat.nft" "$E/nat.before"; rc_is 'and so does NAT' 0 "$?"
+    : > "$E/nft-loads"
+
+    out=$(menu '7\n6\n9\n0\n0\n0\n0\n')
+    has '0 goes back to the default' 'Saved: TCP MSS 1330, the default.' "$out"
+    if grep -q '^TCP_MSS=' "$E/cfg/config"; then result 0 'the default leaves no line in the file'; else result 1 'the default leaves no line in the file'; fi
+    [[ $(grep -c -F "$clamp" "$E/cfg/nat.nft") == 4 ]]; rc_is 'and the rules use 1330 again' 0 "$?"
+
+    # A number put in the file by hand that is not a valid MSS never reaches the rules.
+    printf 'TCP_MSS=1400 tcp option maxseg size set 9000\n' >> "$E/cfg/config"
+    out=$(bash -c 'source "$E/lib/common.sh"; darban_nat_rules 10.8.0.0 eth0')
+    has 'an invalid value falls back to the default' 'maxseg size > 1330 tcp option maxseg size set 1330' "$out"
+    lacks 'and none of it reaches the rules' '9000' "$out"
+    has 'Diagnostics name the invalid value' 'Invalid TCP_MSS' "$(mgr status)"
+    sed -i '/^TCP_MSS=/d' "$E/cfg/config"
+    printf 'TCP_MSS=99999\n' >> "$E/cfg/config"
+    has 'so does a number out of range' 'maxseg size > 1330 tcp option maxseg size set 1330' "$(bash -c 'source "$E/lib/common.sh"; darban_nat_rules 10.8.0.0 eth0')"
 }
 
 test_next_steps_after_a_new_setup() {
@@ -4020,8 +4091,8 @@ test_setup_keeps_clients_apart() {
     setup_run --port 21194 --yes >/dev/null
     grep -q 'ip saddr 10.8.0.0/24 ip daddr 10.8.0.0/24 drop' "$E/cfg/nat.nft"; rc_is 'clients cannot reach each other' 0 "$?"
     grep -q 'ip saddr 10.8.0.0/24 ip daddr 169.254.0.0/16 drop' "$E/cfg/nat.nft"; rc_is 'or the cloud metadata service' 0 "$?"
-    grep -q 'ip saddr 10.8.0.0/24 tcp flags syn tcp option maxseg size > 1280 tcp option maxseg size set 1280' "$E/cfg/nat.nft"; rc_is 'TCP from clients fits in one tunnel packet' 0 "$?"
-    grep -q 'ip daddr 10.8.0.0/24 tcp flags syn tcp option maxseg size > 1280 tcp option maxseg size set 1280' "$E/cfg/nat.nft"; rc_is 'and TCP to them' 0 "$?"
+    grep -q 'ip saddr 10.8.0.0/24 tcp flags syn tcp option maxseg size > 1330 tcp option maxseg size set 1330' "$E/cfg/nat.nft"; rc_is 'TCP from clients fits in one tunnel packet' 0 "$?"
+    grep -q 'ip daddr 10.8.0.0/24 tcp flags syn tcp option maxseg size > 1330 tcp option maxseg size set 1330' "$E/cfg/nat.nft"; rc_is 'and TCP to them' 0 "$?"
     sed -n '/chain input/,/}/p' "$E/cfg/nat.nft" | grep -q 'ip saddr 10.8.0.0/24 tcp flags syn'; rc_is 'and TCP from clients to the server itself' 0 "$?"
     sed -n '/chain output/,/}/p' "$E/cfg/nat.nft" | grep -q 'ip daddr 10.8.0.0/24 tcp flags syn'; rc_is 'and from the server itself to clients' 0 "$?"
 }
@@ -5264,6 +5335,33 @@ test_workers_take_turns_on_the_real_lock() {
     [[ $(find "$E/varlib/clients" -name 'lk*' | wc -l) == 60 ]]; rc_is 'every event is applied' 0 "$?"
     ok_if 'and nothing is left' test -z "$(queue_left)"
     ok_if 'and none waits for the lock' test -z "$(find "$E/events/work" -name '*.next')"
+}
+
+test_one_worker_at_a_time() {
+    # While a worker holds the queue, another run reads none of it: an entry the worker took is neither set aside as
+    # unreadable when that worker deletes it, nor applied twice. The sweep goes on without the queue; darban events
+    # waits for the worker, then takes what is left.
+    local waited=0
+    events_here
+    real_flock
+    raw_event taken connect alice 5; mv "$E/events/new/taken" "$E/events/work/other-1"
+    raw_event q1 connect queued1 11; raw_event q2 connect queued2 12; raw_event q3 connect queued3 13
+    ( /usr/bin/flock 7; : > "$E/held"; while [[ -e $E/held ]]; do sleep 0.1; done ) 7>>"$E/events/.worker.lock" &
+    while [[ ! -e $E/held ]] && (( waited < 100 )); do sleep 0.1; waited=$((waited + 1)); done
+    : > "$STUB_LOG"
+    env PATH="$E/realflock:$PATH" bash "$E/manager.sh" sweep </dev/null >/dev/null 2>&1
+    ok_if 'the sweep leaves the entry the worker took' test -e "$E/events/work/other-1"
+    ok_if 'and what waits in new/' test -e "$E/events/new/q1"
+    ok_if 'and applies none of them' test -z "$(find "$E/varlib/clients" -name alice -o -name 'queued*' 2>/dev/null)"
+    ok_if 'and sets none aside' test -z "$(ls -A "$E/events/bad")"
+    grep -q 'set aside as malformed' "$STUB_LOG"; rc_is 'nor says so in the journal' 1 "$?"
+    ( sleep 1; rm -f "$E/held" ) &
+    env PATH="$E/realflock:$PATH" bash "$E/manager.sh" events </dev/null >/dev/null 2>&1
+    wait
+    ok_if 'darban events waits for the worker, then applies what is left' test -s "$E/varlib/clients/alice"
+    [[ $(find "$E/varlib/clients" -name 'queued*' | wc -l) == 3 ]]; rc_is 'every entry of it' 0 "$?"
+    ok_if 'and nothing is left' test -z "$(queue_left)"
+    ok_if 'and none is set aside' test -z "$(ls -A "$E/events/bad")"
 }
 
 test_an_event_never_ends_a_link_it_cannot_identify() {

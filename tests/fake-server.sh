@@ -194,6 +194,7 @@ sed -e "s#^DARBAN_LIB=.*#DARBAN_LIB=$E/lib#" -e "s#^DARBAN_PKI=.*#DARBAN_PKI=$P#
     -e "s#^DARBAN_SERVER_DIR=.*#DARBAN_SERVER_DIR=$E/server#" -e "s#^DARBAN_LOCK=.*#DARBAN_LOCK=$E/run/lock#" \
     -e "s#^DARBAN_RESTORE_JOURNAL=.*#DARBAN_RESTORE_JOURNAL=$E/varlib/restore.journal#" \
     -e "s#^DARBAN_BLOCKED=.*#DARBAN_BLOCKED=$E/cfg/blocked.v4#" -e "s#^DARBAN_DNS_REDIRECT=.*#DARBAN_DNS_REDIRECT=$E/cfg/dns-redirect#" \
+    -e "s#^DARBAN_CONFIG=.*#DARBAN_CONFIG=$E/cfg/config#" \
     "$SRC/lib/common.sh" > "$E/lib/common.sh"
 echo 'darban_require_root() { :; }' >> "$E/lib/common.sh"
 cp "$SRC/lib/ui.sh" "$E/lib/ui.sh"

@@ -625,8 +625,9 @@ website() {
     printf '%s of 300000 bytes from Cloudflare, %s bytes of Google' "$fixed" "$page"
     (( fixed == 300000 || page >= 10000 ))
 }
-ip link set dt0 mtu 1400
-ip netns exec "$NS" ip link set dt1 mtu 1400
+# With the default TCP MSS of 1330, a packet of the tunnel is about 1420 bytes, so it fits; one of 1460 does not.
+ip link set dt0 mtu 1440
+ip netns exec "$NS" ip link set dt1 mtu 1440
 nft add table ip darbantest
 nft add chain ip darbantest pre '{ type filter hook prerouting priority -500; }'
 nft add rule ip darbantest pre iifname dt0 ip frag-off '&' 0x3fff != 0 drop
@@ -636,7 +637,7 @@ ip netns exec "$NS" nft add rule ip darbantest pre iifname dt1 ip frag-off '&' 0
 for handle in $(nft -a list chain ip darban forward | awk '/maxseg/ {print $NF}'); do nft delete rule ip darban forward handle "$handle"; done
 without_loaded=0
 without=$(website) && without_loaded=1
-echo "Without the TCP size rule, on a 1400-byte path that drops fragments: $without"
+echo "Without the TCP size rule, on a 1440-byte path that drops fragments: $without"
 darban status >"$LOG/no-mss.log" 2>&1 || true
 grep -q 'The TCP MSS rule for VPN traffic is missing or different' "$LOG/no-mss.log"
 systemctl restart darban-nat.service
@@ -648,7 +649,7 @@ if (( without_loaded )); then
     echo 'NOTE: this runner did not lose large packets even without the rule, so only the result with it is judged.'
 fi
 darban status >"$LOG/mss.log" 2>&1
-grep -q 'TCP MSS for VPN traffic is limited to 1280 in both directions' "$LOG/mss.log"
+grep -q 'TCP MSS for VPN traffic is limited to 1330 in both directions' "$LOG/mss.log"
 # The same path to the server itself: a page on this server, opened from a device that is connected to it,
 # as a temporary link is. Those connections never pass the forward chain.
 vpn_net=$(awk '$1=="server" {print $2; exit}' /etc/openvpn/server/server.conf)
@@ -908,6 +909,36 @@ grep -q 'chain forward' /etc/darban/nat.nft
 darban status >"$LOG/updated.log" 2>&1
 grep -q 'VPN clients are kept apart' "$LOG/updated.log"
 echo 'PASS: an update adds the rule to an older install.'
+
+# The TCP MSS: an update from v1.0.1, whose rules limit it to 1280, moves them to 1330. A number set in
+# Settings > Advanced stays through an update, Diagnostics report it, and a number out of range is refused.
+mss_rules() { grep -c -F "tcp flags syn tcp option maxseg size > $1 tcp option maxseg size set $1" /etc/darban/nat.nft || true; }
+sed -i 's/maxseg size > 1330 tcp option maxseg size set 1330/maxseg size > 1280 tcp option maxseg size set 1280/' /etc/darban/nat.nft
+systemctl restart darban-nat.service
+darban status >"$LOG/mss-old.log" 2>&1 || true
+grep -q 'The TCP MSS rule for VPN traffic is missing or different from the configured 1330' "$LOG/mss-old.log"
+bash setup/install.sh | tee "$LOG/mss-update.log"
+grep -q 'TCP MSS for VPN traffic is limited to 1330\.$' "$LOG/mss-update.log"
+[[ $(mss_rules 1330) == 4 && $(mss_rules 1280) == 0 ]] || { echo 'FAIL: the update did not move the TCP MSS rules to 1330.'; exit 1; }
+nft list chain ip darban forward | grep 'maxseg size set 1330' >/dev/null
+darban status >"$LOG/mss-new.log" 2>&1
+grep -q 'TCP MSS for VPN traffic is limited to 1330 in both directions' "$LOG/mss-new.log"
+printf '7\n6\n9\n1461\n\n0\n0\n0\n' | darban >"$LOG/mss-refused.log" 2>&1
+grep -q 'Enter a whole number from 536 to 1460, or 0 for the default.' "$LOG/mss-refused.log"
+if grep -q '^TCP_MSS=' /etc/darban/config; then echo 'FAIL: a TCP MSS out of range was saved.'; exit 1; fi
+printf '7\n6\n9\n1400\n0\n0\n0\n' | darban | tee "$LOG/mss-set.log"
+grep -q 'Saved: TCP MSS 1400' "$LOG/mss-set.log"
+grep -qx 'TCP_MSS=1400' /etc/darban/config
+nft list chain ip darban output | grep 'maxseg size set 1400' >/dev/null
+bash setup/install.sh
+[[ $(mss_rules 1400) == 4 ]] || { echo 'FAIL: an update did not keep the TCP MSS set in Settings > Advanced.'; exit 1; }
+nft list chain ip darban forward | grep 'maxseg size set 1400' >/dev/null
+darban status >"$LOG/mss-custom.log" 2>&1
+grep -q 'TCP MSS for VPN traffic is limited to 1400 in both directions' "$LOG/mss-custom.log"
+printf '7\n6\n9\n0\n0\n0\n0\n' | darban >/dev/null
+[[ $(mss_rules 1330) == 4 ]] || { echo 'FAIL: 0 did not bring the TCP MSS rules back to 1330.'; exit 1; }
+if grep -q '^TCP_MSS=' /etc/darban/config; then echo 'FAIL: the default TCP MSS left a line in the config file.'; exit 1; fi
+echo 'PASS: an update moves TCP MSS from 1280 to 1330, keeps a number set in Settings > Advanced, and Diagnostics report it.'
 
 # NAT left on another network, as a network change cut off half way could leave it, is found and put right.
 net=$(awk '$1=="server" {print $2; exit}' /etc/openvpn/server/server.conf)
