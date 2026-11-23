@@ -21,6 +21,7 @@ backup_set_recipient() {
     darban_tmp_register "$temp"
     printf 'BACKUP_RECIPIENT=%s\n' "$1" >"$temp" && chmod 600 "$temp" && mv -f -- "$temp" "$BACKUP_CONF"
 }
+# shellcheck disable=SC2120  # restore.sh passes the certificate; ShellCheck reads each file alone.
 ca_fingerprint_label() {
     # The SHA-256 fingerprint of a CA certificate, as openssl prints it. A restore asks for it.
     openssl x509 -in "${1:-$DARBAN_PKI/ca.crt}" -noout -fingerprint -sha256 2>/dev/null | sed 's/^[^=]*=//'
