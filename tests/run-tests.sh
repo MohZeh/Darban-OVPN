@@ -988,7 +988,8 @@ case " $* " in
 esac
 exit 0
 STUB
-    out=$(menu '7\n2\n21194\n21194\n0\n0\n')
+    # Settings > 2 > 4: a new UDP port, confirmed; every restart fails, so the rollback cannot bring it back.
+    out=$(menu '7\n2\n4\n21194\n2\n0\n0\n')
     lacks 'it never claims the port did not change' 'The port was NOT changed' "$out"
     has 'it says the rollback did not finish' 'The rollback did not finish' "$out"
 }
@@ -7164,7 +7165,7 @@ test_t1_server_listeners_forms() {
     [[ $(in_manager server_port) == 1543 ]]; rc_is 'server_port gives the UDP port of both' 0 "$?"
     [[ $(in_manager listeners_label) == 'UDP 1543 + TCP 443' ]]; rc_is 'the label names both' 0 "$?"
     [[ $(in_manager endpoint_label vpn.example.com) == 'vpn.example.com:1543/UDP + 443/TCP' ]]; rc_is 'and the endpoint too' 0 "$?"
-    has 'Settings shows the protocol' 'OpenVPN protocol *        UDP 1543 + TCP 443' "$(menu '7\n0\n0\n')"
+    has 'Settings shows the protocol' 'OpenVPN protocol *       UDP 1543 + TCP 443' "$(menu '7\n0\n0\n')"
     has 'the status line shows both' 'vpn.example.com:1543/UDP + 443/TCP' "$(menu '0\n')"
 
     refuses_listeners 'two port lines' 'port 1194' 'port 1195' 'proto udp4'
@@ -7282,7 +7283,7 @@ test_t1_settings_protocol_screen() {
     has 'TCP only is applied' 'OpenVPN is listening on TCP 1700' "$out"
     conf_has '^port 1700$' && conf_has '^proto tcp4-server$'; rc_is 'server.conf has port and proto tcp4-server' 0 "$?"
     conf_has 'explicit-exit-notify'; rc_is 'TCP only has no explicit-exit-notify' 1 "$?"
-    has 'Settings shows it' 'OpenVPN protocol *        TCP 1700' "$(menu '7\n0\n0\n')"
+    has 'Settings shows it' 'OpenVPN protocol *       TCP 1700' "$(menu '7\n0\n0\n')"
     has 'with TCP, port sharing is offered' 'Share the TCP port' "$(menu '7\n2\n\n0\n0\n')"
 
     # Back to UDP only on the port of before: the file is the template again, byte for byte.
@@ -7301,7 +7302,8 @@ test_t1_settings_protocol_screen() {
     # Change a port asks which one with both; the link port and a taken port are refused, 443 is taken.
     printf 'LINK_PORT=9347\n' >>"$E/cfg/config"
     out=$(printf '7\n2\n4\n2\n9347\n5555\n443\n2\n0\n0\n' | FAKE_BUSY_TCP=5555 bash "$E/manager.sh" 2>&1)
-    has 'it asks which port' 'Which port?' "$out"
+    # A prompt shows only in a terminal; the two ports it chooses between show everywhere.
+    has 'it asks which port: both are listed' '2  TCP 1194' "$out"
     has 'the link port is refused' 'TCP 9347 is the link port' "$out"
     has 'a taken port is refused with a suggestion' 'Port 5555 is already in use. Suggested:' "$out"
     has 'a TCP change warns about TCP-only profiles' 'Profiles that use TCP only stop working' "$out"

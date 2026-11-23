@@ -68,7 +68,17 @@ refused() {
     echo "FAIL: in 20 seconds the server neither let this client in nor said: $3"
     return 1
 }
-disconnect() { if [[ -s $PIDFILE ]]; then kill "$(cat "$PIDFILE")" 2>/dev/null || true; sleep 1; fi; }
+stop_client() {
+    # stop_client <pidfile>: SIGTERM, then wait until the client has ended. A profile with explicit-exit-notify first
+    # tells the server it leaves, which takes about a second, and only then gives its device back; the next client
+    # on that device would otherwise find it taken.
+    local pid attempt
+    [[ -s $1 ]] || return 0
+    pid=$(cat "$1")
+    kill "$pid" 2>/dev/null || return 0
+    for attempt in $(seq 1 100); do kill -0 "$pid" 2>/dev/null || return 0; sleep 0.1; done
+}
+disconnect() { if [[ -s $PIDFILE ]]; then stop_client "$PIDFILE"; sleep 0.5; fi; }
 in_terminal() {
     # in_terminal <name> <seconds> <command...>: answers the command from $LOG/<name>.keys in a real terminal.
     local name=$1 seconds=$2
@@ -752,7 +762,7 @@ t1_connect_ns() {
         sleep 0.2
     done
 }
-t1_disconnect_ns() { if [[ -s $LOG/t1ns.pid ]]; then kill "$(cat "$LOG/t1ns.pid")" 2>/dev/null || true; sleep 1; fi; }
+t1_disconnect_ns() { stop_client "$LOG/t1ns.pid"; sleep 0.5; }
 # t1_transport <log>: the protocol a client log ended on.
 t1_transport() { if grep -q 'TCP connection established' "$1"; then echo TCP; elif grep -q 'UDPv4 link remote' "$1"; then echo UDP; else echo unknown; fi; }
 t1_conf_before=$(cat "$CONF")
@@ -792,7 +802,7 @@ for attempt in $(seq 1 30); do
     sleep 0.5
 done
 (( seen_tcp )) || { echo "FAIL: the TCP connection of t1both did not take its session: $(t1_rows)"; exit 1; }
-kill "$(cat "$LOG/t1-tcp.pid")" 2>/dev/null || true
+stop_client "$LOG/t1-tcp.pid"
 disconnect
 echo 'PASS: a TCP connection of a client ends its UDP connection; the name is never listed twice.'
 

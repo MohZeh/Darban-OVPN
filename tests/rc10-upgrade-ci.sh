@@ -28,7 +28,15 @@ connect() {
     done
     return 1
 }
-disconnect() { if [[ -s $PIDFILE ]]; then kill "$(cat "$PIDFILE")" 2>/dev/null || true; sleep 1; fi; }
+disconnect() {
+    # A profile with explicit-exit-notify tells the server it leaves first, so wait until the client has ended.
+    local pid attempt
+    if [[ -s $PIDFILE ]]; then
+        pid=$(cat "$PIDFILE"); kill "$pid" 2>/dev/null || true
+        for attempt in $(seq 1 100); do kill -0 "$pid" 2>/dev/null || break; sleep 0.1; done
+        sleep 0.5
+    fi
+}
 # How many times OpenVPN started since <epoch>.
 starts_since() { journalctl -u "$UNIT" --since "@$1" --no-pager | grep -c 'Initialization Sequence Completed' || true; }
 link_of() { printf '5\n%s\n1\n1\n0\n' "$1" | darban | grep -oE 'https://[^ ]+/l/[0-9a-f]{64}'; }

@@ -25,7 +25,15 @@ connect() {
     done
     return 1
 }
-disconnect() { if [[ -s $PIDFILE ]]; then kill "$(cat "$PIDFILE")" 2>/dev/null || true; sleep 1; ip link del tun9 2>/dev/null || true; fi; }
+disconnect() {
+    # A profile with explicit-exit-notify tells the server it leaves first, so wait until the client has ended.
+    local pid attempt
+    if [[ -s $PIDFILE ]]; then
+        pid=$(cat "$PIDFILE"); kill "$pid" 2>/dev/null || true
+        for attempt in $(seq 1 100); do kill -0 "$pid" 2>/dev/null || break; sleep 0.1; done
+        sleep 0.5; ip link del tun9 2>/dev/null || true
+    fi
+}
 fingerprint() { openssl x509 -in /root/pki/ca.crt -noout -fingerprint -sha256 | sed 's/^[^=]*=//'; }
 state() { sha256sum /root/pki/index.txt /root/pki/ca.crt "$CONF" /etc/openvpn/server/crl.pem; }
 
