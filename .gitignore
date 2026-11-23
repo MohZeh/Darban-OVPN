@@ -2,3 +2,5 @@
 /dist/
 *.zip
 *.tar.gz
+# darban-core, built by scripts/build-core.sh for an install from a checkout.
+/bin/darban-core-*

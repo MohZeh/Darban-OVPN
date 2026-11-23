@@ -10,6 +10,9 @@
 #
 # All the work starts from the last line, so a partial download cannot run half of this script.
 # The checksum comes from the same release, so it catches a damaged download, not a compromised account.
+# A release has one archive for each architecture, darban-ovpn-amd64.tar.gz and darban-ovpn-arm64.tar.gz, and
+# darban-ovpn.tar.gz with both, which the get.sh of v1.0 downloads, so an update from it still works. A release
+# before v1.1 has only that one.
 set -Eeuo pipefail
 umask 077
 REPO=MohZeh/Darban-OVPN
@@ -43,9 +46,11 @@ version_is_newer() {
     [[ $(printf '%s\n%s\n' "$a" "$b" | sort -V | tail -n 1) == "$a" ]]
 }
 fetch() {
+    # fetch <file> [missing]: with "missing", a file the release does not have returns 22 instead of stopping.
     local rc=0
     curl -fsSL --proto '=https' --proto-redir '=https' --tlsv1.2 --retry 2 --max-time 120 -o "$work/$1" "$base/$1" || rc=$?
     (( rc == 0 )) && return 0
+    if (( rc == 22 )) && [[ ${2:-} == missing ]]; then return 22; fi
     # curl reports an HTTP error as 22: the server answered, and the file is not there.
     if (( rc == 22 )) && [[ -z $tag ]]; then
         die "No stable release is published yet. Choose a version from https://github.com/$REPO/releases and use: --version vX.Y.Z"
@@ -119,7 +124,7 @@ welcome() {
     fi
 }
 main() {
-    local requested='' version installed='' expected new_server=0
+    local requested='' version installed='' expected new_server=0 arch
     given_args=("$@")
     while (( $# )); do
         case $1 in
@@ -133,9 +138,14 @@ main() {
     if [[ -n $tag && ! $tag =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-(alpha|beta|rc)\.[0-9]+)?$ ]]; then die "Not a release version: $tag"; fi
     [[ $EUID == 0 ]] || die 'Run with sudo/root.'
     local cmd
-    for cmd in curl tar sha256sum mktemp grep sort; do
+    for cmd in curl tar sha256sum mktemp grep sort dpkg; do
         command -v "$cmd" >/dev/null || die "Missing dependency: $cmd"
     done
+    arch=$(dpkg --print-architecture)
+    case $arch in
+        amd64|arm64) ARCHIVE=darban-ovpn-$arch.tar.gz ;;
+        *) die "Darban OVPN runs on amd64 and arm64 servers; this one is ${arch//[^[:alnum:]_.-]/?}. Nothing was downloaded." ;;
+    esac
     # Before anything is downloaded: a new server asks questions, and this form could never take the answers.
     if [[ ! -t 0 && " ${setup_args[*]} " != *' --yes '* ]] && needs_server_setup && keys_cannot_reach_setup /proc "$$"; then
         printf 'ERROR: Started as "curl ... | sudo bash", sudo keeps the keys you press from the setup questions. Nothing was installed. Run this instead:\n\n  %s\n' "$(right_command)" >&2
@@ -151,7 +161,10 @@ main() {
     trap 'rm -rf -- "$work"' EXIT
 
     printf 'Downloading %s...\n' "${tag:-the latest release}"
-    fetch "$ARCHIVE"
+    if ! fetch "$ARCHIVE" missing; then
+        ARCHIVE=darban-ovpn.tar.gz
+        fetch "$ARCHIVE"
+    fi
     fetch SHA256SUMS
     # Exactly one line must describe the archive; nothing is unpacked or run before it matches.
     expected=$(grep -E "^[0-9a-f]{64}  $ARCHIVE\$" "$work/SHA256SUMS" || true)

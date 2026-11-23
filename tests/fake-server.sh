@@ -219,6 +219,18 @@ sed -e "s#^DARBAN_LIB=.*#DARBAN_LIB=$E/lib#" -e "s#^DARBAN_PKI=.*#DARBAN_PKI=$P#
     "$SRC/lib/common.sh" > "$E/lib/common.sh"
 echo 'darban_require_root() { :; }' >> "$E/lib/common.sh"
 cp "$SRC/lib/ui.sh" "$E/lib/ui.sh"
+# darban-core where paths.sh finds it, $DARBAN_LIB/darban-core: DARBAN_TEST_CORE, or the one scripts/build-core.sh built
+# for this machine, as CI does before the tests.
+core=${DARBAN_TEST_CORE:-}
+if [[ -z $core ]]; then
+    case $(uname -m) in
+        x86_64|amd64) core=$SRC/bin/darban-core-amd64 ;;
+        aarch64|arm64) core=$SRC/bin/darban-core-arm64 ;;
+    esac
+fi
+[[ -n $core && -f $core ]] || { echo 'fake-server.sh: no darban-core for this machine. Build it first: bash scripts/build-core.sh' >&2; exit 1; }
+cp "$core" "$E/lib/darban-core"
+chmod 755 "$E/lib/darban-core"
 cp "$SRC/lib/backup.py" "$E/lib/backup.py"
 cp "$SRC/lib/geolist.py" "$E/lib/geolist.py"
 # The manager's modules as install.sh places them; the test copy of paths.sh points every path into this fake server.

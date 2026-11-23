@@ -153,6 +153,75 @@ test_index_missing_empty_or_malformed_is_rejected() {
     rc_not0 'index without the server certificate rejected' "$rc"
 }
 
+# darban_verify_crl of lib/common.sh on the CRL named: its errors, then its status.
+crl_check() { bash -c 'set -uo pipefail; source "$E/lib/common.sh"; darban_verify_crl "$1"; echo "status $?"' _ "$1" 2>&1; }
+crl_of() {
+    # crl_of <file> [openssl ca options]: a CRL of this CA from its index as it is now, signed with its key.
+    (cd "$PKI" && { [[ -s crlnumber ]] || echo 1000 > crlnumber; } && openssl ca -batch -config "$E/openssl.cnf" -gencrl -out "$1" "${@:2}" 2>/dev/null)
+}
+
+test_crl_check_names_each_problem() {
+    # G2: darban_verify_crl compares the CRL with the CA index through darban-core, for the CRL renewal, the installer,
+    # revoking, restore, the menu's header, Diagnostics and a new client alike. Each problem gets its own words, as
+    # before, and only a complete CRL passes.
+    local dir=$E/crl-cases out what want
+    mkdir -p "$dir"
+    easyrsa build-client-full bob nopass >/dev/null 2>&1
+    easyrsa build-client-full carol nopass >/dev/null 2>&1
+    easyrsa revoke bob >/dev/null 2>&1
+    crl_of "$dir/good.pem"
+    : > "$dir/empty.pem"
+    openssl crl -in "$dir/good.pem" -badsig -out "$dir/bad-signature.pem" 2>/dev/null
+    openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes -keyout "$dir/other.key" -out "$dir/other.crt" -subj /CN=OtherCA -days 30 2>/dev/null
+    crl_of "$dir/other-ca.pem" -keyfile "$dir/other.key" -cert "$dir/other.crt"
+    crl_of "$dir/expired.pem" -crl_lastupdate 20200101000000Z -crl_nextupdate 20200201000000Z
+    crl_of "$dir/not-yet-valid.pem" -crl_lastupdate 20991201000000Z -crl_nextupdate 20991231000000Z
+    # A CRL from before carol's revocation: a revoked client it does not list.
+    cp "$PKI/index.txt" "$dir/index.before-carol"
+    easyrsa revoke carol >/dev/null 2>&1
+    crl_of "$dir/complete.pem"
+    # The CRL revokes the server's own certificate, which the index lists as valid.
+    cp "$PKI/index.txt" "$dir/index.live"
+    awk -F '\t' 'BEGIN {OFS="\t"} $6 ~ /\/CN=server_abc123$/ {$1="R"; $3="261101000000Z"} {print}' "$dir/index.live" > "$PKI/index.txt"
+    crl_of "$dir/server-revoked.pem"
+    cp "$dir/index.live" "$PKI/index.txt"
+    local -a cases=(
+        "a complete CRL|$dir/complete.pem||status 0"
+        "a CRL that is missing|$dir/none.pem||ERROR: CRL missing: $dir/none.pem"
+        "an empty CRL file|$dir/empty.pem||ERROR: CRL missing: $dir/empty.pem"
+        "a CRL with a bad signature|$dir/bad-signature.pem||ERROR: CRL signature verification failed."
+        "a CRL signed by another CA|$dir/other-ca.pem||ERROR: CRL signature verification failed."
+        "an expired CRL|$dir/expired.pem||ERROR: CRL is expired, not yet valid, or has an inconsistent validity window."
+        "a CRL not yet valid|$dir/not-yet-valid.pem||ERROR: CRL is expired, not yet valid, or has an inconsistent validity window."
+        "a revoked client the CRL does not list|$dir/good.pem||ERROR: CRL is missing revoked CA serial: "
+        "the server certificate on the CRL|$dir/server-revoked.pem||ERROR: CRL revokes serial(s) the CA database does not: "
+        "a CRL revoking what the index calls valid|$dir/complete.pem|before-carol|looks older than the published CRL (restored backup?). Restore the current $PKI/index.txt."
+        "a malformed record in the index|$dir/complete.pem|garbage|ERROR: CA database has a malformed record: $PKI/index.txt"
+        "an index without the server certificate|$dir/complete.pem|no-server|ERROR: CA database does not contain the server certificate (serial "
+        "an index that is missing|$dir/complete.pem|missing|ERROR: CA database is missing or unreadable: $PKI/index.txt"
+    )
+    local entry file index
+    for entry in "${cases[@]}"; do
+        IFS='|' read -r what file index want <<<"$entry"
+        case $index in
+            before-carol) cp "$dir/index.before-carol" "$PKI/index.txt" ;;
+            garbage) { cat "$dir/index.live"; printf 'garbage line\n'; } > "$PKI/index.txt" ;;
+            no-server) grep -v server_abc123 "$dir/index.live" > "$PKI/index.txt" ;;
+            missing) rm -f "$PKI/index.txt" ;;
+        esac
+        out=$(crl_check "$file")
+        has "$what: named" "$want" "$out"
+        if [[ $want == 'status 0' ]]; then lacks "$what: passes" 'ERROR' "$out"; else has "$what: fails" 'status 1' "$out"; fi
+        cp "$dir/index.live" "$PKI/index.txt"
+    done
+    # Without darban-core the CRL is never called complete.
+    mv "$E/lib/darban-core" "$E/darban-core.away"
+    out=$(crl_check "$dir/complete.pem")
+    has 'no darban-core: the CRL fails' 'status 1' "$out"
+    has 'and it says why' 'darban-core is missing, so the CRL cannot be compared with the CA database' "$out"
+    mv "$E/darban-core.away" "$E/lib/darban-core"
+}
+
 test_index_rollback_cannot_unrevoke() {
     local out rc serial
     snapshot_index
@@ -563,6 +632,14 @@ test_setup_menu_and_commands() {
     [[ $(bash "$E/manager.sh" version </dev/null 2>&1) == "$(cat "$REPO/VERSION")" ]]; rc_is 'VERSION matches the manager' 0 "$?"
 }
 
+pack_release() {
+    # The fixture as a release: an archive for each architecture, one with both as v1.0 downloads it, and checksums.
+    local name
+    for name in darban-ovpn.tar.gz darban-ovpn-amd64.tar.gz darban-ovpn-arm64.tar.gz; do
+        tar -C "$E/fixture" -czf "$RELEASE/$name" setup VERSION
+    done
+    (cd "$RELEASE" && sha256sum darban-ovpn.tar.gz darban-ovpn-amd64.tar.gz darban-ovpn-arm64.tar.gz > SHA256SUMS)
+}
 fake_release() {
     # A release directory served by a stand-in curl; its installer only leaves a marker.
     local fixture=$E/fixture
@@ -570,9 +647,9 @@ fake_release() {
     mkdir -p "$fixture/setup" "$RELEASE"
     printf '#!/usr/bin/env bash\necho "installer ran" > "$MARKER"\n' > "$fixture/setup/install.sh"
     echo 9.9.9 > "$fixture/VERSION"
-    tar -C "$fixture" -czf "$RELEASE/darban-ovpn.tar.gz" setup VERSION
-    (cd "$RELEASE" && sha256sum darban-ovpn.tar.gz > SHA256SUMS)
+    pack_release
     echo 9.9.9 > "$RELEASE/VERSION"
+    # A file the release does not have is an HTTP error, as from GitHub: curl's 22.
     cat > "$E/bin/curl" <<'STUB'
 #!/usr/bin/env bash
 out=''; url=''; hdr=''
@@ -580,9 +657,16 @@ while (( $# )); do case $1 in -o) out=$2; shift 2 ;; --proto|--proto-redir|--tls
 echo "curl $url" >> "$STUB_LOG"
 if [[ -n ${hdr:-} && -n ${FAKE_HEADERS:-} ]]; then printf '%b' "$FAKE_HEADERS" > "$hdr"; fi
 if [[ -n ${CURL_FAIL:-} ]]; then exit "${CURL_RC:-22}"; fi
+[[ -e $RELEASE/${url##*/} ]] || exit 22
 if [[ -n $out ]]; then cp "$RELEASE/${url##*/}" "$out"; else cat "$RELEASE/${url##*/}"; fi
 STUB
-    chmod +x "$E/bin/curl"
+    # The architecture of the server: FAKE_ARCH, amd64 when unset.
+    cat > "$E/bin/dpkg" <<'STUB'
+#!/usr/bin/env bash
+if [[ ${1:-} == --print-architecture ]]; then echo "${FAKE_ARCH:-amd64}"; exit 0; fi
+exec /usr/bin/dpkg "$@"
+STUB
+    chmod +x "$E/bin/curl" "$E/bin/dpkg"
     # The test user is not root; everything else in get.sh runs unchanged.
     sed -e 's/^\( *\)\[\[ \$EUID == 0 \]\] .*/\1:/' -e "s#^SERVER_CONF=.*#SERVER_CONF=$SERVER_CONF#" \
         -e "s#^TOOL=.*#TOOL=$E/fake-tool#" -e "s#^SETUP_RECORD=.*#SETUP_RECORD=$E/cfg/.server-setup-started#" \
@@ -596,7 +680,8 @@ test_get_sh_verifies_before_installing() {
     out=$(bash "$E/get.sh" 2>&1 </dev/null); rc=$?
     rc_is 'a good release installs' 0 "$rc"
     ok_if 'the installer ran' test -s "$MARKER"
-    grep -q 'releases/latest/download/darban-ovpn.tar.gz' "$STUB_LOG"; rc_is 'default is the latest release' 0 "$?"
+    grep -q 'releases/latest/download/darban-ovpn-amd64.tar.gz' "$STUB_LOG"; rc_is 'default is the latest release' 0 "$?"
+    if grep -q 'darban-ovpn.tar.gz' "$STUB_LOG"; then result 0 'only the archive of this architecture is downloaded'; else result 1 'only the archive of this architecture is downloaded'; fi
 
     rm -f "$MARKER"; : > "$STUB_LOG"
     out=$(bash "$E/get.sh" --version v1.2.3 2>&1 </dev/null)
@@ -608,7 +693,7 @@ test_get_sh_verifies_before_installing() {
     rc_not0 'a malformed version is refused' "$rc"
 
     rm -f "$MARKER"
-    echo tampered >> "$RELEASE/darban-ovpn.tar.gz"
+    echo tampered >> "$RELEASE/darban-ovpn-amd64.tar.gz"
     out=$(bash "$E/get.sh" 2>&1 </dev/null); rc=$?
     rc_not0 'a changed archive is refused' "$rc"
     has 'it says why' 'Checksum mismatch' "$out"
@@ -625,12 +710,35 @@ test_get_sh_verifies_before_installing() {
     ok_if 'the installer did not run' test ! -e "$MARKER"
 }
 
+test_get_sh_picks_the_archive_of_this_architecture() {
+    # G2: darban-core is built for amd64 and arm64, so get.sh downloads the archive of this server's architecture,
+    # and refuses any other before downloading anything.
+    local out rc
+    fake_release
+    : > "$STUB_LOG"
+    out=$(FAKE_ARCH=arm64 bash "$E/get.sh" 2>&1 </dev/null); rc=$?
+    rc_is 'an arm64 server installs' 0 "$rc"
+    grep -q 'releases/latest/download/darban-ovpn-arm64.tar.gz' "$STUB_LOG"; rc_is 'with the arm64 archive' 0 "$?"
+    rm -f "$MARKER"; : > "$STUB_LOG"
+    out=$(FAKE_ARCH=i386 bash "$E/get.sh" 2>&1 </dev/null); rc=$?
+    rc_not0 'another architecture is refused' "$rc"
+    has 'it says why' 'runs on amd64 and arm64 servers; this one is i386. Nothing was downloaded.' "$out"
+    ok_if 'nothing was downloaded' test ! -s "$STUB_LOG"
+    ok_if 'the installer did not run' test ! -e "$MARKER"
+    # A release before v1.1 has one archive for every architecture, and going back to it still works.
+    rm -f "$RELEASE/darban-ovpn-amd64.tar.gz" "$RELEASE/darban-ovpn-arm64.tar.gz"
+    (cd "$RELEASE" && sha256sum darban-ovpn.tar.gz > SHA256SUMS)
+    out=$(bash "$E/get.sh" --version v1.0.1 2>&1 </dev/null); rc=$?
+    rc_is 'an older release installs' 0 "$rc"
+    grep -q 'releases/download/v1.0.1/darban-ovpn.tar.gz' "$STUB_LOG"; rc_is 'from its one archive' 0 "$?"
+    ok_if 'the installer ran' test -s "$MARKER"
+}
+
 test_get_sh_sets_up_a_server_only_when_there_is_none() {
     local out rc
     fake_release
     printf '#!/usr/bin/env bash\necho "server setup ran" >> "$MARKER.setup"\n' > "$E/fixture/setup/server-setup.sh"
-    tar -C "$E/fixture" -czf "$RELEASE/darban-ovpn.tar.gz" setup VERSION
-    (cd "$RELEASE" && sha256sum darban-ovpn.tar.gz > SHA256SUMS)
+    pack_release
     # The test has no terminal, so the fallback to the real terminal is replaced by the test's stdin.
     sed -i 's#</dev/tty#</dev/null#' "$E/get.sh"
 
@@ -2531,6 +2639,42 @@ test_restore_previous_version() {
     grep -q 'restored previous version' "$STUB_LOG"; rc_is 'the restore is audited' 0 "$?"
 }
 
+test_restore_previous_runs_its_darban_core_first() {
+    # G2: the darban-core of the version restored runs once, from a copy beside the installed one, before anything is
+    # replaced. One that does not run here, or that is another version, leaves this version whole.
+    local out backup=$E/backups-tool/20260101T000000 before kind
+    mkdir -p "$E/sbin" "$E/units" "$backup/sbin" "$backup/lib" "$backup/units"
+    printf '#!/usr/bin/env bash\nDARBAN_VERSION=0.9.0\n' > "$backup/sbin/darban"
+    echo 'old lib' > "$backup/lib/old-marker"
+    before=$(sha256sum < "$E/lib/darban-core")
+    for kind in fails truncated other-version; do
+        case $kind in
+            fails) printf '#!/bin/sh\nexit 1\n' > "$backup/lib/darban-core" ;;
+            truncated) head -c 4096 "$E/lib/darban-core" > "$backup/lib/darban-core" ;;
+            other-version) printf '#!/bin/sh\necho 0.8.0\n' > "$backup/lib/darban-core" ;;
+        esac
+        chmod 700 "$backup/lib/darban-core"
+        out=$(menu '9\n4\n2\n0\n0\n')
+        if [[ $kind == other-version ]]; then
+            has "$kind: it says why" 'The new darban-core is version 0.8.0, not 0.9.0. The installed one stays; nothing was replaced.' "$out"
+        else
+            has "$kind: it says why" 'The new darban-core does not run on this server' "$out"
+        fi
+        lacks "$kind: it restores nothing" 'Restored v0.9.0' "$out"
+        rc_is "$kind: the installed darban-core stays" "$before" "$(sha256sum < "$E/lib/darban-core")"
+        ok_if "$kind: and nothing else is restored" test ! -e "$E/lib/old-marker" -a ! -e "$E/sbin/darban" -a -d "$backup"
+        ok_if "$kind: no copy is left beside it" test -z "$(find "$E/lib" -maxdepth 1 -name '.darban-core.*')"
+    done
+    printf '#!/bin/sh\necho 0.9.0\n' > "$backup/lib/darban-core"
+    chmod 700 "$backup/lib/darban-core"
+    cp "$backup/lib/darban-core" "$E/core.wanted"
+    out=$(menu '9\n4\n2\n')
+    has 'one that runs is restored' 'Restored v0.9.0' "$out"
+    ok_if 'it took the place of the installed one' cmp -s "$E/core.wanted" "$E/lib/darban-core"
+    ok_if 'with the rest of the library' test -s "$E/lib/old-marker"
+    ok_if 'no copy is left beside it' test -z "$(find "$E/lib" -maxdepth 1 -name '.darban-core.*')"
+}
+
 tool_version() { printf '#!/usr/bin/env bash\necho %s\n' "$1" > "$E/fake-tool"; chmod +x "$E/fake-tool"; }
 
 test_get_sh_knows_install_from_update() {
@@ -2649,8 +2793,7 @@ test_get_sh_from_a_pipe() {
     local out rc
     fake_release
     printf '#!/usr/bin/env bash\necho "$*" >> "$MARKER.setup"\n' > "$E/fixture/setup/server-setup.sh"
-    tar -C "$E/fixture" -czf "$RELEASE/darban-ovpn.tar.gz" setup VERSION
-    (cd "$RELEASE" && sha256sum darban-ovpn.tar.gz > SHA256SUMS)
+    pack_release
     rm "$SERVER_CONF"
     out=$(cat "$E/get.sh" | setsid -w bash 2>&1); rc=$?
     rc_not0 'no terminal and no answers is an error' "$rc"
@@ -2695,6 +2838,16 @@ test_release_assets_know_their_version() {
         grep -qx "$module" <<<"$listed"; rc_is "the archive has the module $module" 0 "$?"
     done
     (cd "$out" && sha256sum --quiet -c SHA256SUMS >/dev/null); rc_is 'the checksums match' 0 "$?"
+    # G2: darban-core for both architectures in the archive v1.0 downloads, and the one of each in its own.
+    grep -qx 'bin/darban-core-amd64' <<<"$listed" && grep -qx 'bin/darban-core-arm64' <<<"$listed"; rc_is 'the archive for v1.0 has darban-core for both' 0 "$?"
+    local arch other own
+    for arch in amd64 arm64; do
+        other=arm64; [[ $arch == amd64 ]] || other=amd64
+        own=$(tar -tzf "$out/darban-ovpn-$arch.tar.gz")
+        grep -qx "bin/darban-core-$arch" <<<"$own" && ! grep -qx "bin/darban-core-$other" <<<"$own" && grep -qx 'setup/install.sh' <<<"$own"
+        rc_is "the $arch archive has its darban-core only" 0 "$?"
+        grep -q "  darban-ovpn-$arch.tar.gz\$" "$out/SHA256SUMS"; rc_is "the $arch archive has a checksum" 0 "$?"
+    done
 
     # Q12: every file carries the commit time, and a second build of the commit, from a copy whose files have
     # another time, gives the same bytes.
@@ -2705,7 +2858,7 @@ test_release_assets_know_their_version() {
     mkdir -p "$copy" && git -C "$REPO" archive HEAD | tar -x -C "$copy"; rc_is 'a copy of the commit' 0 "$?"
     find "$copy" -type f -exec touch -d '2001-02-03 04:05:06' {} +
     # The suite runs on the commit's own tree: only an uncommitted change could make the two builds differ.
-    if [[ -z $(git -C "$REPO" status --porcelain -- VERSION bin lib setup systemd scripts README.md README.fa.md CHANGELOG.md LICENSE) ]]; then
+    if [[ -z $(git -C "$REPO" status --porcelain -- VERSION bin lib setup systemd scripts README.md README.fa.md CHANGELOG.md LICENSE go.mod cmd internal) ]]; then
         SOURCE_DATE_EPOCH=$when bash "$copy/scripts/build-release.sh" "$WORK/release-again" >/dev/null 2>&1
         rc_is 'the second build' 0 "$?"
         rc_is 'two builds of one commit, one checksum' "$(sha256sum <"$out/SHA256SUMS")" "$(sha256sum <"$WORK/release-again/SHA256SUMS")"
@@ -2722,7 +2875,7 @@ test_an_update_places_the_modules_before_the_manager() {
     modules=$(grep -n '^for module in lib/darban/\*\.sh lib/darban/screens/\*\.sh; do$' "$REPO/setup/install.sh" | cut -d: -f1)
     manager=$(grep -n '^install .* bin/darban /usr/local/sbin/darban$' "$REPO/setup/install.sh" | cut -d: -f1)
     [[ -n $modules && -n $manager ]] && (( modules < manager )); rc_is 'install.sh places the modules before the manager' 0 "$?"
-    grep -qF 'cp -a -- "$newest/lib/." "$DARBAN_LIB/" && cp -a -- "$newest/sbin/." "$SBIN_DIR/"' "$REPO/lib/darban/tool.sh"
+    grep -qF -- '-exec cp -a -t "$DARBAN_LIB/" -- {} + && darban_core_place "$core_new" "$DARBAN_CORE" && cp -a -- "$newest/sbin/." "$SBIN_DIR/"' "$REPO/lib/darban/tool.sh"
     rc_is 'the previous version gets its library before its manager' 0 "$?"
     # The manager sources each module of lib/darban, its screens included, once, from where install.sh puts it,
     # paths.sh first.
