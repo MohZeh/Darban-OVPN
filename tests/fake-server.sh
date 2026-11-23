@@ -201,7 +201,7 @@ cp "$SRC/lib/ui.sh" "$E/lib/ui.sh"
 cp "$SRC/lib/backup.py" "$E/lib/backup.py"
 cp "$SRC/lib/geolist.py" "$E/lib/geolist.py"
 # The manager's modules as install.sh places them; the test copy of paths.sh points every path into this fake server.
-mkdir -p "$E/lib/modules"
+mkdir -p "$E/lib/modules/screens"
 sed -e "s#^OUT_DIR=.*#OUT_DIR=$E/clients#" -e "s#^LINK_DIR=.*#LINK_DIR=$E/links#" -e "s#^BACKUP_ROOT=.*#BACKUP_ROOT=$E/backups-tool#" -e "s#^SBIN_DIR=.*#SBIN_DIR=$E/sbin#" -e "s#^UNIT_DIR=.*#UNIT_DIR=$E/units#" -e "s#^CONFIG_DIR=.*#CONFIG_DIR=$E/cfg#" \
     -e "s#^SYSTEM_CA_FILE=.*#SYSTEM_CA_FILE=$E/system-ca.pem#" -e "s#^CERT_SEARCH_DIRS=.*#CERT_SEARCH_DIRS='$E/le-live $E/panel-cert $E/acme'#" \
     -e "s#^LE_DIR=.*#LE_DIR=$E/le#" -e "s#^LINK_CERT_LOG=.*#LINK_CERT_LOG=$E/varlib/link-certificates.log#" \
@@ -213,12 +213,16 @@ sed -e "s#^OUT_DIR=.*#OUT_DIR=$E/clients#" -e "s#^LINK_DIR=.*#LINK_DIR=$E/links#
     -e "s#^PKI_BACKUP_DIR=.*#PKI_BACKUP_DIR=$E/pki-backups#" -e "s#^RESTORE_WARN=.*#RESTORE_WARN=$E/varlib/restore-unverified#" \
     -e 's#^EVENT_MAX=.*#EVENT_MAX=${TEST_EVENT_MAX:-500}#' \
     "$SRC/lib/darban/paths.sh" > "$E/lib/modules/paths.sh"
-for module in "$SRC"/lib/darban/*.sh; do
-    if [[ ${module##*/} != paths.sh ]]; then cp "$module" "$E/lib/modules/"; fi
+# The screens keep their folder. The event_run_id stand-in is a function, not a path: it goes into the module that
+# has it, and the build fails when no module has it.
+for module in "$SRC"/lib/darban/*.sh "$SRC"/lib/darban/screens/*.sh; do
+    name=${module#"$SRC"/lib/darban/}
+    if [[ $name != paths.sh ]]; then
+        sed -e 's#^event_run_id() {.*#event_run_id() { printf "%s\\n" "${TEST_EVENT_RUN:-$$-0}"; }#' "$module" > "$E/lib/modules/$name"
+    fi
 done
-sed -e "s#^source /usr/local/lib/darban/#source $E/lib/#" \
-    -e 's#^event_run_id() {.*#event_run_id() { printf "%s\\n" "${TEST_EVENT_RUN:-$$-0}"; }#' \
-    "$SRC/bin/darban" > "$E/manager.sh"
+grep -qF 'TEST_EVENT_RUN' "$E"/lib/modules/*.sh ||{ echo 'fake-server.sh: no module has event_run_id' >&2; exit 1; }
+sed -e "s#^source /usr/local/lib/darban/#source $E/lib/#" "$SRC/bin/darban" > "$E/manager.sh"
 # Every file the manager sources is here, so no test runs a manager that is missing a part.
 while read -r _ file; do
     [[ -f $file ]] || { echo "fake-server.sh: the manager sources $file, which is not here" >&2; exit 1; }

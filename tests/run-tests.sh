@@ -2689,8 +2689,9 @@ test_release_assets_know_their_version() {
     grep -qx 'lib/geolist.py' <<<"$listed"; rc_is 'the archive has the lists of blocked destinations' 0 "$?"
     grep -qx 'systemd/darban-geo.timer' <<<"$listed"; rc_is 'the archive has their daily update' 0 "$?"
     local module
-    for module in "$REPO"/lib/darban/*.sh; do
-        grep -qx "lib/darban/${module##*/}" <<<"$listed"; rc_is "the archive has the module ${module##*/}" 0 "$?"
+    for module in "$REPO"/lib/darban/*.sh "$REPO"/lib/darban/screens/*.sh; do
+        module=${module#"$REPO"/}
+        grep -qx "$module" <<<"$listed"; rc_is "the archive has the module $module" 0 "$?"
     done
     (cd "$out" && sha256sum --quiet -c SHA256SUMS >/dev/null); rc_is 'the checksums match' 0 "$?"
 
@@ -2717,15 +2718,16 @@ test_an_update_places_the_modules_before_the_manager() {
     # G1a: bin/darban sources its modules, so an install or a way back that stops half way must never leave a
     # manager whose modules are not there yet: the modules go first, the manager last.
     local modules manager module sourced
-    modules=$(grep -n '^for module in lib/darban/\*\.sh; do$' "$REPO/setup/install.sh" | cut -d: -f1)
+    modules=$(grep -n '^for module in lib/darban/\*\.sh lib/darban/screens/\*\.sh; do$' "$REPO/setup/install.sh" | cut -d: -f1)
     manager=$(grep -n '^install .* bin/darban /usr/local/sbin/darban$' "$REPO/setup/install.sh" | cut -d: -f1)
     [[ -n $modules && -n $manager ]] && (( modules < manager )); rc_is 'install.sh places the modules before the manager' 0 "$?"
-    grep -qF 'cp -a -- "$newest/lib/." "$DARBAN_LIB/" && cp -a -- "$newest/sbin/." "$SBIN_DIR/"' "$REPO/bin/darban"
+    grep -qF 'cp -a -- "$newest/lib/." "$DARBAN_LIB/" && cp -a -- "$newest/sbin/." "$SBIN_DIR/"' "$REPO/lib/darban/tool.sh"
     rc_is 'the previous version gets its library before its manager' 0 "$?"
-    # The manager sources each module of lib/darban once, from where install.sh puts it, paths.sh first.
-    sourced=$(sed -n 's#^source /usr/local/lib/darban/modules/\([a-z]*\.sh\)$#\1#p' "$REPO/bin/darban")
+    # The manager sources each module of lib/darban, its screens included, once, from where install.sh puts it,
+    # paths.sh first.
+    sourced=$(sed -n 's#^source /usr/local/lib/darban/modules/\([a-z/]*\.sh\)$#\1#p' "$REPO/bin/darban")
     rc_is 'paths.sh is sourced first' paths.sh "$(head -n 1 <<<"$sourced")"
-    rc_is 'each module is sourced once' "$(cd "$REPO/lib/darban" && printf '%s\n' *.sh | sort)" "$(sort <<<"$sourced")"
+    rc_is 'each module is sourced once' "$(cd "$REPO/lib/darban" && printf '%s\n' *.sh screens/*.sh | sort)" "$(sort <<<"$sourced")"
     for module in $sourced; do
         [[ -s $E/lib/modules/$module ]]; rc_is "the fake server has $module where install.sh puts it" 0 "$?"
     done
@@ -4066,7 +4068,7 @@ test_old_certbot_is_not_used_for_an_ip() {
     menu '6\n1\n2\n0\n' >/dev/null
     # Without snap there is no way to a new enough certbot, so the question is not asked at all.
     rm -f "$E/cfg/link-cert.pem" "$E/cfg/link-key.pem"
-    sed -i 's/^have_snap() {.*/have_snap() { false; }/' "$E/manager.sh"
+    sed -i 's/^have_snap() {.*/have_snap() { false; }/' "$E/lib/modules/certs.sh"
     : > "$STUB_LOG"
     out=$(menu '5
 alice
@@ -4165,7 +4167,7 @@ test_link_store_removes_files_left_by_a_crash() {
 test_version_order_is_the_same_everywhere() {
     local pair a b x y
     eval "$(sed -n '/^version_is_newer() {/,/^}/p' "$REPO/setup/get.sh" | sed 's/^version_is_newer()/newer_get()/')"
-    eval "$(sed -n '/^version_is_newer() {/,/^}/p' "$REPO/bin/darban" | sed 's/^version_is_newer()/newer_tool()/')"
+    eval "$(sed -n '/^version_is_newer() {/,/^}/p' "$REPO/lib/darban/tool.sh" | sed 's/^version_is_newer()/newer_tool()/')"
     for pair in '1.0.0 0.9.9' '1.0.0 1.0.0-rc.1' '1.0.0-rc.2 1.0.0-rc.1' '1.0.0-rc.1 1.0.0-beta.9' '1.0.10 1.0.9' '2.0.0 10.0.0' '1.0.0 1.0.0'; do
         read -r a b <<<"$pair"
         newer_get "$a" "$b"; x=$?; newer_tool "$a" "$b"; y=$?

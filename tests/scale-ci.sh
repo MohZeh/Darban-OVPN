@@ -47,6 +47,9 @@ summary() {
     local text
     text=$(printf '### Scale: Ubuntu %s, %s valid clients, %s\n\n%s\n\n| Measured | Seconds | Runs |\n|---|---:|---:|\n%s\n' \
         "$VERSION_ID" "$CLIENTS" "$PART" "${NOTES:-No data was made.}" "${ROWS_MD:-| nothing measured | | |}")
+    text+=$(printf '\n\n#### Against the base commit, in this job\n\n%s\n\n| Compared | Base (s, best) | This change (s, best) | New/base | Runs each | Result |\n|---|---:|---:|---:|---:|---|\n%s\n' \
+        "${CMP_NOTE:-Nothing compared.}" "${CMP_MD:-| nothing compared | | | | | |}")
+    if [[ -n ${CMP_FAILED:-} ]]; then text+=$(printf '\n\n**More than 10%% slower than the base: %s.**\n' "$CMP_FAILED"); fi
     printf '%s\n' "$text"
     if [[ -n ${GITHUB_STEP_SUMMARY:-} ]]; then printf '%s\n\n' "$text" >>"$GITHUB_STEP_SUMMARY"; fi
 }
@@ -134,6 +137,82 @@ menu_open() {
     printf '%s\n' "$took" >"$WORK/menu.seconds"
 }
 
+# ---------- the same commands with the manager of the base commit, in this job ----------
+# Runners differ by up to about 40% between jobs, so a change is judged against its base on this runner, with this
+# data: BASE_TREE holds bin/ and lib/ of the base commit (CI puts them there for a pull request). Its manager is
+# staged beside the installed one, sourcing its own libraries and modules from $BASE_DIR; both use the same server,
+# CA and settings. Each comparison runs the base and this change in turn, base first, and compares the best run of
+# each. Only a change more than 10% slower than its base fails the job.
+BASE_DIR=$WORK/base
+COMPARE_TSV=$RESULTS/compare.tsv
+CMP_MD=''
+CMP_FAILED=''
+COMPARE=0
+printf 'key\twhat\tbase seconds\tnew seconds\tnew/base\truns each\tresult\n' >"$COMPARE_TSV"
+stage_base() {
+    local module
+    [[ -n ${BASE_TREE:-} && -f $BASE_TREE/bin/darban && -f $BASE_TREE/lib/common.sh ]] || return 1
+    mkdir -p "$BASE_DIR/lib/modules"
+    cp -- "$BASE_TREE/lib/common.sh" "$BASE_TREE/lib/ui.sh" "$BASE_DIR/lib/"
+    if [[ -d $BASE_TREE/lib/darban ]]; then
+        while IFS= read -r module; do
+            mkdir -p "$BASE_DIR/lib/modules/$(dirname -- "$module")"
+            cp -- "$BASE_TREE/lib/darban/$module" "$BASE_DIR/lib/modules/$module"
+        done < <(cd "$BASE_TREE/lib/darban" && find . -name '*.sh' -printf '%P\n')
+    fi
+    sed "s#^source /usr/local/lib/darban/#source $BASE_DIR/lib/#" "$BASE_TREE/bin/darban" >"$BASE_DIR/darban"
+    # Every file the base manager sources is there, so no comparison runs a manager that is missing a part.
+    while read -r _ module; do
+        [[ -f $module ]] || { echo "FAIL: the base manager sources $module, which is not staged."; return 2; }
+    done < <(grep '^source ' "$BASE_DIR/darban")
+}
+ratio() {
+    # ratio <new> <base>: new/base with three decimals.
+    local permille=$(( ($1 * 1000 + $2 / 2) / $2 ))
+    printf '%d.%03d' $(( permille / 1000 )) $(( permille % 1000 ))
+}
+compare() {
+    # compare <key> <what> <prepare function or ''> <command of this change> <command of the base>: base, new, base,
+    # new... up to 3 runs each, 2 when a run takes 20 seconds or more. @RUN@ in a command becomes the name of the run,
+    # such as base1, for a name that must differ between runs.
+    local key=$1 what=$2 prepare=$3 run side command start took rc most=3 best_new best_base shown result
+    local -a new_runs=() base_runs=()
+    (( COMPARE )) || return 0
+    for (( run = 1; run <= most; run++ )); do
+        for side in base new; do
+            if [[ -n $prepare ]]; then "$prepare" || { echo "FAIL: getting ready for $what ($side) failed."; return 1; }; fi
+            if [[ $side == base ]]; then command=$5; else command=$4; fi
+            command=${command//@RUN@/$side$run}
+            rc=0
+            start=$(now_us)
+            timeout "$LIMIT" bash -c "$command" >"$WORK/compare-$key.$side.$run.log" 2>&1 </dev/null || rc=$?
+            took=$(( $(now_us) - start ))
+            if (( rc != 0 )); then
+                echo "FAIL: $what ($side) exited with status $rc:"; tail -n 40 "$WORK/compare-$key.$side.$run.log"
+                return 1
+            fi
+            if [[ $side == base ]]; then base_runs+=("$took"); else new_runs+=("$took"); fi
+            if (( took >= 20000000 )); then most=2; fi
+        done
+    done
+    best_base=$(printf '%s\n' "${base_runs[@]}" | sort -n | head -n 1)
+    best_new=$(printf '%s\n' "${new_runs[@]}" | sort -n | head -n 1)
+    shown=$(ratio "$best_new" "$best_base")
+    result=pass
+    if (( best_new * 100 > best_base * 110 )); then
+        result='FAIL: more than 10% slower'
+        CMP_FAILED+="${CMP_FAILED:+, }$what"
+    fi
+    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$key" "$what" "$(seconds "$best_base")" "$(seconds "$best_new")" "$shown" "${#new_runs[@]}" "$result" >>"$COMPARE_TSV"
+    CMP_MD+="| $what | $(seconds "$best_base") | $(seconds "$best_new") | $shown | ${#new_runs[@]} | $result |"$'\n'
+    echo "COMPARE: $what: base $(seconds "$best_base") s, new $(seconds "$best_new") s, new/base $shown: $result"
+}
+prepare_events() {
+    # The worker of each run finds the same work: $CONNECTED events waiting, and nothing left from the run before.
+    queue_empty || { echo 'FAIL: the run before left events in the queue.'; return 1; }
+    write_events 1
+}
+
 # ---------- the real setup ----------
 echo "Ubuntu $VERSION_ID, kernel $(uname -r): setup, then the $PART part"
 start=$(now_us)
@@ -145,6 +224,16 @@ systemctl is-active --quiet darban-events.path
 # The update check reaches GitHub at most once an hour, in the background: off, so no number waits on the network.
 sed -i '/^UPDATE_CHECK=/d' /etc/darban/config
 printf 'UPDATE_CHECK=no\n' >>/etc/darban/config
+staged=0
+stage_base || staged=$?
+case $staged in
+    0) COMPARE=1
+       CMP_NOTE="Base commit ${BASE_SHA:-unknown}: its manager is staged beside this change's, on this runner, with the same server, CA and data. Each command runs base, new, base, new, up to 3 runs each (2 when a run takes 20 s or more), and the best run of each is compared. Only new/base over 1.100 fails the job."
+       if [[ $PART == crl ]]; then CMP_NOTE+=" gen-crl, publishing the CRL and the client-connect script are not the manager (Easy-RSA, lib/common.sh, bin/darban-ovpn-event), so only the events worker is compared."; fi
+       echo "Comparing with the base commit ${BASE_SHA:-unknown}, staged in $BASE_DIR." ;;
+    1) CMP_NOTE='No base commit was given (only a pull request has one): nothing compared.' ;;
+    *) exit 1 ;;
+esac
 
 # ---------- nft_quota, which counting each client's traffic needs ----------
 kernel=$(uname -r)
@@ -274,6 +363,8 @@ if [[ $PART == crl ]]; then
     measure events-worker "darban events applying $CONNECTED waiting events" 1 'darban events'
     queue_empty || { echo 'FAIL: darban events left events in the queue.'; exit 1; }
     ledger_after "$start" 1
+    compare events-worker "darban events applying $CONNECTED waiting events" prepare_events 'darban events' "bash $BASE_DIR/darban events"
+    queue_empty || { echo 'FAIL: darban events left events in the queue.'; exit 1; }
     systemctl start darban-events.path
 
     # One run of the client-connect script, as OpenVPN runs it, as its own user, timed inside that user's shell
@@ -309,6 +400,16 @@ if [[ $PART == menu ]]; then
     # Read from the index itself: a darban list would take minutes and measure nothing.
     valid=$(awk -F '\t' '$1 == "V" && $6 ~ /\/CN=scale-/ {n++} $1 == "V" && $6 ~ /\/CN=scale-new$/ {new++} END {printf "%d %d\n", n, new}' "$PKI/index.txt")
     [[ $valid == "$(( CLIENTS + 1 )) 1" ]] || { echo "FAIL: index.txt has valid clients and rows of scale-new: $valid, not $(( CLIENTS + 1 )) 1."; exit 1; }
+    # The same, with the base: the time to the menu's question, then leaving it; and a client of its own name each run.
+    compare menu 'open the menu until it asks "Choose [0-9]", then leave it' '' \
+        "python3 tests/time-to-text.py $LIMIT 'Choose [0-9]' '0\r' -- darban" \
+        "python3 tests/time-to-text.py $LIMIT 'Choose [0-9]' '0\r' -- bash $BASE_DIR/darban"
+    compare create 'create one client, from opening the menu to leaving it' '' \
+        "printf '1\nscale-cmp-@RUN@\n0\n' | darban" "printf '1\nscale-cmp-@RUN@\n0\n' | bash $BASE_DIR/darban"
+    if (( COMPARE )); then
+        made=$(find /root/openvpn-clients -maxdepth 1 -name 'scale-cmp-*.ovpn' -size +0 | wc -l)
+        (( made >= 4 )) || { echo "FAIL: the compared runs made $made profiles, not one each."; exit 1; }
+    fi
 fi
 
 # ---------- the list and the diagnostics ----------
@@ -319,5 +420,8 @@ if [[ $PART == commands ]]; then
     grep "$revoked revoked" "$WORK/list.1.log" >/dev/null || { tail -n 5 "$WORK/list.1.log"; echo "FAIL: the list does not show $revoked revoked clients."; exit 1; }
     measure status 'darban status' 3 'darban status'
     echo "PASS: the list shows $CLIENTS valid and $revoked revoked clients, and the diagnostics pass."
+    compare list 'darban list' '' 'darban list' "bash $BASE_DIR/darban list"
+    compare status 'darban status' '' 'darban status' "bash $BASE_DIR/darban status"
 fi
+if [[ -n $CMP_FAILED ]]; then echo "FAIL: more than 10% slower than the base: $CMP_FAILED."; exit 1; fi
 echo "PASS: every measurement of the $PART part ran."

@@ -279,7 +279,9 @@ jobs:
   # come in three parts, each on a runner of its own after the same setup and data: the list and the diagnostics,
   # the menu and a new client, and the CRL with the connection events. A part takes up to about 10 minutes, so not on
   # every pull request: only one labelled scale, the weekly run of main, and a manual run with scale. A label added
-  # later counts from the next push.
+  # later counts from the next push. For a pull request, the same job also runs the manager of its base commit on the
+  # same runner and data, in turn with its own, since runners differ by up to about 40% between jobs: the job fails
+  # when a command of the change is more than 10% slower than the base. Both numbers and the ratio go to the summary.
   scale:
     name: Scale (Ubuntu ${{ matrix.ubuntu }}, ${{ matrix.clients }} clients, ${{ matrix.part }})
     needs: lint
@@ -291,11 +293,22 @@ jobs:
         clients: [253, 1000]
         part: [commands, menu, crl]
     runs-on: ubuntu-${{ matrix.ubuntu }}
-    timeout-minutes: 60
+    # The comparison with the base runs each command up to six times more.
+    timeout-minutes: 120
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      # bin/ and lib/ of the base commit, which tests/scale-ci.sh stages beside the change to compare them.
+      - name: The manager of the base commit
+        if: github.event_name == 'pull_request'
+        env:
+          BASE: ${{ github.event.pull_request.base.sha }}
+        run: |
+          git fetch --no-tags --depth=1 origin "$BASE"
+          mkdir -p "$RUNNER_TEMP/base"
+          git archive "$BASE" bin lib | tar -x -C "$RUNNER_TEMP/base"
+          test -f "$RUNNER_TEMP/base/bin/darban"
       # A mirror that is down or slow must not decide a test: the fastest one goes first.
       - name: Fastest apt mirror first
         run: sudo GITHUB_STEP_SUMMARY="$GITHUB_STEP_SUMMARY" bash scripts/ci-apt-mirrors.sh
@@ -312,13 +325,19 @@ jobs:
         env:
           CLIENTS: ${{ matrix.clients }}
           PART: ${{ matrix.part }}
-        run: sudo GITHUB_STEP_SUMMARY="$GITHUB_STEP_SUMMARY" bash tests/scale-ci.sh --i-know "$CLIENTS" "$PART" "$RUNNER_TEMP/scale"
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          base=''
+          if [[ -n $BASE_SHA ]]; then base=$RUNNER_TEMP/base; fi
+          sudo GITHUB_STEP_SUMMARY="$GITHUB_STEP_SUMMARY" BASE_TREE="$base" BASE_SHA="$BASE_SHA" bash tests/scale-ci.sh --i-know "$CLIENTS" "$PART" "$RUNNER_TEMP/scale"
       - name: Keep the times
         if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: scale-${{ matrix.ubuntu }}-${{ matrix.clients }}-clients-${{ matrix.part }}
-          path: ${{ runner.temp }}/scale/scale.tsv
+          path: |
+            ${{ runner.temp }}/scale/scale.tsv
+            ${{ runner.temp }}/scale/compare.tsv
           if-no-files-found: ignore
           retention-days: 90
 
