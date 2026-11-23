@@ -22,12 +22,16 @@ setup_times() {
 snap_retry_lines() {
     # snap_retry_lines <label>: what the certbot snap install said about its second try, from the setup log, in
     # the job log and the summary. Those lines stay in the log on a passing run, so without this nobody sees
-    # whether the retry ever fired. Never fails.
-    local lines
+    # whether the retry ever fired. The result is one of three, so the runs can be counted: "no retry",
+    # "retry, then certbot installed" or "retry, still failed". Call it right after the setup. Never fails.
+    local lines result='no retry'
     lines=$(grep -E 'trying once more|still installing certbot|snapd does not answer' /var/log/darban-setup.log 2>/dev/null || true)
-    printf 'Snap retry lines:\n%s\n' "${lines:-none: certbot came on the first try, or was not installed}" || true
+    if grep -qE 'trying once more|still installing certbot' <<<"$lines"; then
+        if [[ -x /snap/bin/certbot ]]; then result='retry, then certbot installed'; else result='retry, still failed'; fi
+    fi
+    printf 'Snap retry: %s\n%s\n' "$result" "$lines" || true
     if [[ -n ${GITHUB_STEP_SUMMARY:-} ]]; then
-        printf '**Snap retry lines, %s**\n\n```\n%s\n```\n' "$1" "${lines:-none}" >>"$GITHUB_STEP_SUMMARY" || true
+        printf '**Snap retry, %s: %s**\n\n```\n%s\n```\n' "$1" "$result" "${lines:-no retry lines in the setup log}" >>"$GITHUB_STEP_SUMMARY" || true
     fi
     return 0
 }
