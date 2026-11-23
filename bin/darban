@@ -44,6 +44,8 @@ GEO_SOURCE=https://raw.githubusercontent.com/Chocolate4U/Iran-v2ray-rules/releas
 # Each run of the worker takes at most this many events, or this many seconds; the path unit starts it again.
 EVENT_MAX=500
 EVENT_SECONDS=60
+# How long darban events waits for a worker already running: longer than one run takes, shorter than its unit allows.
+EVENT_WORKER_WAIT=120
 DEFAULT_CLIENT_DNS='1.1.1.1 9.9.9.9'
 CONF_TEMP=''
 OUT_DIR=/root/openvpn-clients
@@ -3409,13 +3411,30 @@ events_apply_claimed() {
         EVENT_REJECTED=0
     fi
 }
+# The lock of the queue itself: one worker at a time, as each run reads every entry in work/, those another run
+# took as well. In the folder of the queue, which only root can write to, not in new/ of OpenVPN's user.
+EVENT_WORKER_LOCK=.worker.lock
+events_worker_lock() {
+    # events_worker_lock <seconds>: waits that long for another worker to finish, 0 for not at all; 1 if it did not.
+    exec 7>>"$EVENT_DIR/$EVENT_WORKER_LOCK" 2>/dev/null || return 1
+    if (( $1 > 0 )); then flock -w "$1" 7 2>/dev/null && return 0; else flock -n 7 2>/dev/null && return 0; fi
+    exec 7>&-
+    return 1
+}
+events_worker_unlock() { flock -u 7 2>/dev/null || true; exec 7>&-; }
+# darban events: the worker, waiting for one already running.
+events_worker() { events_run "$EVENT_WORKER_WAIT"; }
 events_run() {
     # darban events (darban-events.service, started by the path unit while new/ holds something): takes what
     # OpenVPN left and applies it, until new/ is empty, or it has taken or applied EVENT_MAX entries, or
     # EVENT_SECONDS have passed. What is left then is not lost: entries still in new/ start it again by themselves,
     # and for those it took but did not apply, it leaves its mark in new/, which does the same.
+    # events_run [seconds]: how long to wait for a worker already running, none by default. darban events waits:
+    # returning at once, the path unit would start it again and again while new/ holds something. The sweep does
+    # not: the worker that holds the lock takes what is waiting, and the sweep goes on with its own work.
     local before
     events_mounted || return 0
+    events_worker_lock "${1:-0}" || return 0
     EVENT_RUN=$(event_run_id) EVENT_SEQ=0 EVENT_TAKEN=0 EVENT_DONE=0 EVENT_LEFT=0 EXPIRE_DIRTY=0
     EVENT_DEADLINE=$(( SECONDS + EVENT_SECONDS ))
     while :; do
@@ -3428,6 +3447,7 @@ events_run() {
     # A kept file went: the timer now waits for the next one.
     if (( EXPIRE_DIRTY )) && events_lock; then expire_schedule || true; ca_unlock; fi
     EXPIRE_DIRTY=0
+    events_worker_unlock
 }
 sweep_links() {
     # Expired links, and the files of a link whose record is gone for a minute, as the link service removes them
@@ -7289,7 +7309,7 @@ main() {
                 darban_require_root || exit 1
                 # The hours of Settings and the SSH user, for the files kept on the server.
                 load_config
-                case $1 in events) run_action events_run ;; sweep) run_action sweep ;; *) run_action events_setup ;; esac
+                case $1 in events) run_action events_worker ;; sweep) run_action sweep ;; *) run_action events_setup ;; esac
                 exit "$ACTION_RC" ;;
             list|status|repair-crl|connected|update|uninstall|remove-all|welcome|enable-events) [[ -z $cmd ]] || { usage >&2; exit 2; }; cmd=$1 ;;
             *) printf 'Unknown argument: %s\n\n' "$1" >&2; usage >&2; exit 2 ;;
