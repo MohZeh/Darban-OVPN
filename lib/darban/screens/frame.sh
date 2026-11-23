@@ -19,7 +19,7 @@ status_block() {
         endpoint="${C_YELLOW}address not set $S_ARROW Settings $S_CRUMB 1$C_RESET (port $port/UDP)"
     fi
     # A healthy blocklist is one word on the server line; a problem gets a line of its own.
-    if { darban_crl_configured && verify_published_crl "$DARBAN_CRL"; } >/dev/null 2>&1 && e=$(darban_crl_expiry_epoch "$DARBAN_CRL"); then
+    if { darban_crl_configured && darban_verify_crl "$DARBAN_CRL"; } >/dev/null 2>&1 && e=$(darban_crl_expiry_epoch "$DARBAN_CRL"); then
         kv Server "$state $S_SEP $endpoint $S_SEP blocklist $C_GREEN$S_OK$C_RESET"
     else
         kv Server "$state $S_SEP $endpoint"

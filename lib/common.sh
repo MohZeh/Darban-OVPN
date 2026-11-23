@@ -3,6 +3,9 @@
 # This file is sourced by root-owned manager/maintenance executables.
 
 DARBAN_LIB=/usr/local/lib/darban
+# The part of the tool written in Go. It compares the CRL with the CA index here, and reads the index for the
+# list and the diagnostics of the manager. setup/install.sh puts it there.
+DARBAN_CORE=$DARBAN_LIB/darban-core
 DARBAN_PKI=/root/pki
 DARBAN_EASYRSA=/usr/share/easy-rsa/easyrsa
 DARBAN_SERVER_DIR=/etc/openvpn/server
@@ -494,7 +497,7 @@ darban_rollback_hint() {
     printf 'The CA database looks older than the published CRL (restored backup?). Restore the current %s. Only if un-revoking is really intended: darban-crl-maintain --renew --allow-crl-shrink\n' "$DARBAN_PKI/index.txt"
 }
 darban_verify_crl() {
-    local file=$1 now exp start serial serial_norm list rows server_serial state unknown indexed_expiry indexed_date
+    local file=$1 now exp start server_serial
     [[ -s $file ]] || { darban_error "CRL missing: $file"; return 1; }
     darban_crl_signature_ok "$file" || { darban_error 'CRL signature verification failed.'; return 1; }
     exp=$(darban_crl_expiry_epoch "$file") || { darban_error 'Unreadable CRL nextUpdate.'; return 1; }
@@ -503,41 +506,14 @@ darban_verify_crl() {
     (( exp > now && start <= now + 300 && start < exp )) || {
         darban_error 'CRL is expired, not yet valid, or has an inconsistent validity window.'; return 1;
     }
-    # A CRL cannot be called complete against a database that is unreadable, empty or from another CA:
-    # a real CA database always holds the certificate this server is running with.
-    rows=$(darban_index_rows) || return 1
-    server_serial=$(darban_server_serial) || { darban_error 'Cannot read the server certificate from server.conf.'; return 1; }
-    local -A row_state=() row_expiry=() included=()
-    darban_index_load || return 1
-    [[ -v row_state[$server_serial] ]] || {
-        darban_error "CA database does not contain the server certificate (serial $server_serial): it is empty, restored from an old backup, or from another CA."; return 1;
-    }
-    # A signed CRL may still be outdated. Every R entry in the CA index must be present.
-    # Fail closed if even one revoked serial is absent.
-    list=$(darban_crl_serials "$file") || { darban_error 'Could not read the serials of the CRL.'; return 1; }
-    while IFS= read -r serial; do
-        [[ -n $serial ]] || continue
-        serial_norm=$(darban_norm_serial "$serial") || { darban_error 'Malformed serial in CRL.'; return 1; }
-        included["$serial_norm"]=1
-    done <<<"$list"
-    # An expired revoked certificate cannot authenticate and may legally be
-    # omitted from future CRLs. Enforce every NOT-YET-EXPIRED revoked entry.
-    while IFS=$'\t' read -r state indexed_date serial; do
-        [[ $state == R ]] || continue
-        serial_norm=$(darban_norm_serial "$serial") || { darban_error 'Malformed revoked serial in CA database.'; return 1; }
-        indexed_expiry=$(darban_index_expiry_epoch "$indexed_date") || {
-            darban_error "Malformed expiry for revoked CA serial: $serial_norm"; return 1;
-        }
-        if (( indexed_expiry > now )); then
-            [[ -v included[$serial_norm] ]] || { darban_error "CRL is missing revoked CA serial: $serial_norm"; return 1; }
-        fi
-    done <<<"$rows"
-    # The opposite direction: the CRL revokes something the database does not know was revoked.
-    unknown=$(darban_crl_unknown_serials "$file") || return 1
-    if [[ -n $unknown ]]; then
-        darban_error "CRL revokes serial(s) the CA database does not: ${unknown//$'\n'/ }. $(darban_rollback_hint)"
-        return 1
-    fi
+    # A CRL cannot be called complete against a database that is unreadable, empty or from another CA: a real CA
+    # database always holds the certificate this server is running with. Every revoked certificate that has not
+    # expired must be on the CRL, and the CRL must revoke nothing the database calls valid. darban-core compares the
+    # two in one reading of each (internal/caindex, CheckCRL), where loops here took minutes with thousands of
+    # revoked clients; it names an unreadable index before the server certificate, with the words used here before.
+    server_serial=$(darban_server_serial 2>/dev/null) || server_serial=''
+    [[ -x $DARBAN_CORE ]] || { darban_error "$DARBAN_CORE is missing, so the CRL cannot be compared with the CA database. Install the tool again."; return 1; }
+    "$DARBAN_CORE" index --pki "$DARBAN_PKI" --view crl --crl "$file" --now "$now" --server-serial "$server_serial" >/dev/null
 }
 darban_publish_crl() {
     local file=$1 temp dropped

@@ -24,9 +24,6 @@ PRE_RESTORE_WARN_DAYS=7
 BACKUP_HOOK_SECONDS=120
 RESTORE_WARN=/var/lib/darban/restore-unverified
 BACKUP_PY=$DARBAN_LIB/backup.py
-# The part of the tool written in Go: it reads the CA index, the certificates and the CRL once, for the list and
-# the diagnostics. setup/install.sh puts it here; the tests point DARBAN_LIB at a copy built in CI.
-DARBAN_CORE=$DARBAN_LIB/darban-core
 GEO_PY=$DARBAN_LIB/geolist.py
 # The lists of Settings > Blocked destinations: the ranges of each country, and of Iranian CDNs, made each day from
 # public GeoIP data. A folder; geolist.py adds the names of the files.

@@ -430,7 +430,7 @@ name_reuse_block_reason() {
     esac
     serial=$(client_index_serial "$name")
     if [[ -n $serial ]] && is_server_serial "$serial"; then printf 'it belongs to the server certificate.\n'; return 0; fi
-    if ! verify_published_crl "$DARBAN_CRL" >/dev/null 2>&1; then printf 'the published CRL has a problem; fix it first: Maintenance %s 2.\n' "$S_CRUMB"; return 0; fi
+    if ! darban_verify_crl "$DARBAN_CRL" >/dev/null 2>&1; then printf 'the published CRL has a problem; fix it first: Maintenance %s 2.\n' "$S_CRUMB"; return 0; fi
     # A link or file of an earlier certificate would leave two of them in use under one name.
     rows=$(share_rows 2>/dev/null) || rows=''
     if share_names revoked "$rows" | grep -Fx -- "$name" >/dev/null; then printf 'its revocation is unfinished; finish it first: Maintenance %s 2.\n' "$S_CRUMB"; return 0; fi

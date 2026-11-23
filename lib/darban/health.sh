@@ -146,7 +146,7 @@ health() {
         check bad "server.conf has no single 'crl-verify $DARBAN_CRL'"
     elif [[ ! -e $DARBAN_CRL ]]; then
         check bad "The CRL file $DARBAN_CRL is missing. OpenVPN does not start without it, and a running one keeps the last list it read $S_ARROW Maintenance $S_CRUMB 2"
-    elif crl_err=$(C_RED='' C_RESET='' verify_published_crl "$DARBAN_CRL" 2>&1) && e=$(darban_crl_expiry_epoch "$DARBAN_CRL"); then
+    elif crl_err=$(C_RED='' C_RESET='' darban_verify_crl "$DARBAN_CRL" 2>&1) && e=$(darban_crl_expiry_epoch "$DARBAN_CRL"); then
         if (( e - $(date -u +%s) < 7 * 86400 )); then
             check warn "Published CRL valid and complete, but its next update is due $(describe_expiry "$e"). Once it passes, every connection is refused $S_ARROW Maintenance $S_CRUMB 2"
         else

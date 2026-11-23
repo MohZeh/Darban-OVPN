@@ -142,11 +142,19 @@ darban-crl-maintain --check
 ARCH=$(dpkg --print-architecture)
 CORE=/usr/local/lib/darban/darban-core
 core_machine() { od -An -t x1 -j 18 -N 2 "$1" | tr -d ' \n'; }
+# e_machine of the ELF header, little-endian: 0x3e is x86-64, 0xb7 is AArch64.
 case $ARCH in amd64) want_machine=3e00 ;; arm64) want_machine=b700 ;; *) echo "FAIL: no darban-core for $ARCH."; exit 1 ;; esac
-[[ $(core_machine "$CORE") == "$want_machine" ]] || { echo "FAIL: the installed darban-core is not an $ARCH binary."; exit 1; }
-[[ $("$CORE" version) == "$(cat VERSION)" ]]
+got_machine=$(core_machine "$CORE")
+core_says=$("$CORE" version)
+echo "darban-core on this $ARCH server: ELF e_machine bytes $got_machine (want $want_machine), version $core_says (VERSION $(cat VERSION))"
+if command -v file >/dev/null; then file -L "$CORE"; fi
+[[ $got_machine == "$want_machine" ]] || { echo "FAIL: the installed darban-core is not an $ARCH binary."; exit 1; }
+[[ $core_says == "$(cat VERSION)" ]] || { echo 'FAIL: the installed darban-core is not this version.'; exit 1; }
 darban list >/dev/null
 echo "PASS: the installed darban-core is the $ARCH binary of this version, and the list uses it."
+if [[ -n ${GITHUB_STEP_SUMMARY:-} ]]; then
+    echo "darban-core on $ARCH: e_machine $got_machine, version $core_says" >>"$GITHUB_STEP_SUMMARY"
+fi
 systemctl start darban-crl.service
 systemctl is-active --quiet darban-crl.timer
 systemctl is-active --quiet darban-nat.service
