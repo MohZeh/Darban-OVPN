@@ -108,11 +108,11 @@ last=${*: -1}; want=${last##*:}; tcp=0
 for arg in "$@"; do [[ $arg =~ ^-[A-Za-z]*t ]] && tcp=1; done
 listening=$(awk '$1=="port"{p=$2} $1=="proto"{pr=$2} $1=="local" && NF==4 {print $4, $3} END {if (p != "") print (pr ~ /^tcp/ ? "tcp" : "udp"), p}' "$SERVER_CONF" 2>/dev/null)
 if (( tcp )); then
-    if grep -qx "tcp $want" <<<"$listening"; then echo "LISTEN 0 32 0.0.0.0:$want 0.0.0.0:*"; exit 0; fi
+    if grep -qx "tcp $want" <<<"$listening"; then echo "LISTEN 0 32 0.0.0.0:$want 0.0.0.0:* users:((\"openvpn\",pid=1,fd=5))"; exit 0; fi
     for p in ${FAKE_BUSY_TCP:-}; do if [[ $p == "$want" ]]; then echo "LISTEN 0 32 0.0.0.0:$want 0.0.0.0:* users:((\"nginx\",pid=1,fd=6))"; exit 0; fi; done
     exec /usr/bin/ss "$@"
 fi
-if grep -qx "udp $want" <<<"$listening"; then echo "UNCONN 0 0 0.0.0.0:$want 0.0.0.0:*"; exit 0; fi
+if grep -qx "udp $want" <<<"$listening"; then echo "UNCONN 0 0 0.0.0.0:$want 0.0.0.0:* users:((\"openvpn\",pid=1,fd=5))"; exit 0; fi
 for p in ${FAKE_BUSY_UDP:-}; do if [[ $p == "$want" ]]; then echo "UNCONN 0 0 0.0.0.0:$want 0.0.0.0:*"; fi; done
 exit 0
 STUB

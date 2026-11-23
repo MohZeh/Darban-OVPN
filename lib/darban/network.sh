@@ -7,12 +7,19 @@ port_listening() {
     # the provider firewall must be tested from outside.
     darban_port_busy "$1" "$2"
 }
+openvpn_listening() {
+    # openvpn_listening <udp|tcp> <port>: OpenVPN itself holds that socket. Another program on the port does not
+    # count: OpenVPN could not bind it then, and a change must be rolled back.
+    local flags=-lunp
+    if [[ $1 == tcp ]]; then flags=-ltnp; fi
+    ss -H "$flags" "sport = :$2" 2>/dev/null | grep -q '(("openvpn",'
+}
 listeners_up() {
-    # listeners_up <listeners>: every "udp N" or "tcp N" line has its socket.
+    # listeners_up <listeners>: OpenVPN holds the socket of every "udp N" or "tcp N" line.
     local proto port
     [[ -n $1 ]] || return 1
     while read -r proto port; do
-        port_listening "$proto" "$port" || return 1
+        openvpn_listening "$proto" "$port" || return 1
     done <<<"$1"
 }
 wait_for_listeners() {

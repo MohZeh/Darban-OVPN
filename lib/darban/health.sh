@@ -121,7 +121,13 @@ health() {
     if [[ $state == active ]]; then check ok "Service active (start at boot: ${enabled:-unknown})"; else check bad "Service ${state:-unknown} ($DARBAN_UNIT)"; fi
     if listeners=$(server_listeners); then
         while read -r proto port; do
-            if port_listening "$proto" "$port"; then check ok "Listening on ${proto^^} $port"; else check bad "Nothing listening on ${proto^^} $port"; fi
+            if openvpn_listening "$proto" "$port"; then
+                check ok "Listening on ${proto^^} $port"
+            elif port_listening "$proto" "$port"; then
+                check bad "Another program holds ${proto^^} $port, so OpenVPN cannot listen there $S_ARROW sudo ss -${proto:0:1}lnp 'sport = :$port'"
+            else
+                check bad "Nothing listening on ${proto^^} $port"
+            fi
             if [[ $proto == tcp && -n $LINK_PORT && $port == "$LINK_PORT" ]]; then
                 check bad "The OpenVPN TCP port $port is also the link port, so links cannot open $S_ARROW Settings $S_CRUMB 4"
             fi
