@@ -7424,6 +7424,26 @@ test_t1_port_share_leftovers_go() {
     port_share_leftovers_gone; rc_is 'and leaves nothing of port-share behind' 0 "$?"
     grep -q 'systemctl disable darban-links.service' "$STUB_LOG"; rc_is 'and disables the always-on link service' 0 "$?"
 }
+test_t1_a_port_another_program_takes_rolls_back() {
+    # Another program takes the new port as OpenVPN restarts: its socket is there, but it is not OpenVPN's, so the
+    # change is rolled back, with UDP as with TCP. Diagnostics name that program.
+    local out before
+    template_server
+    openvpn_says 2.7.9
+    before=$(cat "$SERVER_CONF")
+    out=$(printf '7\n2\n4\n1500\n2\n0\n0\n' | FAKE_TAKE_ON_RESTART=1500 bash "$E/manager.sh" 2>&1)
+    has 'a UDP port another program took is rolled back' 'Rolled back' "$out"
+    lacks 'and never called applied' 'OpenVPN is listening on UDP 1500' "$out"
+    [[ $before == "$(cat "$SERVER_CONF")" ]]; rc_is 'server.conf is exactly as before' 0 "$?"
+    out=$(printf '7\n2\n3\n4443\n2\n0\n0\n' | FAKE_TAKE_ON_RESTART=4443 bash "$E/manager.sh" 2>&1)
+    has 'a TCP port another program took is rolled back' 'Rolled back' "$out"
+    lacks 'and never called applied' 'OpenVPN is listening on UDP 1194 + TCP 4443' "$out"
+    [[ $before == "$(cat "$SERVER_CONF")" ]]; rc_is 'and server.conf is as before' 0 "$?"
+    with_listeners 'local * 1194 udp' 'local * 4443 tcp'
+    out=$(mgr status)
+    has 'Diagnostics name the program on an OpenVPN port' 'nginx holds TCP 4443, so OpenVPN cannot listen there' "$out"
+    has 'and the other port is still OpenVPN' 'Listening on UDP 1194' "$out"
+}
 
 # RUN_TESTS_EXTRA=<file>: more tests, for Lint's checks of this runner itself.
 # shellcheck source=/dev/null  # The file is named only at run time.

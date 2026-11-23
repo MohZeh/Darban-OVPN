@@ -7,28 +7,54 @@ port_listening() {
     # the provider firewall must be tested from outside.
     darban_port_busy "$1" "$2"
 }
+openvpn_pid() {
+    # The main process of OpenVPN's unit; fails when systemd names none.
+    local pid
+    pid=$(systemctl show -p MainPID --value "$DARBAN_UNIT" 2>/dev/null) || return 1
+    [[ $pid =~ ^[1-9][0-9]*$ ]] || return 1
+    printf '%s\n' "$pid"
+}
 openvpn_listening() {
-    # openvpn_listening <udp|tcp> <port>: OpenVPN itself holds that socket. Another program on the port does not
-    # count: OpenVPN could not bind it then, and a change must be rolled back.
-    local flags=-lunp
+    # openvpn_listening <udp|tcp> <port> [pid]: OpenVPN itself holds that socket: the main process of its unit, or,
+    # when systemd names none, a process called openvpn. Another program on the port does not count: OpenVPN could
+    # not bind it then, and a change must be rolled back.
+    local flags=-lunp sockets
     if [[ $1 == tcp ]]; then flags=-ltnp; fi
-    ss -H "$flags" "sport = :$2" 2>/dev/null | grep -q '(("openvpn",'
+    sockets=$(ss -H "$flags" "sport = :$2" 2>/dev/null) || return 1
+    if [[ -n ${3:-} ]]; then grep -q "pid=$3," <<<"$sockets"; else grep -q '(("openvpn",' <<<"$sockets"; fi
+}
+port_owner() {
+    # port_owner <udp|tcp> <port>: the name of the program that holds that socket, or "another program".
+    local flags=-lunp name
+    if [[ $1 == tcp ]]; then flags=-ltnp; fi
+    name=$(ss -H "$flags" "sport = :$2" 2>/dev/null | grep -o '(("[^"]*"' | head -n 1 | tr -d '("') || name=''
+    printf '%s\n' "${name:-another program}"
 }
 listeners_up() {
-    # listeners_up <listeners>: OpenVPN holds the socket of every "udp N" or "tcp N" line.
+    # listeners_up <listeners> [pid]: OpenVPN holds the socket of every "udp N" or "tcp N" line.
     local proto port
     [[ -n $1 ]] || return 1
     while read -r proto port; do
-        openvpn_listening "$proto" "$port" || return 1
+        openvpn_listening "$proto" "$port" "${2:-}" || return 1
     done <<<"$1"
 }
 wait_for_listeners() {
-    # wait_for_listeners [server.conf]: OpenVPN is active and listens on each listener of that file, each with its
-    # own protocol, within 5 seconds.
-    local listeners attempt
+    # wait_for_listeners [server.conf]: OpenVPN is active and holds each listener of that file, each with its own
+    # protocol, within 5 seconds. A moment later it must still be the same process: one that could not bind a port
+    # is active only until it exits, and a socket of another program on the port is not OpenVPN's.
+    local listeners attempt pid
     listeners=$(server_listeners "${1:-}") || return 1
     for attempt in 1 2 3 4 5; do
-        if systemctl is-active --quiet "$DARBAN_UNIT" && listeners_up "$listeners"; then return 0; fi
+        if systemctl is-active --quiet "$DARBAN_UNIT"; then
+            pid=$(openvpn_pid) || pid=''
+            if listeners_up "$listeners" "$pid"; then
+                sleep 0.5
+                if systemctl is-active --quiet "$DARBAN_UNIT" && [[ $(openvpn_pid 2>/dev/null || true) == "$pid" ]] \
+                    && listeners_up "$listeners" "$pid"; then
+                    return 0
+                fi
+            fi
+        fi
         sleep 1
     done
     return 1
