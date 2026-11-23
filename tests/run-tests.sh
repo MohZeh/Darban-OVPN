@@ -3376,7 +3376,7 @@ test_connected_clients() {
         "$(printf '  %-20s %-15s %-8s %-13s %s' carol 198.51.100.9 '?' '5 min' '1 B / 1 B')" "$out"
     has 'the client list marks it connected' 'connected' "$(mgr list | grep -E '^  alice ')"
     lacks 'a half-open session is not counted' 'UNDEF' "$out"
-    has 'the header counts it' '1 connected' "$(menu '0\n')"
+    has 'the header counts the three, not the half-open one' '3 connected' "$(menu '0\n')"
     has 'the menu offers it' 'Connected now' "$(menu '3\n\n0\n0\n')"
     sed -i '/^management /d' "$SERVER_CONF"
     has 'without the interface it says so' 'Not available' "$(mgr connected)"
