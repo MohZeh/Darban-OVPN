@@ -132,6 +132,31 @@ in_vm 'test "$(findmnt -n -o FSTYPE /run/darban-events)" = tmpfs && test -e /run
 in_vm 'systemctl is-active --quiet darban-events.path && systemctl is-active --quiet darban-sweep.timer'
 grep -q 'Connection events are seen' "$WORK/status.log"
 echo 'PASS: after the reboot the queue of connection events is mounted again, and its jobs run.'
+# The management interface answers after the boot, before any client connects: Connected now, the end of one
+# session at a revocation, and the five-minute check of links all ask it.
+for attempt in $(seq 1 30); do
+    if in_vm 'sudo darban connected' 2>/dev/null | grep 'No client is connected right now' >/dev/null; then break; fi
+    sleep 1
+done
+in_vm 'sudo darban connected' | grep 'No client is connected right now' >/dev/null
+answered=$(in_vm 'cut -d " " -f 1 /proc/uptime')
+# nft_quota, which counting each client's traffic needs, on the kernel the machine booted.
+in_vm 'sudo nft -f -' <<'EOF'
+table inet darban_quota_probe {
+    quota probe { over 1 mbytes }
+    chain probe {
+        ip daddr 192.0.2.1 quota over 1 mbytes counter
+        ip daddr 192.0.2.2 quota name "probe"
+    }
+}
+EOF
+in_vm 'sudo nft list quota inet darban_quota_probe probe' | grep 'over 1 mbytes' >/dev/null
+in_vm 'sudo nft delete table inet darban_quota_probe'
+echo "PASS: after the reboot the management interface answers (checked $answered s after the boot), and nft_quota works on kernel $after."
+if [[ -n ${GITHUB_STEP_SUMMARY:-} ]]; then
+    printf '**Reboot, Ubuntu %s:** the management interface answered, checked %s s after the boot; nft_quota works on kernel %s.\n\n' \
+        "$version" "$answered" "$after" >>"$GITHUB_STEP_SUMMARY"
+fi
 
 openvpn --config "$WORK/client.ovpn" --route-nopull --dev tun9 --daemon --writepid "$CLIENT_PID" --log "$WORK/client.log" --verb 3
 for attempt in $(seq 1 30); do
