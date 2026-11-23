@@ -538,7 +538,7 @@ darban_snap_install_certbot() {
         return 0
     fi
     # Up to 2026-11-23, 302 CI jobs showed no case where this second try helped; it stays until the runs say.
-    # The CI summary shows its lines from now on.
+    # The CI summary shows its lines since #150.
     for attempt in 1 2; do
         rc=0
         timeout 600 snap install --classic certbot >/dev/null 2>&1 || rc=$?
