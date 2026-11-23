@@ -57,6 +57,12 @@ issue)
     grep 'darban-acme.timer runs acme.sh twice a day' "$LOG/acme-details.log" >/dev/null
     echo 'PASS: Diagnostics and Details say acme.sh got it, and how it renews.'
 
+    # The timer's own service runs as its unit says, with NoNewPrivileges and PrivateTmp.
+    systemctl start darban-acme.service
+    [[ $(systemctl show -p Result --value darban-acme.service) == success ]]
+    cmp -s /etc/darban/link-cert.pem "$ACME_HOME/links/fullchain.pem"
+    echo 'PASS: the renewal service of acme.sh runs as its unit says.'
+
     # A renewal by acme.sh reaches the links through the reload command the tool set.
     before=$(openssl x509 -in /etc/darban/link-cert.pem -noout -fingerprint -sha256)
     "$ACME_BIN" --home "$ACME_HOME/acme.sh-3.1.6" --config-home "$ACME_HOME/data" --renew -d "$HOST" --ecc --force \

@@ -222,35 +222,46 @@ acme_run() {
     shift
     "$ACME_BIN" --home "$ACME_PROGRAM_DIR" --config-home "$data" --log "$data/acme.sh.log" --no-color "$@"
 }
+acme_install_undo() {
+    # acme_install_undo <download folder> <1 when this install created $ACME_HOME>: a failed install leaves nothing,
+    # not even an empty folder that Remove everything would not know of.
+    rm -rf -- "$1"
+    if [[ $2 == 1 ]]; then rmdir -- "$ACME_HOME" 2>/dev/null || true; fi
+    return 1
+}
 acme_install() {
     # The pinned acme.sh, from its release on GitHub. It is put in place only when the tarball has the SHA-256
     # written in config.sh, and recorded for Remove everything once it is there. Nothing is run before the check.
-    local temp sum
+    local temp sum created=0
     [[ -x $ACME_BIN ]] && return 0
+    [[ -d $ACME_HOME ]] || created=1
     install -d -m 700 "$ACME_HOME" || { warn "Could not create $ACME_HOME for acme.sh."; return 1; }
-    temp=$(mktemp -d "$ACME_HOME/.download.XXXXXXXX") || return 1
+    temp=$(mktemp -d "$ACME_HOME/.download.XXXXXXXX") || { acme_install_undo '' "$created"; return 1; }
     info "Downloading acme.sh $ACME_VERSION from its release on GitHub${S_ELL}"
     if ! curl -fsSL --proto '=https' --proto-redir '=https' --max-time 120 --retry 2 -o "$temp/acme.sh.tar.gz" "$ACME_URL" 2>/dev/null; then
         warn "Could not download acme.sh $ACME_VERSION from $ACME_URL."
-        rm -rf -- "$temp"
+        acme_install_undo "$temp" "$created"
         return 1
     fi
     sum=$(sha256sum "$temp/acme.sh.tar.gz" 2>/dev/null | awk '{print $1}')
     if [[ $sum != "$ACME_SHA256" ]]; then
         warn "The acme.sh download does not have the SHA-256 this tool knows for version $ACME_VERSION, so it was not installed and nothing of it ran."
+        # GitHub makes the tarball of a tag itself, and has changed such files before: a new version of this tool
+        # knows the new value, and snap gives certbot instead.
+        info "This can be a change on GitHub's side, not an attack. Update Darban (Setup ${S_CRUMB} Check for updates), or install snap so certbot from the Certbot project can be used."
         audit "acme.sh $ACME_VERSION refused: SHA-256 ${sum:-unknown}, expected $ACME_SHA256"
-        rm -rf -- "$temp"
+        acme_install_undo "$temp" "$created"
         return 1
     fi
     if ! tar -xzf "$temp/acme.sh.tar.gz" -C "$temp" --no-same-owner 2>/dev/null || [[ ! -f $temp/acme.sh-$ACME_VERSION/acme.sh ]]; then
         warn "The acme.sh $ACME_VERSION tarball could not be unpacked."
-        rm -rf -- "$temp"
+        acme_install_undo "$temp" "$created"
         return 1
     fi
     chmod 700 "$temp/acme.sh-$ACME_VERSION/acme.sh"
     rm -rf -- "$ACME_PROGRAM_DIR"
     if ! mv -T -- "$temp/acme.sh-$ACME_VERSION" "$ACME_PROGRAM_DIR"; then
-        rm -rf -- "$temp"
+        acme_install_undo "$temp" "$created"
         return 1
     fi
     rm -rf -- "$temp"
@@ -288,7 +299,7 @@ acme_timer_install() {
     # does nothing.
     local service=$UNIT_DIR/$ACME_UNIT.service timer=$UNIT_DIR/$ACME_UNIT.timer
     install -d -m 755 "$UNIT_DIR" || return 1
-    printf '[Unit]\nDescription=Darban OVPN: acme.sh renews the link certificate when it is due\nAfter=network-online.target\nWants=network-online.target\n\n[Service]\nType=oneshot\nExecStart=%s --cron --home %s --config-home %s --log %s/acme.sh.log --no-color\n' \
+    printf '[Unit]\nDescription=Darban OVPN: acme.sh renews the link certificate when it is due\nAfter=network-online.target\nWants=network-online.target\n\n[Service]\nType=oneshot\nNoNewPrivileges=true\nPrivateTmp=true\nExecStart=%s --cron --home %s --config-home %s --log %s/acme.sh.log --no-color\n' \
         "$ACME_BIN" "$ACME_PROGRAM_DIR" "$ACME_DATA" "$ACME_DATA" >"$service.new" \
         && printf '[Unit]\nDescription=Darban OVPN: acme.sh renewal of the link certificate, twice a day\n\n[Timer]\nOnCalendar=*-*-* 00/12:00:00\nRandomizedDelaySec=1h\nPersistent=true\n\n[Install]\nWantedBy=timers.target\n' >"$timer.new" \
         && mv -f -- "$service.new" "$service" && mv -f -- "$timer.new" "$timer" || { rm -f -- "$service.new" "$timer.new"; return 1; }
