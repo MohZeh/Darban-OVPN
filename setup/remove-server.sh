@@ -158,6 +158,15 @@ if [[ -e /etc/unbound/unbound.conf.d/darban.conf || -e /etc/systemd/system/unbou
     systemctl try-restart unbound.service >/dev/null 2>&1 || true
 fi
 
+# port-share: the folder OpenVPN wrote its files in, its tmpfiles entry, and the link service kept up for it.
+if [[ -e /etc/tmpfiles.d/darban-port-share.conf || -e /etc/systemd/system/darban-links.service.d/darban-port-share.conf ]]; then
+    systemctl disable --now darban-links.service >/dev/null 2>&1 || true
+    try rm -f -- /etc/tmpfiles.d/darban-port-share.conf /etc/systemd/system/darban-links.service.d/darban-port-share.conf
+    rmdir /etc/systemd/system/darban-links.service.d 2>/dev/null || true
+    try rm -rf -- /run/darban-port-share
+    systemctl daemon-reload >/dev/null 2>&1 || true
+fi
+
 # The certificates for temporary links that this tool got, then the certbot it installed, if any. A kept
 # certificate stays in /etc/letsencrypt with the record of what was issued, and a new install uses it again:
 # Let's Encrypt gives 5 a week for one address, and deleting one does not give it back.

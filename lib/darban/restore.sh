@@ -234,7 +234,7 @@ restore_commit() {
     # Started, not enabled: a crash before the commit leaves OpenVPN off after a reboot. The cleanup enables it.
     systemctl start "$DARBAN_UNIT" >/dev/null 2>&1 || true
     restore_point started
-    if ! wait_for_port "$(server_port 2>/dev/null || echo 0)"; then RESTORE_WHY='OpenVPN did not come back with the restored files'; return 1; fi
+    if ! wait_for_listeners; then RESTORE_WHY='OpenVPN did not come back with the restored files'; return 1; fi
     journal_write state=committed || return 1
     restore_point committed
 }
@@ -284,6 +284,9 @@ restore_cleanup() {
     if [[ ! -e $dest/.restored ]]; then date -u +%s >"$dest/.restored" || return 1; restore_point restored; fi
     if [[ $(journal_value unverified) == yes ]]; then printf '%s\n' "$(journal_value created)" >"$RESTORE_WARN" || return 1; fi
     RESTORE_NAT_FAILED=$([[ $(journal_value nat) == failed ]] && echo 1 || echo 0)
+    # A port-share line is never restored: what turning it on set up on this server goes too, or the link service
+    # would start at boot behind a port nothing shares.
+    port_share_leftovers_clear || true
     audit "CA restored from the backup of $(journal_value created)"
     rm -rf -- "$stage"
     restore_point cleaned
@@ -584,7 +587,7 @@ restore_from() {
     if [[ -n $crl_state ]]; then info "$crl_state"; fi
     if [[ -n $RESTORE_REVOKED ]]; then info "The backup has these revoked, and they stay revoked: $(safe_text "$RESTORE_REVOKED")."; fi
     while IFS= read -r line; do [[ -z $line ]] || info "${line#NOTE: }"; done <"$stage/conf.notes"
-    info 'server.conf is written again from the template of this tool, with its port, network, routing, DNS, ciphers, keepalive and log detail.'
+    info 'server.conf is written again from the template of this tool, with its listeners (UDP, TCP or both), network, routing, DNS, ciphers, keepalive and log detail.'
     if [[ -e $DARBAN_PKI ]]; then info "The CA, clients and server files of this server are replaced. What they are now is kept in $PKI_BACKUP_DIR for $PRE_RESTORE_KEEP_DAYS days, then deleted."; fi
     info 'OpenVPN stays off from the first change until the end, even across a reboot.'
     if valid_domain "$restored_host" && mine=$(address_elsewhere "$restored_host"); then

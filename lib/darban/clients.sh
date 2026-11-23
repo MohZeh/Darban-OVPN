@@ -199,14 +199,62 @@ pick_client() {
 }
 
 # ---------- profiles and downloads ----------
+server_endpoints() {
+    # server_endpoints <host>: where a new profile points, one "HOST PORT udp|tcp" a line, in the order a client
+    # tries them: UDP first. The only place the remotes of a profile come from, so a list of endpoints can take its
+    # place later.
+    local host=$1 listeners proto port
+    listeners=$(server_listeners) || return 1
+    while read -r proto port; do
+        printf '%s %s %s\n' "$host" "$port" "$proto"
+    done <<<"$listeners"
+}
+profile_transport() {
+    # profile_transport <endpoints>: the lines of a profile that say where and how it connects. One endpoint: its
+    # proto and one remote. More: a remote each, with its protocol, and 5 seconds for each before the next.
+    # explicit-exit-notify with any UDP remote, so a client that stops ends its session at once; TCP has its own end.
+    # Nothing but checked endpoints reaches the file: no newline, no control character.
+    local endpoints=$1 count host port proto udp=0 line
+    count=$(grep -c . <<<"$endpoints")
+    (( count >= 1 )) || return 1
+    while IFS= read -r line; do
+        [[ $line =~ $ENDPOINT_RE ]] || return 1
+        read -r host port proto <<<"$line"
+        valid_endpoint "$host" && (( 10#$port >= 1 && 10#$port <= 65535 )) || return 1
+        if [[ $proto == udp ]]; then udp=1; fi
+        if (( count == 1 )); then
+            printf 'proto %s4\nremote %s %s\n' "$proto" "$host" "$((10#$port))" || return 1
+        else
+            printf 'remote %s %s %s4\n' "$host" "$((10#$port))" "$proto" || return 1
+        fi
+    done <<<"$endpoints"
+    if (( count > 1 )); then printf 'server-poll-timeout 5\n' || return 1; fi
+    if (( udp )); then printf 'explicit-exit-notify 1\n' || return 1; fi
+}
+endpoints_record() {
+    # endpoints_record <endpoints>: the "remote" field of a share record, "remote HOST PORT udp|tcp" joined by ";".
+    awk 'NF == 3 {printf "%sremote %s %s %s", (n++ ? ";" : ""), $1, $2, $3} END {print ""}' <<<"$1"
+}
+record_endpoints() {
+    # record_endpoints <remote field>: the endpoints of a record. A record from before TCP has "remote HOST PORT",
+    # which is UDP.
+    awk -v RS=';' '{sub(/\n$/, "")} $1 == "remote" && (NF == 3 || NF == 4) {
+            p = (NF == 4 ? $4 : "udp"); sub(/4$/, "", p); sub(/-client$/, "", p)
+            if (p == "udp" || p == "tcp") print $2, $3 + 0, p }' <<<"$1"
+}
+endpoints_label() {
+    # endpoints_label <endpoints>: "host:1543/UDP", or "host:1543/UDP + 443/TCP".
+    awk '{printf "%s%s%s/%s", (NR > 1 ? " + " : ""), ($1 != h ? $1 ":" : ""), $2, toupper($3); h = $1} END {print ""}' <<<"$1"
+}
 assemble_profile() {
-    # Every step is checked explicitly: callers use this from an if, where errexit does not apply.
-    local name=$1 host=$2 port=$3 ciphers=$4 share=${5:-}
+    # assemble_profile <name> <endpoints> <ciphers> [share]. Every step is checked explicitly: callers use this from
+    # an if, where errexit does not apply.
+    local name=$1 endpoints=$2 ciphers=$3 share=${4:-} transport
+    transport=$(profile_transport "$endpoints") || return 1
     cat <<EOF || return 1
 client
 dev tun
-proto udp4
-remote $host $port
+$transport
 resolv-retry infinite
 nobind
 remote-cert-tls server
@@ -248,11 +296,11 @@ profile_complete() {
 write_profile() {
     # write_profile <name> [replace]: under the CA lock. The file is a new share, kept on the server until its time
     # is up or the client connects, and its record says so.
-    local name=$1 replace=${2:-no} host port ciphers outfile tmp share serial uv='' old=''
+    local name=$1 replace=${2:-no} host endpoints ciphers outfile tmp share serial uv='' old=''
     client_valid "$name" || { warn 'The client certificate/key is missing, expired, server-capable or does not match.'; return 1; }
     profile_preconditions || return 1
     host=$(domain)
-    port=$(server_port) || return 1
+    endpoints=$(server_endpoints "$host") || return 1
     ciphers=$(server_data_ciphers) || return 1
     outfile="$OUT_DIR/$name.ovpn"
     if [[ -e $outfile && $replace != yes ]]; then warn "Profile exists and will not be replaced: $outfile"; return 1; fi
@@ -262,7 +310,7 @@ write_profile() {
     if [[ $SHARE_ID_IN_PROFILE == yes ]]; then uv=$share; fi
     tmp=$(mktemp "$OUT_DIR/.profile.XXXXXXXX") || return 1
     darban_tmp_register "$tmp"
-    if ! assemble_profile "$name" "$host" "$port" "$ciphers" "$uv" >"$tmp" || ! profile_complete "$tmp"; then
+    if ! assemble_profile "$name" "$endpoints" "$ciphers" "$uv" >"$tmp" || ! profile_complete "$tmp"; then
         rm -f -- "$tmp"; warn 'Could not assemble profile.'; return 1
     fi
     chmod 600 "$tmp" || return 1
@@ -273,7 +321,7 @@ write_profile() {
     # A file written again is a new share: the copy of the one before ends with it.
     home_copy_end_share "$old" 'shared again' || true
     home_copy_report
-    share_record_write "$name" "$share" "$serial" "remote $host $port" || { warn "Could not record when $outfile is deleted; the five-minute check gives it $(hours_label "$(link_hours)")."; return 0; }
+    share_record_write "$name" "$share" "$serial" "$(endpoints_record "$endpoints")" || { warn "Could not record when $outfile is deleted; the five-minute check gives it $(hours_label "$(link_hours)")."; return 0; }
     expire_schedule || warn "The timer that deletes $outfile on time could not be set; the five-minute check deletes it once its time is up."
 }
 security_note() {
@@ -282,24 +330,25 @@ security_note() {
 download_panel() {
     # download_panel <file> <title> [windows|unix|sftp]. Commands are printed uncolored, unindented and one
     # per line, so copying them from the terminal never picks up escape codes or frame characters.
-    local file=$1 title=$2 only=${3:-all} name filename current_remote expected cert_exp fetch=${DOWNLOAD_FILE:-$1}
+    local file=$1 title=$2 only=${3:-all} name filename current_remote='' expected cert_exp fetch=${DOWNLOAD_FILE:-$1}
     filename=${file##*/}
     name=${filename%.ovpn}
     ok "$title"
     hr
     # From the record of the file, never from the file itself: a read is what "file read" shows. Without a record,
     # where it points is not known.
-    if share_record_read "$file"; then current_remote=$SR_REMOTE; else current_remote=''; fi
+    if share_record_read "$file"; then current_remote=$(record_endpoints "$SR_REMOTE"); fi
     kv File "$fetch"
     if [[ -n $current_remote ]]; then
-        kv Server "$(awk '{print $2 ":" $3 "/UDP"}' <<<"$current_remote")"
+        kv Server "$(endpoints_label "$current_remote")"
     else
         kv Server unknown
     fi
     if cert_exp=$(cert_end_epoch "$DARBAN_PKI/issued/$name.crt"); then kv 'Valid to' "$(describe_expiry "$cert_exp")"; fi
-    expected="remote $(domain) $(server_port 2>/dev/null || printf '?')"
+    # Every remote is compared, in order: a file that lacks the TCP remote of a server with both is old too.
+    expected=$(server_endpoints "$(domain)" 2>/dev/null) || expected=''
     if [[ -n $current_remote && $current_remote != "$expected" ]]; then
-        warn "This file points to ${current_remote#remote } but the server is now ${expected#remote }. Share it again (menu 5) first."
+        warn "This file points to $(endpoints_label "$current_remote") but the server is now $(if [[ -n $expected ]]; then endpoints_label "$expected"; else printf 'in a form this tool cannot read'; fi). Share it again (menu 5) first."
     fi
     say
     if [[ -z $DOWNLOAD_SSH_HOST ]]; then

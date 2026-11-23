@@ -1,13 +1,15 @@
 [Unit]
 Description=Darban OVPN temporary profile links
-# Started only while a link exists; the program ends by itself when the last one is gone.
+# Started only while a link exists; the program ends by itself when the last one is gone. While port-share is on,
+# it listens on 127.0.0.1 only, OpenVPN hands it what is not OpenVPN on its TCP port, and it stays up: darban enables
+# it then, and a drop-in starts it again when it fails. LINK_EXTRA holds those arguments, and nothing otherwise.
 
 [Service]
 Type=simple
 User=root
 Group=root
 EnvironmentFile=/etc/darban/links.env
-ExecStart=/usr/bin/python3 -I /usr/local/lib/darban/linkd.py --dir /run/darban-links --cert /etc/darban/link-cert.pem --key /etc/darban/link-key.pem --host ${LINK_HOST} --port ${LINK_PORT}
+ExecStart=/usr/bin/python3 -I /usr/local/lib/darban/linkd.py --dir /run/darban-links --cert /etc/darban/link-cert.pem --key /etc/darban/link-key.pem --host ${LINK_HOST} --port ${LINK_PORT} $LINK_EXTRA
 # A new certificate reaches new connections; a download in progress finishes.
 ExecReload=/bin/kill -HUP $MAINPID
 Restart=no
@@ -42,3 +44,6 @@ SystemCallArchitectures=native
 # Only the system calls of an ordinary service. One outside them fails with EPERM instead of killing the service.
 SystemCallFilter=@system-service
 SystemCallErrorNumber=EPERM
+
+[Install]
+WantedBy=multi-user.target

@@ -9,7 +9,7 @@ set_domain() {
     kv Current "${old:-not set}"
     say
     info 'Only new or shared-again .ovpn files use this address.'
-    info 'Use a DNS-only record (no Cloudflare orange-cloud proxy) for this UDP service.'
+    info 'Use a DNS-only record (no Cloudflare orange-cloud proxy) for this VPN service.'
     say
     prompt_valid 'New hostname or IP, e.g. vpn.example.com (Enter = cancel): ' valid_endpoint \
         'Enter a hostname such as vpn.example.com, or an IPv4 address such as 203.0.113.10.' || return 0
@@ -97,11 +97,19 @@ set_link_hours() {
 set_link_port() {
     kv Current "$(link_port_summary)"
     local free='' candidate
+    if port_share_on; then
+        info "Links use TCP $(listener_port tcp), the port OpenVPN shares with the link page. To give links a port of their own, turn sharing off first (Settings $S_CRUMB 2 $S_CRUMB 5)."
+        return 0
+    fi
     info 'The TCP port of the link page. It must be open in your provider firewall, and no other program may use it.'
     for candidate in $LINK_PORT_CHOICES; do tcp_port_taken "$candidate" || free+="${free:+, }$candidate"; done
     if [[ -n $free ]]; then info "Free now: $free"; fi
     say
     prompt_valid 'New port, 1 to 65535 (Enter = cancel): ' valid_link_port 'Enter a number from 1 to 65535.' || return 0
+    if [[ $((10#$REPLY)) == "$(listener_port tcp 2>/dev/null)" ]]; then
+        warn "TCP $((10#$REPLY)) is the OpenVPN TCP port (Settings $S_CRUMB 2). Nothing changed."
+        return 1
+    fi
     if tcp_port_taken "$((10#$REPLY))"; then
         warn "TCP $((10#$REPLY)) is already used by $(safe_text "$(tcp_port_program "$((10#$REPLY))")"). Nothing changed."
         return 1
@@ -112,7 +120,7 @@ set_link_port() {
     saved "TCP $LINK_PORT" 'from the next link'
 }
 restart_openvpn() {
-    local state port rc=0
+    local state listeners rc=0
     state=$(systemctl is-active "$DARBAN_UNIT" 2>/dev/null || true)
     kv Service "${state:-unknown}"
     say
@@ -122,27 +130,27 @@ restart_openvpn() {
     confirm_choice 'Restart OpenVPN now? This drops ALL connected VPN users for a few seconds.' 'No, do not restart' 'Restart OpenVPN' caution restart || { cancelled; return 0; }
     ca_lock || return 1
     info "Restarting OpenVPN${S_ELL}"
-    port=$(server_port 2>/dev/null) || port=''
+    listeners=$(listeners_label 2>/dev/null) || listeners=''
     critical_begin
     systemctl restart "$DARBAN_UNIT" || rc=$?
     if (( rc == 0 )); then
-        if [[ -n $port ]]; then
-            wait_for_port "$port" || rc=1
+        if [[ -n $listeners ]]; then
+            wait_for_listeners || rc=1
         else
             systemctl is-active --quiet "$DARBAN_UNIT" || rc=1
         fi
     fi
     critical_end
     if (( rc != 0 )); then
-        urgent "OpenVPN did not come back up${port:+ on UDP $port}. Check: journalctl -u $DARBAN_UNIT -n 50 --no-pager"
+        urgent "OpenVPN did not come back up${listeners:+ on $listeners}. Check: journalctl -u $DARBAN_UNIT -n 50 --no-pager"
         audit 'OpenVPN restart from the menu FAILED'
         return 1
     fi
     audit 'OpenVPN restarted from the menu'
-    if [[ -n $port ]]; then
-        ok "OpenVPN is running and listening on UDP $port."
+    if [[ -n $listeners ]]; then
+        ok "OpenVPN is running and listening on $listeners."
     else
         ok 'OpenVPN is running.'
-        warn 'Could not read a single port from server.conf, so the UDP listener was not checked.'
+        warn 'server.conf has no listener form this tool knows, so the listeners were not checked.'
     fi
 }

@@ -6,7 +6,7 @@
 set -euo pipefail
 SRC=$1; E=$2
 rm -rf "$E"; mkdir -p "$E"
-mkdir -p "$E/pki/issued" "$E/pki/private" "$E/server" "$E/clients" "$E/cfg" "$E/lib" "$E/bin" "$E/run"
+mkdir -p "$E/pki/issued" "$E/pki/private" "$E/server" "$E/clients" "$E/cfg" "$E/lib" "$E/bin" "$E/run" "$E/tmpfiles"
 P=$E/pki
 cd "$P"
 : > index.txt; echo 1000 > crlnumber; echo 01 > serial
@@ -83,7 +83,9 @@ if [[ $unit == openvpn-server@* ]]; then
       *" stop "*) if [[ -n ${FAKE_STOP_FAILS:-} ]]; then exit 1; fi; : > "$state/$unit.stopped" ;;
       # FAKE_ENABLE_FAILS: enabling it at boot fails, as systemd can refuse it.
       *" enable "*) if [[ -n ${FAKE_ENABLE_FAILS:-} && " $* " != *" --now "* ]]; then exit 1; fi; rm -f "$state/$unit.disabled"; if [[ " $* " == *" --now "* ]]; then if [[ -n ${FAKE_START_FAILS:-} ]]; then exit 1; fi; rm -f "$state/$unit.stopped"; fi ;;
-      *" start "*|*" restart "*) if [[ -n ${FAKE_START_FAILS:-} ]]; then exit 1; fi; [[ -n ${FAIL_RESTART:-} ]] || rm -f "$state/$unit.stopped" ;;
+      # FAKE_TAKE_ON_RESTART: another program takes that port as OpenVPN restarts, as one starting at that moment.
+      *" start "*|*" restart "*) if [[ -n ${FAKE_START_FAILS:-} ]]; then exit 1; fi; [[ -n ${FAIL_RESTART:-} ]] || rm -f "$state/$unit.stopped"
+        if [[ -n ${FAKE_TAKE_ON_RESTART:-} ]]; then echo "$FAKE_TAKE_ON_RESTART" >>"${STUB_LOG%/*}/taken-ports"; fi ;;
       *" is-active "*) if [[ -e $state/$unit.stopped ]]; then ((q)) || echo inactive; exit 3; fi ;;
       *" is-enabled "*) if [[ -e $state/$unit.disabled ]]; then echo disabled; exit 1; fi ;;
     esac
@@ -95,16 +97,28 @@ case " $* " in
   *" is-active "*darban-links*) ((q)) || echo inactive; exit 3 ;;
   *" is-active "*) if [[ -n ${FAKE_FAILED:-} && " $* " == *" $FAKE_FAILED "* ]]; then ((q)) || echo failed; exit 3; fi; ((q)) || echo active; exit 0 ;;
   *" is-enabled "*) echo enabled; exit 0 ;;
-  *" show "*) [[ $* == *Result* ]] && echo success; [[ $* == *LimitNPROC* ]] && echo "${FAKE_LIMITNPROC:-infinity}"; [[ $* == *TasksMax* ]] && echo 20; exit 0 ;;
+  *" show "*) [[ $* == *Result* ]] && echo success; [[ $* == *LimitNPROC* ]] && echo "${FAKE_LIMITNPROC:-infinity}"; [[ $* == *TasksMax* ]] && echo 20; [[ $* == *MainPID* && $unit == openvpn-server@* ]] && echo "${FAKE_MAINPID:-1}"; exit 0 ;;
 esac
 exit 0
 STUB
 cat > "$E/bin/ss" <<'STUB'
 #!/usr/bin/env bash
-# TCP questions go to the real ss: the link service of a test really listens, and must be seen as itself.
-for arg in "$@"; do [[ $arg =~ ^-[A-Za-z]*t ]] && exec /usr/bin/ss "$@"; done
-last=${*: -1}; want=${last##*:}; cur=$(awk '$1=="port"{print $2}' "$SERVER_CONF")
-[[ $want == "$cur" ]] && echo "UNCONN 0 0 0.0.0.0:$want 0.0.0.0:*"
+# OpenVPN "listens" where server.conf says: "port" with its "proto", or each "local * N udp|tcp". Other TCP questions
+# go to the real ss: the link service of a test really listens, and must be seen as itself. FAKE_BUSY_UDP and
+# FAKE_BUSY_TCP name ports another program holds; a TCP one of them wins over OpenVPN, as a port taken before it
+# restarts. OpenVPN is pid 1, the MainPID the systemctl stand-in gives its unit.
+last=${*: -1}; want=${last##*:}; tcp=0
+taken=$(cat "${STUB_LOG%/*}/taken-ports" 2>/dev/null || true)
+FAKE_BUSY_TCP="${FAKE_BUSY_TCP:-} $taken" FAKE_BUSY_UDP="${FAKE_BUSY_UDP:-} $taken"
+for arg in "$@"; do [[ $arg =~ ^-[A-Za-z]*t ]] && tcp=1; done
+listening=$(awk '$1=="port"{p=$2} $1=="proto"{pr=$2} $1=="local" && NF==4 {print $4, $3} END {if (p != "") print (pr ~ /^tcp/ ? "tcp" : "udp"), p}' "$SERVER_CONF" 2>/dev/null)
+if (( tcp )); then
+    for p in ${FAKE_BUSY_TCP:-}; do if [[ $p == "$want" ]]; then echo "LISTEN 0 32 0.0.0.0:$want 0.0.0.0:* users:((\"nginx\",pid=2,fd=6))"; exit 0; fi; done
+    if grep -qx "tcp $want" <<<"$listening"; then echo "LISTEN 0 32 0.0.0.0:$want 0.0.0.0:* users:((\"openvpn\",pid=1,fd=5))"; exit 0; fi
+    exec /usr/bin/ss "$@"
+fi
+for p in ${FAKE_BUSY_UDP:-}; do if [[ $p == "$want" ]]; then echo "UNCONN 0 0 0.0.0.0:$want 0.0.0.0:* users:((\"dnsmasq\",pid=2,fd=6))"; exit 0; fi; done
+if grep -qx "udp $want" <<<"$listening"; then echo "UNCONN 0 0 0.0.0.0:$want 0.0.0.0:* users:((\"openvpn\",pid=1,fd=5))"; exit 0; fi
 exit 0
 STUB
 # FLOCK_HOOK runs what another session would do while this one waits for the lock. FLOCK_FAIL names the exact
@@ -117,6 +131,13 @@ if [[ -n ${FLOCK_HOOK:-} && $1 != -u ]]; then bash -c "$FLOCK_HOOK" >/dev/null 2
 exit 0
 STUB
 printf '#!/usr/bin/env bash\nexit 0\n' > "$E/bin/chown"
+# systemd-tmpfiles makes the folder of each "d" line of the files it is given.
+cat > "$E/bin/systemd-tmpfiles" <<'STUB'
+#!/usr/bin/env bash
+echo "systemd-tmpfiles $*" >> "${STUB_LOG:-/dev/null}"
+for file in "$@"; do [[ -f $file ]] && awk '$1 == "d" {print $2}' "$file" | while read -r dir; do mkdir -p "$dir"; done; done
+exit 0
+STUB
 # runuser runs the command as the user running the tests; FAKE_RUNUSER_DENY: that user is refused, as nobody is
 # by a file only root can read.
 cat > "$E/bin/runuser" <<'STUB'
@@ -222,6 +243,7 @@ sed -e "s#^OUT_DIR=.*#OUT_DIR=$E/clients#" -e "s#^LINK_DIR=.*#LINK_DIR=$E/links#
     -e "s#^UNBOUND_RPZ=.*#UNBOUND_RPZ=$E/unbound-zone/darban.rpz#" -e "s#^NAMES_DNS_PORT=.*#NAMES_DNS_PORT=15353#" \
     -e "s#^EVENT_SCRIPT=.*#EVENT_SCRIPT=$E/libexec/darban-ovpn-event#" -e "s#^EVENT_DIR=.*#EVENT_DIR=$E/events#" \
     -e "s#^LEDGER_DIR=.*#LEDGER_DIR=$E/varlib/clients#" \
+    -e "s#^PORT_SHARE_DIR=.*#PORT_SHARE_DIR=$E/run/darban-port-share#" -e "s#^PORT_SHARE_TMPFILES=.*#PORT_SHARE_TMPFILES=$E/tmpfiles/darban-port-share.conf#" \
     -e "s#^PKI_BACKUP_DIR=.*#PKI_BACKUP_DIR=$E/pki-backups#" -e "s#^RESTORE_WARN=.*#RESTORE_WARN=$E/varlib/restore-unverified#" \
     -e 's#^EVENT_MAX=.*#EVENT_MAX=${TEST_EVENT_MAX:-500}#' \
     "$SRC/lib/darban/paths.sh" > "$E/lib/modules/paths.sh"

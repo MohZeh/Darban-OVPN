@@ -1096,7 +1096,8 @@ case " $* " in
 esac
 exit 0
 STUB
-    out=$(menu '7\n2\n21194\n21194\n0\n0\n')
+    # Settings > 2 > 4: a new UDP port, confirmed; every restart fails, so the rollback cannot bring it back.
+    out=$(menu '7\n2\n4\n21194\n2\n0\n0\n')
     lacks 'it never claims the port did not change' 'The port was NOT changed' "$out"
     has 'it says the rollback did not finish' 'The rollback did not finish' "$out"
 }
@@ -1413,7 +1414,7 @@ test_advanced_settings_are_applied_and_rolled_back() {
     has 'and the mark is explained' '* restarts OpenVPN' "$out"
     out=$(menu '7\n0\n0\n')
     has 'Settings says what it holds' 'What clients connect to, and how profiles are shared' "$out"
-    has 'the port is marked as a restart' 'OpenVPN UDP port *' "$out"
+    has 'the protocol is marked as a restart' 'OpenVPN protocol *' "$out"
 
     before=$(cat "$SERVER_CONF")
     cp "$E/cfg/nat.nft" "$E/nat.before"
@@ -7268,6 +7269,333 @@ test_the_download_panel_never_reads_a_file_without_a_record() {
     has 'the panel is shown' 'Server' "$out"
     has 'where it points is not known without a record' 'unknown' "$out"
     [[ $(stat -c %X "$E/clients/alice.ovpn") == "$before" ]]; rc_is 'the file is not read' 0 "$?"
+}
+
+# ---------- T1: UDP only, TCP only, or both ----------
+in_manager() {
+    # in_manager <function> [argument]...: one function of the manager, with every module loaded and nothing started.
+    bash -c 'source <(sed "\$d" "$E/manager.sh"); set +eu; "$@"' _ "$@" 2>&1
+}
+with_listeners() {
+    # with_listeners <line>...: the fake server.conf with these listener lines in place of its own.
+    local temp=$E/conf.listeners
+    printf '%s\n' "$@" >"$temp"
+    awk '$1!="port" && $1!="proto" && $1!="local" && $1!="explicit-exit-notify" && $1!="port-share"' "$SERVER_CONF" >>"$temp"
+    mv -f "$temp" "$SERVER_CONF"
+}
+openvpn_says() {
+    # openvpn_says <version>: the stand-in of openvpn --version.
+    printf '#!/usr/bin/env bash\necho "OpenVPN %s x86_64-pc-linux-gnu [SSL (OpenSSL)] [DCO]"\n' "$1" >"$E/bin/openvpn"
+    chmod +x "$E/bin/openvpn"
+}
+ports_in_order() {
+    # ports_in_order <port>...: the random choices of shuf, one by one.
+    printf '#!/usr/bin/env bash\nIFS= read -r p < "%s" || exit 1; sed -i 1d "%s"; echo "$p"\n' "$E/shuf-seq" "$E/shuf-seq" >"$E/bin/shuf"
+    chmod +x "$E/bin/shuf"
+    printf '%s\n' "$@" >"$E/shuf-seq"
+}
+refuses_listeners() {
+    # refuses_listeners <what> <line>...: server_listeners fails on that shape, and prints nothing.
+    local what=$1 out rc
+    shift
+    with_listeners "$@"
+    out=$(in_manager server_listeners); rc=$?
+    rc_is "refused: $what" 1 "$rc"
+    [[ -z $out ]]; rc_is "and nothing is printed for it: $what" 0 "$?"
+}
+
+test_t1_server_listeners_forms() {
+    local out
+    [[ $(in_manager server_listeners) == 'udp 1194' ]]; rc_is 'port and proto udp4: UDP only' 0 "$?"
+    [[ $(in_manager server_mode) == udp ]]; rc_is 'its mode is udp' 0 "$?"
+    with_listeners 'port 443' 'proto tcp4-server'
+    [[ $(in_manager server_listeners) == 'tcp 443' ]]; rc_is 'port and proto tcp4-server: TCP only' 0 "$?"
+    [[ $(in_manager server_port) == 443 ]]; rc_is 'server_port gives the only port' 0 "$?"
+    with_listeners 'local * 443 tcp' 'local * 1543 udp'
+    out=$(in_manager server_listeners)
+    [[ $out == $'udp 1543\ntcp 443' ]]; rc_is 'two local lines: both, UDP first in any order' 0 "$?"
+    [[ $(in_manager server_mode) == both ]]; rc_is 'its mode is both' 0 "$?"
+    [[ $(in_manager server_port) == 1543 ]]; rc_is 'server_port gives the UDP port of both' 0 "$?"
+    [[ $(in_manager listeners_label) == 'UDP 1543 + TCP 443' ]]; rc_is 'the label names both' 0 "$?"
+    [[ $(in_manager endpoint_label vpn.example.com) == 'vpn.example.com:1543/UDP + 443/TCP' ]]; rc_is 'and the endpoint too' 0 "$?"
+    has 'Settings shows the protocol' 'OpenVPN protocol *       UDP 1543 + TCP 443' "$(menu '7\n0\n0\n')"
+    has 'the status line shows both' 'vpn.example.com:1543/UDP + 443/TCP' "$(menu '0\n')"
+
+    refuses_listeners 'two port lines' 'port 1194' 'port 1195' 'proto udp4'
+    refuses_listeners 'local with port' 'local * 1543 udp' 'local * 443 tcp' 'port 1194'
+    refuses_listeners 'local with proto' 'local * 1543 udp' 'local * 443 tcp' 'proto udp4'
+    refuses_listeners 'two UDP local lines' 'local * 1543 udp' 'local * 1544 udp'
+    refuses_listeners 'one local line' 'local * 1543 udp'
+    refuses_listeners 'a local address' 'local 0.0.0.0 1543 udp' 'local * 443 tcp'
+    refuses_listeners 'an unknown protocol' 'port 1194' 'proto sctp'
+    refuses_listeners 'proto udp without 4' 'port 1194' 'proto udp'
+    refuses_listeners 'a port out of range' 'port 70000' 'proto udp4'
+    refuses_listeners 'no proto' 'port 1194'
+    has 'Diagnostics name a form this tool does not know' 'no listener form this tool knows' "$(mgr status)"
+}
+
+test_t1_profiles_of_each_mode() {
+    local profile
+    with_listeners 'port 1194' 'proto udp4'
+    menu '1\nudpone\n0\n' >/dev/null
+    profile=$(cat "$E/clients/udpone.ovpn")
+    has 'UDP only: proto udp4 and one remote' $'proto udp4\nremote vpn.example.com 1194\n' "$profile"
+    has 'a UDP remote has explicit-exit-notify' 'explicit-exit-notify 1' "$profile"
+    lacks 'one remote needs no server-poll-timeout' 'server-poll-timeout' "$profile"
+    has 'its record keeps the remote with its protocol' 'remote=remote vpn.example.com 1194 udp' "$(cat "$E/clients/udpone.share")"
+
+    with_listeners 'port 443' 'proto tcp4-server'
+    menu '1\ntcpone\n0\n' >/dev/null
+    profile=$(cat "$E/clients/tcpone.ovpn")
+    has 'TCP only: proto tcp4 and one remote' $'proto tcp4\nremote vpn.example.com 443\n' "$profile"
+    lacks 'a TCP-only profile has no explicit-exit-notify' 'explicit-exit-notify' "$profile"
+    lacks 'nor server-poll-timeout' 'server-poll-timeout' "$profile"
+    has 'its record says TCP' 'remote=remote vpn.example.com 443 tcp' "$(cat "$E/clients/tcpone.share")"
+
+    with_listeners 'local * 1543 udp' 'local * 443 tcp'
+    menu '1\nbothone\n0\n' >/dev/null
+    profile=$(cat "$E/clients/bothone.ovpn")
+    has 'both: UDP first, then TCP, 5 seconds each' \
+        $'remote vpn.example.com 1543 udp4\nremote vpn.example.com 443 tcp4\nserver-poll-timeout 5\nexplicit-exit-notify 1\n' "$profile"
+    [[ $(grep -c '^proto ' "$E/clients/bothone.ovpn") == 0 ]]; rc_is 'both: no proto line of its own' 0 "$?"
+    has 'the record keeps every remote' 'remote=remote vpn.example.com 1543 udp;remote vpn.example.com 443 tcp' "$(cat "$E/clients/bothone.share")"
+
+    # Nothing but a checked endpoint reaches a profile: no newline, no carriage return, no other protocol.
+    in_manager profile_transport $'vpn.example.com\r 1194 udp' >/dev/null; rc_is 'a carriage return is refused' 1 "$?"
+    in_manager profile_transport $'vpn.example.com 1194 udp\nbad;host 1 tcp' >/dev/null; rc_is 'a bad host is refused' 1 "$?"
+    in_manager profile_transport 'vpn.example.com 1194 sctp' >/dev/null; rc_is 'an unknown protocol is refused' 1 "$?"
+}
+
+test_t1_old_and_new_share_records() {
+    local out
+    [[ $(in_manager record_endpoints 'remote vpn.example.com 1194') == 'vpn.example.com 1194 udp' ]]
+    rc_is 'a record from before TCP reads as UDP' 0 "$?"
+    [[ $(in_manager record_endpoints 'remote h.example 1543 udp;remote h.example 443 tcp') == $'h.example 1543 udp\nh.example 443 tcp' ]]
+    rc_is 'a new record gives every remote, in order' 0 "$?"
+    [[ $(in_manager endpoints_label $'h.example 1543 udp\nh.example 443 tcp') == 'h.example:1543/UDP + 443/TCP' ]]
+    rc_is 'the download panel shows HOST:N/UDP + M/TCP' 0 "$?"
+    menu '1\nbob\n0\n' >/dev/null
+    has 'a profile of today points where the server is' 'vpn.example.com:1194/UDP' "$(menu '6\n1\n1\n0\n')"
+    lacks 'and is not called old' 'This file points to' "$(menu '6\n1\n1\n0\n')"
+    with_listeners 'local * 1194 udp' 'local * 443 tcp'
+    out=$(menu '6\n1\n1\n0\n')
+    has 'a UDP profile of a server with both now is old: every remote is compared' \
+        'This file points to vpn.example.com:1194/UDP but the server is now vpn.example.com:1194/UDP + 443/TCP' "$out"
+    sed -i 's/^remote=.*/remote=remote vpn.example.com 1194/' "$E/clients/bob.share"
+    with_listeners 'port 1194' 'proto udp4'
+    lacks 'an old record without a protocol matches a UDP server' 'This file points to' "$(menu '6\n1\n1\n0\n')"
+}
+
+test_t1_tcp_port_rule() {
+    local out
+    ports_in_order 1194 1500 1600 1700
+    [[ $(in_manager darban_free_port tcp 1600 1500) == 1700 ]]
+    rc_is 'never 1194, nor a port to avoid: the link port and the UDP port' 0 "$?"
+    ports_in_order 1300 1301
+    [[ $(FAKE_BUSY_TCP=1300 in_manager darban_free_port tcp) == 1301 ]]; rc_is 'never a port taken on TCP' 0 "$?"
+    ports_in_order 1300
+    [[ $(FAKE_BUSY_UDP=1300 in_manager darban_free_port tcp) == 1300 ]]; rc_is 'a port taken on UDP only is free on TCP' 0 "$?"
+    : >"$E/shuf-seq"
+    [[ $(FAKE_BUSY_TCP=1024 in_manager darban_free_port tcp 1025) == 1026 ]]; rc_is 'without shuf, the first usable one' 0 "$?"
+    rm -f "$E/bin/shuf"
+    out=$(in_manager darban_free_port tcp)
+    (( out >= 1024 && out <= 1999 && out != 1194 )); rc_is 'the real random choice is from 1024 to 1999, never 1194' 0 "$?"
+
+    [[ -z $(LINK_PORT='' in_manager tcp_port_problem 443) ]]; rc_is '443 is accepted' 0 "$?"
+    [[ -z $(in_manager tcp_port_problem 4443) ]]; rc_is 'a free port is accepted' 0 "$?"
+    [[ $(in_manager tcp_port_problem 1023) == range ]]; rc_is 'below 1024 and not 443 is refused' 0 "$?"
+    [[ $(FAKE_BUSY_TCP=4443 in_manager tcp_port_problem 4443) == busy ]]; rc_is 'a taken port is refused' 0 "$?"
+    printf 'LINK_PORT=9347\n' >>"$E/cfg/config"
+    [[ $(bash -c 'source <(sed "\$d" "$E/manager.sh"); set +eu; load_config; tcp_port_problem 9347' 2>&1) == link ]]
+    rc_is 'the link port is refused' 0 "$?"
+}
+
+test_t1_settings_protocol_screen() {
+    local out before
+    template_server
+    before=$(cat "$SERVER_CONF")
+    openvpn_says 2.7.9
+    out=$(menu '7\n2\n\n0\n0\n')
+    has 'the screen says TCP is for blocked UDP, not hiding' 'TCP is for networks that block UDP; it does not hide the VPN' "$out"
+    has 'UDP only is recommended' '1  UDP only (recommended)' "$out"
+    has 'both comes with its order' '3  Both: UDP first, TCP when UDP is blocked' "$out"
+    has 'a port can be changed' '4  Change a port' "$out"
+    lacks 'port sharing waits for TCP' 'Share the TCP port' "$out"
+    has 'Enter cancels' 'Cancelled; nothing changed' "$out"
+
+    # UDP only to TCP only: every profile stops working, so the default is No.
+    ports_in_order 1700
+    out=$(menu '7\n2\n2\n\n\n0\n0\n')
+    has 'the suggestion is a random free port' 'Press Enter to use 1700' "$out"
+    has '443 is named where only web ports are open' 'or 443 where only web ports are open' "$out"
+    has 'it warns that every profile stops' 'Every profile shared before uses UDP and STOPS WORKING' "$out"
+    has 'it names the port to open' 'Open TCP 1700 in your provider firewall BEFORE continuing' "$out"
+    [[ $before == "$(cat "$SERVER_CONF")" ]]; rc_is 'Enter at the question keeps server.conf' 0 "$?"
+    ports_in_order 1700
+    out=$(menu '7\n2\n2\n\n2\n0\n0\n')
+    has 'TCP only is applied' 'OpenVPN is listening on TCP 1700' "$out"
+    conf_has '^port 1700$' && conf_has '^proto tcp4-server$'; rc_is 'server.conf has port and proto tcp4-server' 0 "$?"
+    conf_has 'explicit-exit-notify'; rc_is 'TCP only has no explicit-exit-notify' 1 "$?"
+    has 'Settings shows it' 'OpenVPN protocol *       TCP 1700' "$(menu '7\n0\n0\n')"
+    has 'with TCP, port sharing is offered' 'Share the TCP port' "$(menu '7\n2\n\n0\n0\n')"
+
+    # Back to UDP only on the port of before: the file is the template again, byte for byte.
+    out=$(menu '7\n2\n1\n1194\n2\n0\n0\n')
+    has 'TCP to UDP warns too' 'Every profile shared before uses TCP and STOPS WORKING' "$out"
+    [[ $before == "$(cat "$SERVER_CONF")" ]]; rc_is 'UDP to TCP and back gives the same server.conf' 0 "$?"
+
+    # UDP only to both: old profiles still work; a TCP port the same as the UDP one is accepted.
+    out=$(menu '7\n2\n3\n1194\n2\n0\n0\n')
+    has 'old profiles still connect' 'Profiles shared before still connect over UDP' "$out"
+    has 'and sharing again gives the fallback' 'for the automatic fallback to TCP' "$out"
+    conf_has '^local \* 1194 udp$' && conf_has '^local \* 1194 tcp$'; rc_is 'both is two local lines' 0 "$?"
+    conf_has '^port \|^proto '; rc_is 'and no port or proto line' 1 "$?"
+    conf_has '^explicit-exit-notify 1$'; rc_is 'both keeps explicit-exit-notify for UDP' 0 "$?"
+
+    # Change a port asks which one with both; the link port and a taken port are refused, 443 is taken.
+    printf 'LINK_PORT=9347\n' >>"$E/cfg/config"
+    out=$(printf '7\n2\n4\n2\n9347\n5555\n443\n2\n0\n0\n' | FAKE_BUSY_TCP=5555 bash "$E/manager.sh" 2>&1)
+    # A prompt shows only in a terminal; the two ports it chooses between show everywhere.
+    has 'it asks which port: both are listed' '2  TCP 1194' "$out"
+    has 'the link port is refused' 'TCP 9347 is the link port' "$out"
+    has 'a taken port is refused with a suggestion' 'Port 5555 is already in use. Suggested:' "$out"
+    has 'a TCP change warns about TCP-only profiles' 'Profiles that use TCP only stop working' "$out"
+    conf_has '^local \* 443 tcp$'; rc_is '443 is applied' 0 "$?"
+    has 'the link port setting refuses the OpenVPN TCP port' 'TCP 443 is the OpenVPN TCP port' "$(menu '7\n4\n443\n0\n0\n')"
+    has 'Diagnostics check each listener with its protocol' 'Listening on TCP 443' "$(mgr status)"
+
+    # Both to TCP only, and both with an OpenVPN that is too old.
+    out=$(menu '7\n2\n2\n2\n0\n0\n')
+    has 'both to TCP warns that automatic profiles connect later' 'Profiles with both connect about 5 seconds later' "$out"
+    conf_has '^port 443$' && conf_has '^proto tcp4-server$'; rc_is 'TCP only keeps the TCP port' 0 "$?"
+    openvpn_says 2.7.4
+    out=$(menu '7\n2\n3\n0\n0\n')
+    has 'both needs 2.7.5' 'Both needs OpenVPN 2.7.5 or newer; this server has 2.7.4' "$out"
+    conf_has '^local '; rc_is 'and nothing changed' 1 "$?"
+    with_listeners 'local * 1194 udp' 'local * 443 tcp'
+    has 'Diagnostics say both needs 2.7.5' 'UDP and TCP together need OpenVPN 2.7.5 or newer' "$(mgr status)"
+}
+
+test_t1_rollback_when_a_listener_does_not_come() {
+    local out before
+    template_server
+    openvpn_says 2.7.9
+    before=$(cat "$SERVER_CONF")
+    fail_restart_when 'tcp4-server'
+    out=$(menu '7\n2\n2\n4443\n2\n0\n0\n')
+    has 'a TCP port that does not come up is rolled back' 'Rolled back' "$out"
+    has 'and says nothing changed' 'Nothing was changed' "$out"
+    [[ $before == "$(cat "$SERVER_CONF")" ]]; rc_is 'server.conf is exactly as before' 0 "$?"
+}
+
+test_t1_restore_accepts_the_three_forms() {
+    local out conf=$E/backup-conf rc
+    template_server
+    restored() { python3 "$E/lib/backup.py" conf --conf "$conf" --server-dir "$E/server" 2>&1; }
+    cp "$SERVER_CONF" "$conf"
+    out=$(restored)
+    [[ $out == "$(cat "$SERVER_CONF")" ]]; rc_is 'a UDP server is written back byte for byte' 0 "$?"
+    sed -i 's/^proto udp4$/proto tcp4-server/' "$conf"
+    out=$(restored)
+    has 'TCP only keeps proto tcp4-server' $'port 1194\nproto tcp4-server\n' "$out"
+    lacks 'and has no explicit-exit-notify' 'explicit-exit-notify' "$out"
+    sed -i -e 's/^port 1194$/local * 1194 udp/' -e 's/^proto tcp4-server$/local * 443 tcp/' "$conf"
+    printf 'port-share 127.0.0.1 1500 /run/darban-port-share\n' >>"$conf"
+    out=$(restored)
+    has 'both is two local lines' $'local * 1194 udp\nlocal * 443 tcp\ndev tun' "$out"
+    has 'both keeps explicit-exit-notify' 'explicit-exit-notify 1' "$out"
+    lacks 'port-share is not restored' 'port-share 127' "$out"
+    has 'and says so' 'port-share, is not restored' "$out"
+    sed -i 's/^local \* 443 tcp$/local * 1195 udp/' "$conf"
+    out=$(restored); rc=$?
+    rc_is 'two UDP local lines refuse it' 2 "$rc"
+    has 'and say which' 'names udp twice' "$out"
+    cp "$SERVER_CONF" "$conf"; printf 'local * 443 tcp\n' >>"$conf"
+    out=$(restored); rc=$?
+    rc_is 'local with port refuses it' 2 "$rc"
+    cp "$SERVER_CONF" "$conf"; printf 'local 0.0.0.0 443 tcp\n' >>"$conf"
+    out=$(restored); rc=$?
+    rc_is 'a local address refuses it' 2 "$rc"
+    cp "$SERVER_CONF" "$conf"; sed -i 's/^proto udp4$/proto tcp6/' "$conf"
+    out=$(restored); rc=$?
+    rc_is 'an unknown proto refuses it' 2 "$rc"
+}
+
+test_t1_port_share_screen() {
+    local out
+    template_server
+    openvpn_says 2.7.9
+    with_listeners 'local * 1194 udp' 'local * 443 tcp'
+    has 'port sharing is offered while TCP is on' '5  Share the TCP port' "$(menu '7\n2\n\n0\n0\n')"
+    has 'it is off by default' 'off (link page on TCP 443)' "$(menu '7\n2\n\n0\n0\n')"
+    conf_has '^port-share '; rc_is 'nothing shares the port by default' 1 "$?"
+    printf 'port-share 10.0.0.1 80 /tmp\n' >>"$SERVER_CONF"
+    has 'a port-share line of someone else is left alone' 'a port-share line this tool did not write' "$(menu '7\n2\n5\n0\n0\n')"
+    [[ $(in_manager conf_port_share; echo "rc=$?") == *rc=2 ]]; rc_is 'and is told apart' 0 "$?"
+    sed -i '/^port-share /d' "$SERVER_CONF"
+    printf 'port-share 127.0.0.1 1500 %s\n' "$E/run/darban-port-share" >>"$SERVER_CONF"
+    [[ $(in_manager conf_port_share) == 1500 ]]; rc_is "this tool's line gives the local port of the link page" 0 "$?"
+    [[ $(in_manager link_public_port) == 443 ]]; rc_is 'links then use the OpenVPN TCP port' 0 "$?"
+    [[ $(in_manager link_listen_port) == 1500 ]]; rc_is 'and the link page listens on its local port' 0 "$?"
+    has 'the link port setting says so' 'Links use TCP 443, the port OpenVPN shares with the link page' "$(menu '7\n4\n0\n0\n')"
+    # A port change keeps the line; UDP only drops it.
+    out=$(menu '7\n2\n4\n2\n4443\n2\n0\n0\n')
+    conf_has "^port-share 127.0.0.1 1500 $E/run/darban-port-share$"; rc_is 'a TCP port change keeps port-share' 0 "$?"
+    out=$(menu '7\n2\n1\n2\n0\n0\n')
+    has 'UDP only ends port sharing, and says so' 'Sharing the TCP port with the link page ends with TCP' "$out"
+    conf_has '^port-share '; rc_is 'UDP only has no port-share line' 1 "$?"
+}
+port_share_leftovers_made() {
+    # What turning port-share on sets up beside server.conf, without its line: as after a restore, or a hand edit.
+    mkdir -p "$E/units/darban-links.service.d" "$E/run/darban-port-share"
+    printf '[Service]\nRestart=on-failure\n' >"$E/units/darban-links.service.d/darban-port-share.conf"
+    printf 'd %s 2750 nobody root -\n' "$E/run/darban-port-share" >"$E/tmpfiles/darban-port-share.conf"
+}
+port_share_leftovers_gone() {
+    [[ ! -e $E/units/darban-links.service.d/darban-port-share.conf && ! -e $E/tmpfiles/darban-port-share.conf && ! -e $E/run/darban-port-share ]]
+}
+
+test_t1_port_share_leftovers_go() {
+    local out fp
+    template_server
+    port_share_leftovers_made
+    has 'Diagnostics warn about a link page set up for a port nothing shares' \
+        'The link page is still set up to stay behind a shared TCP port, but server.conf shares none' "$(mgr status)"
+    out=$(menu '7\n2\n\n0\n0\n')
+    has 'Settings > 2 says it removes them' 'server.conf shares no TCP port, so the link page goes back' "$out"
+    port_share_leftovers_gone; rc_is 'and removes the drop-in, the tmpfiles entry and the folder' 0 "$?"
+    grep -q 'systemctl disable darban-links.service' "$STUB_LOG"; rc_is 'and the link service is no longer enabled' 0 "$?"
+    lacks 'Diagnostics are quiet after that' 'still set up to stay behind a shared TCP port' "$(mgr status)"
+
+    # A restore never brings the port-share line back, so what turning it on set up goes with the restore.
+    backed_up_server
+    fp=$(ca_fp)
+    port_share_leftovers_made
+    : >"$STUB_LOG"
+    out=$(printf '2\n' | bash "$E/manager.sh" restore "$E/backup.tar" --ca-fingerprint "$fp" 2>&1); rc_is 'the restore succeeds' 0 "$?"
+    has 'it is done' 'Restored the backup of' "$out"
+    port_share_leftovers_gone; rc_is 'and leaves nothing of port-share behind' 0 "$?"
+    grep -q 'systemctl disable darban-links.service' "$STUB_LOG"; rc_is 'and disables the always-on link service' 0 "$?"
+}
+test_t1_a_port_another_program_takes_rolls_back() {
+    # Another program takes the new port as OpenVPN restarts: its socket is there, but it is not OpenVPN's, so the
+    # change is rolled back, with UDP as with TCP. Diagnostics name that program.
+    local out before
+    template_server
+    openvpn_says 2.7.9
+    before=$(cat "$SERVER_CONF")
+    out=$(printf '7\n2\n4\n1500\n2\n0\n0\n' | FAKE_TAKE_ON_RESTART=1500 bash "$E/manager.sh" 2>&1)
+    has 'a UDP port another program took is rolled back' 'Rolled back' "$out"
+    lacks 'and never called applied' 'OpenVPN is listening on UDP 1500' "$out"
+    [[ $before == "$(cat "$SERVER_CONF")" ]]; rc_is 'server.conf is exactly as before' 0 "$?"
+    out=$(printf '7\n2\n3\n4443\n2\n0\n0\n' | FAKE_TAKE_ON_RESTART=4443 bash "$E/manager.sh" 2>&1)
+    has 'a TCP port another program took is rolled back' 'Rolled back' "$out"
+    lacks 'and never called applied' 'OpenVPN is listening on UDP 1194 + TCP 4443' "$out"
+    [[ $before == "$(cat "$SERVER_CONF")" ]]; rc_is 'and server.conf is as before' 0 "$?"
+    with_listeners 'local * 1194 udp' 'local * 4443 tcp'
+    out=$(mgr status)
+    has 'Diagnostics name the program on an OpenVPN port' 'nginx holds TCP 4443, so OpenVPN cannot listen there' "$out"
+    has 'and the other port is still OpenVPN' 'Listening on UDP 1194' "$out"
 }
 
 # RUN_TESTS_EXTRA=<file>: more tests, for Lint's checks of this runner itself.

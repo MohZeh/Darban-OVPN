@@ -52,7 +52,9 @@ else
 fi
 systemctl disable --now darban-crl.timer >/dev/null 2>&1 || true
 systemctl disable --now darban-geo.timer >/dev/null 2>&1 || true
-systemctl stop darban-links.service >/dev/null 2>&1 || true
+# Enabled only while port-share is on; its drop-in goes with it.
+systemctl disable --now darban-links.service >/dev/null 2>&1 || true
+rm -rf -- "$UNITS/darban-links.service.d"
 rm -f -- "$UNITS/darban-crl.timer" "$UNITS/darban-crl.service" "$UNITS/darban-links.service" "$UNITS/darban-backup.service" \
     "$UNITS/darban-geo.timer" "$UNITS/darban-geo.service"
 # Links hold copies of profiles with private keys.

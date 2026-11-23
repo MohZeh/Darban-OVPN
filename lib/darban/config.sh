@@ -47,6 +47,8 @@ except BaseException:
 finally:
     os.close(fd)
 '
+# lib/darban/clients.sh: one endpoint of a profile, "HOST PORT udp|tcp".
+ENDPOINT_RE='^[A-Za-z0-9.-]{1,253} [0-9]{1,5} (udp|tcp)$'
 # lib/darban/certs.sh
 CERT_NAME=darban-ovpn-links
 # Let's Encrypt issues IP address certificates from Certbot 5.3 on; a hostname works with any version.
@@ -69,7 +71,7 @@ LM_NAME='' LM_EXPIRES='' LM_CREATED='' LM_BOOT='' LM_CS='' LM_US='' LM_SHARE=''
 # took as well. In the folder of the queue, which only root can write to, not in new/ of OpenVPN's user.
 EVENT_WORKER_LOCK=.worker.lock
 # lib/darban/network.sh
-PRESETS=()
+PRESETS=() PICKED_PORT=
 # lib/darban/blocked.sh
 GEO_WHY=''
 UNBLOCK_COUNT=0
@@ -220,11 +222,73 @@ server_files_problem() {
         printf "Cannot read the server certificate from server.conf (one 'cert' directive or an inline <cert> block).\n"
     fi
 }
-server_port() {
-    awk '$1=="port" {n++; if ($2 !~ /^[0-9]+$/) bad=1; else port=$2} END {if(n!=1 || bad) exit 1; print port}' "$DARBAN_SERVER_CONF"
+server_listeners() {
+    # server_listeners [server.conf]: what OpenVPN listens on, one line each, "udp N" or "tcp N", UDP first. The mode
+    # is read from server.conf alone, in one of three forms: one "port" and one "proto udp4" (UDP only), one "port"
+    # and one "proto tcp4-server" (TCP only), or exactly two lines "local * N udp" and "local * M tcp" with no "port"
+    # and no "proto" (both). Any other shape fails, and nothing is printed.
+    awk '
+        $1 == "port" { np++; port = $2; if (NF != 2 || $2 !~ /^[0-9][0-9]?[0-9]?[0-9]?[0-9]?$/) bad = 1 }
+        $1 == "proto" { npr++; proto = $2; if (NF != 2) bad = 1 }
+        $1 == "local" {
+            nl++
+            if (NF != 4 || $2 != "*" || $3 !~ /^[0-9][0-9]?[0-9]?[0-9]?[0-9]?$/ || ($4 != "udp" && $4 != "tcp")) bad = 1
+            else { at[$4] = $3 + 0; seen[$4]++ }
+        }
+        function fits(n) { return n >= 1 && n <= 65535 }
+        END {
+            if (bad) exit 1
+            if (nl == 0) {
+                if (np != 1 || npr != 1 || !fits(port + 0)) exit 1
+                if (proto == "udp4") print "udp " port + 0
+                else if (proto == "tcp4-server") print "tcp " port + 0
+                else exit 1
+            } else {
+                if (np || npr || nl != 2 || seen["udp"] != 1 || seen["tcp"] != 1 || !fits(at["udp"]) || !fits(at["tcp"])) exit 1
+                print "udp " at["udp"]
+                print "tcp " at["tcp"]
+            }
+        }' "${1:-$DARBAN_SERVER_CONF}"
 }
-server_proto_ok() {
-    [[ $(awk '$1=="proto" {n++; proto=$2} END {if(n!=1) print "invalid"; else print proto}' "$DARBAN_SERVER_CONF") == udp4 ]]
+listener_port() {
+    # listener_port <udp|tcp> [server.conf]: the port OpenVPN listens on with that protocol; fails when it does not.
+    local out
+    out=$(server_listeners "${2:-}") || return 1
+    awk -v p="$1" '$1 == p {print $2; found = 1} END {exit !found}' <<<"$out"
+}
+server_mode() {
+    # udp, tcp or both.
+    local out
+    out=$(server_listeners "${1:-}") || return 1
+    case $(awk '{printf "%s%s", (NR > 1 ? "+" : ""), $1}' <<<"$out") in
+        udp) printf 'udp\n' ;; tcp) printf 'tcp\n' ;; udp+tcp) printf 'both\n' ;; *) return 1 ;;
+    esac
+}
+server_port() {
+    # For callers that know one port only: the UDP port, or the only one.
+    local out
+    out=$(server_listeners "${1:-}") || return 1
+    awk 'NR == 1 {print $2}' <<<"$out"
+}
+listeners_label() {
+    # listeners_label [server.conf]: "UDP 1543", "TCP 443" or "UDP 1543 + TCP 443"; "?" when server.conf has no form
+    # this tool knows.
+    local out
+    out=$(server_listeners "${1:-}") || { printf '?\n'; return 1; }
+    awk '{printf "%s%s %s", (NR > 1 ? " + " : ""), toupper($1), $2} END {print ""}' <<<"$out"
+}
+endpoint_label() {
+    # endpoint_label <host>: "host:1543/UDP", "host:443/TCP" or "host:1543/UDP + 443/TCP".
+    local out
+    out=$(server_listeners) || { printf '%s:?\n' "$1"; return 1; }
+    awk -v h="$1" '{printf "%s%s/%s", (NR > 1 ? " + " : h ":"), $2, toupper($1)} END {print ""}' <<<"$out"
+}
+openvpn_version() { { openvpn --version 2>/dev/null || true; } | awk 'NR == 1 && $1 == "OpenVPN" && $2 ~ /^[0-9]+\.[0-9]+(\.[0-9]+)?/ {sub(/[^0-9.].*$/, "", $2); print $2}'; }
+openvpn_at_least() {
+    # openvpn_at_least <version>: the OpenVPN here is that version or newer. Unknown counts as older.
+    local have
+    have=$(openvpn_version) || return 1
+    [[ -n $have && $(printf '%s\n%s\n' "$1" "$have" | sort -V | head -n 1) == "$1" ]]
 }
 server_tls_ok() {
     # Profiles embed $TLS_KEY in a <tls-crypt> block, so the server must use exactly that mode and key.
@@ -243,8 +307,7 @@ server_data_ciphers() {
 }
 profile_preconditions() {
     valid_domain "$(domain)" || { warn "The server address is not set yet. Set it first: Settings ${S_CRUMB} 1."; return 1; }
-    server_port >/dev/null || { warn 'Cannot detect a unique OpenVPN server port in server.conf.'; return 1; }
-    server_proto_ok || { warn 'Profile generation only supports the existing udp4 configuration.'; return 1; }
+    server_listeners >/dev/null || { warn "server.conf has no listener form this tool knows: one 'port' with 'proto udp4' or 'proto tcp4-server', or the two 'local' lines of both."; return 1; }
     server_tls_ok || {
         warn "server.conf must contain exactly one 'tls-crypt' directive using $TLS_KEY (no tls-auth, tls-crypt-v2 or inline keys)."; return 1;
     }

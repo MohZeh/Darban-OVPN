@@ -116,6 +116,15 @@ BACKUP_HOOKS=$CONFIG_DIR/backup-hooks
 TLS_KEY=$DARBAN_SERVER_DIR/tls-crypt.key
 DEFAULT_DATA_CIPHERS=AES-256-GCM:AES-128-GCM
 PORT_BACKUPS_KEPT=5
+# Both UDP and TCP in one OpenVPN needs this version or newer.
+OPENVPN_BOTH_MIN=2.7.5
+# port-share: OpenVPN hands a connection to its TCP port that is not OpenVPN to the link service, and writes a file
+# here for each, named by the address the link service sees and holding the real one. In /run, made at boot by
+# tmpfiles: OpenVPN's user writes it, the link service reads it, and nothing in it outlives a reboot.
+PORT_SHARE_DIR=/run/darban-port-share
+PORT_SHARE_TMPFILES=/etc/tmpfiles.d/darban-port-share.conf
+# The link service stays up while port-share is on, and starts again if it fails.
+LINK_UNIT_DROPIN=$UNIT_DIR/darban-links.service.d/darban-port-share.conf
 EXPIRY_WARN_DAYS=30
 # Download hints; overridden by $CONFIG_FILE (see load_config). Empty host disables them.
 DOWNLOAD_SSH_HOST=''

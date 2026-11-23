@@ -106,7 +106,7 @@ network_rules_health() {
     dns_server_health "$net"
 }
 health() {
-    local version state enabled dco port e crl_err host resolved next last value issue exports pending rows mine
+    local version state enabled dco port proto listeners='' e crl_err host resolved next last value issue exports pending rows mine
     if [[ -n $SERVER_PROBLEM ]]; then
         group 'Server'
         check bad "$SERVER_PROBLEM"
@@ -119,10 +119,26 @@ health() {
     state=$(systemctl is-active "$DARBAN_UNIT" 2>/dev/null || true)
     enabled=$(systemctl is-enabled "$DARBAN_UNIT" 2>/dev/null || true)
     if [[ $state == active ]]; then check ok "Service active (start at boot: ${enabled:-unknown})"; else check bad "Service ${state:-unknown} ($DARBAN_UNIT)"; fi
-    if port=$(server_port); then
-        if port_listening "$port"; then check ok "Listening on UDP $port"; else check bad "Nothing listening on UDP $port"; fi
+    if listeners=$(server_listeners); then
+        while read -r proto port; do
+            if openvpn_listening "$proto" "$port" "$(openvpn_pid 2>/dev/null || true)"; then
+                check ok "Listening on ${proto^^} $port"
+            elif port_listening "$proto" "$port"; then
+                check bad "$(safe_text "$(port_owner "$proto" "$port")") holds ${proto^^} $port, so OpenVPN cannot listen there $S_ARROW stop it, or choose another port: Settings $S_CRUMB 2"
+            else
+                check bad "Nothing listening on ${proto^^} $port"
+            fi
+            if [[ $proto == tcp && -n $LINK_PORT && $port == "$LINK_PORT" ]]; then
+                check bad "The OpenVPN TCP port $port is also the link port, so links cannot open $S_ARROW Settings $S_CRUMB 4"
+            fi
+        done <<<"$listeners"
+        if [[ $(server_mode) == both ]] && ! openvpn_at_least "$OPENVPN_BOTH_MIN"; then
+            check bad "UDP and TCP together need OpenVPN $OPENVPN_BOTH_MIN or newer; this server has ${version:-an unknown version} $S_ARROW sudo apt install --only-upgrade openvpn"
+        fi
+        port_share_health
     else
-        check bad 'server.conf has no single numeric port directive'
+        listeners=''
+        check bad "server.conf has no listener form this tool knows: one 'port' with 'proto udp4' or 'proto tcp4-server', or the two 'local' lines of both"
     fi
     if [[ -d /sys/module/ovpn ]]; then dco=ovpn; elif [[ -d /sys/module/ovpn_dco_v2 ]]; then dco=ovpn_dco_v2; else dco=''; fi
     check info "DCO kernel module: ${dco:-not loaded}"
@@ -186,10 +202,18 @@ health() {
         *) check info 'IPv4 forwarding: unknown' ;;
     esac
     # ufw can be turned on long after the setup, and then it quietly blocks the VPN.
-    if [[ -n ${port:-} ]] && command -v ufw >/dev/null && value=$(ufw status 2>/dev/null) && [[ $value == *'Status: active'* ]]; then
-        # Only an ALLOW rule counts: a DENY rule for the same port, or tun0 named in another rule, is not one.
-        if ! grep -Eq "^$port(/udp)?[[:space:]]+ALLOW[[:space:]]" <<<"$value"; then
-            check bad "ufw is active and blocks UDP $port $S_ARROW sudo ufw allow $port/udp"
+    if [[ -n $listeners ]] && command -v ufw >/dev/null && value=$(ufw status 2>/dev/null) && [[ $value == *'Status: active'* ]]; then
+        # Only an ALLOW rule counts: a DENY rule for the same port, or tun0 named in another rule, is not one. Each
+        # listener needs its own, with its own protocol.
+        issue=''
+        while read -r proto port; do
+            if ! ufw_allows "$proto" "$port" "$value"; then
+                check bad "ufw is active and blocks ${proto^^} $port $S_ARROW sudo ufw allow $port/$proto"
+                issue=1
+            fi
+        done <<<"$listeners"
+        if [[ -n $issue ]]; then
+            :
         elif ! grep -Eq '[[:space:]]ALLOW FWD[[:space:]].*[[:space:]]on tun0([[:space:]]|$)' <<<"$value"; then
             check bad "ufw is active and blocks forwarding from the VPN $S_ARROW sudo ufw route allow in on tun0 out on $(ip -4 route show default 2>/dev/null | awk '{for (i=1; i<NF; i++) if ($i=="dev") {print $(i+1); exit}}')"
         else
