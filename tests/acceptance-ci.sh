@@ -780,14 +780,15 @@ sed -e "/ udp4$/d" -e '/^server-poll-timeout/d' "$LOG/t1both.ovpn" >"$LOG/t1both
 connect "$LOG/t1both.ovpn" "$LOG/t1-same-udp.log"
 connect "$LOG/t1both-tcp.ovpn" "$LOG/t1-same-tcp.log" tun8 "$LOG/t1-tcp.pid"
 [[ $(t1_transport "$LOG/t1-same-tcp.log") == TCP ]]
-t1_rows() { printf 'status 3\nquit\n' | socat -t 3 - UNIX-CONNECT:/run/openvpn-server/darban.sock 2>/dev/null | grep $'^CLIENT_LIST\tt1both\t' || true; }
+# The rows of Connected now for t1both, with its PROTOCOL column (G27, #153).
+t1_rows() { darban connected 2>/dev/null | awk '$1 == "t1both"' || true; }
 # The UDP client tries again once it is dropped, and may take the name back for a moment: what counts is that the
 # name is never listed twice, and that its one session is the TCP one.
 seen_tcp=0
 for attempt in $(seq 1 30); do
     rows=$(t1_rows)
     if (( $(grep -c . <<<"$rows" || true) > 1 )); then echo 'FAIL: t1both is listed twice, over UDP and TCP at once.'; exit 1; fi
-    if grep -q 'tcp4-server:' <<<"$rows"; then seen_tcp=1; break; fi
+    if awk '$3 == "TCP" {found = 1} END {exit !found}' <<<"$rows"; then seen_tcp=1; break; fi
     sleep 0.5
 done
 (( seen_tcp )) || { echo "FAIL: the TCP connection of t1both did not take its session: $(t1_rows)"; exit 1; }

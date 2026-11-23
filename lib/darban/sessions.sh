@@ -75,9 +75,11 @@ connected_clients() {
 wait_for_connection() {
     # The only proof of the whole path, including the provider's firewall, which nothing here can see.
     # Returns 1 when it cannot help, so the caller pauses instead.
-    local name=$1 attempt rows row address key port
+    local name=$1 attempt rows row address key ports
     (( UI_TTY )) && mgmt_available || return 1
-    port=$(server_port 2>/dev/null || printf '?')
+    # Each listener with its own protocol: "UDP 1194 is", or "UDP 1194 and TCP 443 are".
+    ports=$(server_listeners 2>/dev/null | awk '{printf "%s%s %s", (NR > 1 ? " and " : ""), toupper($1), $2} END {print (NR > 1 ? " are" : (NR ? " is" : ""))}') || ports=''
+    [[ -n $ports ]] || ports='the OpenVPN port is'
     say
     info "Waiting for $name to connect. Press Enter to stop waiting."
     for (( attempt = 0; attempt < 200; attempt++ )); do
@@ -96,7 +98,7 @@ wait_for_connection() {
             return 0
         fi
     done
-    warn "$name did not connect in 10 minutes. Check that UDP $port is open in your server provider's firewall."
+    warn "$name did not connect in 10 minutes. Check that $ports open in your server provider's firewall."
     pause
 }
 mgmt_kill_client() {
