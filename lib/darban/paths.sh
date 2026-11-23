@@ -36,6 +36,8 @@ GEO_SOURCE=https://raw.githubusercontent.com/Chocolate4U/Iran-v2ray-rules/releas
 #   DARBAN_TEST_RESTORE_WAIT_FILE=<file>          DARBAN_TEST_RESTORE_WAIT_FILE names is deleted
 #   DARBAN_TEST_COPY_FAIL=write                 writing the copy for the SSH user fails after its file was opened
 #   DARBAN_TEST_HOME_COPY_HOOK=<command>        runs while that copy is made, to change its file under it
+#   DARBAN_TEST_ACME_SERVER=<url>               acme.sh asks this ACME server, such as Pebble in Acceptance, instead
+#   DARBAN_TEST_ACME_CA=<file>                    of Let's Encrypt, and trusts the HTTPS certificate in that file
 # tests/run-tests.sh checks that this list names every one the code reads.
 # Each run of the worker takes at most this many events, or this many seconds; the path unit starts it again.
 EVENT_MAX=500
@@ -72,6 +74,10 @@ CERT_SEARCH_DIRS='/etc/letsencrypt/live /root/cert /root/.acme.sh'
 LE_DIR=/etc/letsencrypt
 # Each link certificate Let's Encrypt issued here, so the weekly limit is known before asking. Kept with it.
 LINK_CERT_LOG=/var/lib/darban/link-certificates.log
+# acme.sh, when this tool installed it for a server without snap: the program, its account and settings, the links'
+# certificate it got, and a test certificate from Let's Encrypt's staging server apart from it. Remove everything
+# takes the whole folder.
+ACME_HOME=/var/lib/darban-acme
 CONFIG_FILE=$CONFIG_DIR/config
 # lib/common.sh reads the TCP MSS of the NAT rules from it.
 DARBAN_CONFIG=$CONFIG_FILE

@@ -26,6 +26,9 @@ CERT_LOG=/var/lib/darban/link-certificates.log
 # Connection events: the script OpenVPN ran, and when each client was last seen.
 EVENT_SCRIPT=/usr/local/libexec/darban-ovpn-event
 LEDGER_DIR=/var/lib/darban/clients
+# acme.sh, which the tool installs only on a server without snap, with all it got, and the timer that renews it.
+ACME_HOME=/var/lib/darban-acme
+ACME_UNITS=/etc/systemd/system
 export DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=l
 
 FAILED=()
@@ -129,6 +132,9 @@ mapfile -t certificates < <(awk '$1=="certbot_cert" && $2 ~ /^[A-Za-z0-9._-]+$/ 
 mapfile -t apt_added < <(awk '$1=="apt_added" {print $2}' "$MARKER")
 mapfile -t apt_saved < <(awk '$1=="apt_saved" {print $2}' "$MARKER")
 certbot_venv=$(awk '$1=="certbot_venv" {print $2}' "$MARKER")
+# The test certificates from Let's Encrypt's staging server, which nothing uses, and acme.sh with its folder.
+mapfile -t staging_certs < <(awk '$1=="staging_cert" && $2 ~ /^[A-Za-z0-9._-]+$/ {print $2}' "$MARKER" | sort -u)
+acme_home=$(awk '$1=="acme_sh" {print $2; exit}' "$MARKER")
 # The client names, read before the CA goes: only their profiles leave the profile folder.
 mapfile -t client_names < <(awk -F '\t' 'NF>=6 && $6 ~ /\/CN=/ {cn=$6; sub(/^.*\/CN=/,"",cn); sub(/\/.*/,"",cn); print cn}' "$PKI/index.txt" 2>/dev/null | sort -u)
 
@@ -182,6 +188,21 @@ else
     done
     rm -f -- "$CERT_LOG"
     rmdir -- "${CERT_LOG%/*}" 2>/dev/null || true
+fi
+# A test certificate from the staging server goes in every case: it cannot serve a link.
+for name in "${staging_certs[@]}"; do
+    for bin in /snap/bin/certbot "${certbot_venv:+$certbot_venv/bin/certbot}" "$(command -v certbot 2>/dev/null || true)"; do
+        if [[ -n $bin && -x $bin ]]; then "$bin" delete --non-interactive --cert-name "$name" >/dev/null 2>&1 || true; break; fi
+    done
+done
+# acme.sh, only from the folder this tool gives it, with its account, what it got and its staging test, and the
+# timer of this tool that renews it. Nothing of it is in root's home or crontab.
+if [[ $acme_home == "$ACME_HOME" ]]; then
+    systemctl disable --now darban-acme.timer >/dev/null 2>&1 || true
+    try rm -f -- "$ACME_UNITS/darban-acme.timer" "$ACME_UNITS/darban-acme.service"
+    systemctl daemon-reload >/dev/null 2>&1 || true
+    try rm -rf -- "$ACME_HOME"
+    printf 'Removed acme.sh, which this setup installed, with the certificates it got.\n'
 fi
 if grep -qx 'snap certbot' "$MARKER" && command -v snap >/dev/null; then try snap remove certbot; fi
 # Only v1.0.0-beta.1 made this folder, and only under this exact name.

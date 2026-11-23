@@ -52,6 +52,24 @@ CERT_NAME=darban-ovpn-links
 # Let's Encrypt issues IP address certificates from Certbot 5.3 on; a hostname works with any version.
 CERTBOT_IP_MIN=5.3
 LINK_PAIRS=$CONFIG_DIR/link-cert
+# A test certificate from Let's Encrypt's staging server, which no browser trusts: a name of its own, so it never
+# replaces, renews or counts as the links' certificate.
+STAGING_CERT_NAME=darban-ovpn-links-staging
+# acme.sh, only for a server without snap where certbot cannot get the certificate. This version only, from its
+# release on GitHub, and only with this SHA-256 of the tarball (T-12). It runs as a program of its own: it is GPLv3,
+# and none of its code is in this tool (H10).
+ACME_VERSION=3.1.6
+ACME_SHA256=0d3f9000ac44a6331314742a88c475f79134e24fc991997883652adc59efc486
+ACME_URL=https://github.com/acmesh-official/acme.sh/archive/refs/tags/$ACME_VERSION.tar.gz
+ACME_PROGRAM_DIR=$ACME_HOME/acme.sh-$ACME_VERSION
+ACME_BIN=$ACME_PROGRAM_DIR/acme.sh
+# Its account, settings and certificates for the links; the links' copy of the certificate, which acme.sh writes again
+# at each renewal; and the staging test, apart from both.
+ACME_DATA=$ACME_HOME/data
+ACME_LINKS_DIR=$ACME_HOME/links
+ACME_STAGING_DATA=$ACME_HOME/staging
+# The timer that renews what acme.sh got, instead of a line in root's crontab.
+ACME_UNIT=darban-acme
 # lib/darban/shares.sh
 SR_ID='' SR_SERIAL='' SR_CREATED='' SR_BOOT='' SR_CS='' SR_US='' SR_EXPIRES='' SR_REMOTE='' SR_FILE='' SR_HOME='' SR_HOME_FILE=''
 # lib/darban/sessions.sh
