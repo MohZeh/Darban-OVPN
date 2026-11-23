@@ -21,11 +21,18 @@ mgmt_send() {
     fi
 }
 connected_rows() {
-    # name<TAB>address<TAB>connected since, one line per connected client. Fails when the interface cannot answer.
+    # One line per connected client, tab-separated: name, address, connected since, since as epoch, bytes received,
+    # bytes sent, transport. Fails when the interface cannot answer. OpenVPN 2.7 writes the real address with the
+    # socket's protocol first, as udp4:198.51.100.7:51234 or tcp4-server:198.51.100.7:51234: the address loses that
+    # prefix and its port, and the transport is udp or tcp, or empty when there is no prefix, as with older OpenVPN.
+    # The address is for display only: behind a relay every client has the relay's address.
     local reply
     reply=$(mgmt_send 'status 3') || return 1
-    # name, address, connected since, since as epoch, bytes received, bytes sent.
-    awk -F '\t' '$1=="CLIENT_LIST" && $2!="" && $2!="UNDEF" {a=$3; sub(/:[0-9]+$/,"",a); print $2 "\t" a "\t" $8 "\t" $9 "\t" $6 "\t" $7}' <<<"$reply"
+    awk -F '\t' '$1=="CLIENT_LIST" && $2!="" && $2!="UNDEF" {
+        a = $3; t = ""
+        if (match(a, /^(udp[46]?|tcp[46]?(-server)?):/)) { t = substr(a, 1, 3); a = substr(a, RLENGTH + 1) }
+        sub(/:[0-9]+$/, "", a)
+        print $2 "\t" a "\t" $8 "\t" $9 "\t" $6 "\t" $7 "\t" t }' <<<"$reply"
 }
 duration_since() {
     # duration_since <epoch>: "3 h 12 min", "12 min", or "?" when the epoch is not a number.
@@ -44,7 +51,7 @@ human_bytes() {
         if (i == 1) printf "%d %s\n", b, u[i]; else printf "%.1f %s\n", b, u[i] }'
 }
 connected_clients() {
-    local rows name address since epoch received sent
+    local rows name address since epoch received sent transport protocol
     if ! mgmt_available; then
         info "Not available: this needs a local management interface in server.conf, and socat."
         return 0
@@ -54,10 +61,11 @@ connected_clients() {
     # Built first and written at once, like the client list: a reader that stops early, such as grep -q, then
     # finds everything already in the pipe, and the tool does not end on a closed pipe halfway through.
     local out line
-    printf -v out '  %s%-24s %-18s %-14s %s%s\n' "$C_BOLD" CLIENT ADDRESS 'CONNECTED FOR' 'TRAFFIC (down / up)' "$C_RESET"
-    while IFS=$'\t' read -r name address since epoch received sent; do
-        printf -v line '  %-24s %-18s %-14s %s\n' "$(safe_text "$name")" "$(safe_text "$address")" "$(duration_since "$epoch")" \
-            "$(human_bytes "$sent") / $(human_bytes "$received")"
+    printf -v out '  %s%-20s %-15s %-8s %-13s %s%s\n' "$C_BOLD" CLIENT ADDRESS PROTOCOL 'CONNECTED FOR' 'TRAFFIC (down / up)' "$C_RESET"
+    while IFS=$'\t' read -r name address since epoch received sent transport; do
+        case $transport in udp) protocol=UDP ;; tcp) protocol=TCP ;; *) protocol='?' ;; esac
+        printf -v line '  %-20s %-15s %-8s %-13s %s\n' "$(safe_text "$name")" "$(safe_text "$address")" "$protocol" \
+            "$(duration_since "$epoch")" "$(human_bytes "$sent") / $(human_bytes "$received")"
         out+=$line
     done <<<"$rows"
     printf '%s' "$out" || true
