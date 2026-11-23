@@ -142,4 +142,26 @@ done
 disconnect
 darban status >/dev/null
 echo 'PASS: installed again, it needs no restart, and the connection reaches the client record.'
+
+# T1 (#116): a UDP server from v1.0.1, the release before TCP, keeps its server.conf byte for byte when this code
+# updates it, and its profiles keep connecting.
+REL=v1.0.1
+bash /usr/local/lib/darban/remove-server.sh --yes >"$LOG/remove.log" 2>&1
+curl -fsSL --retry 3 -o "$LOG/rel.tar.gz" "https://github.com/MohZeh/Darban-OVPN/releases/download/$REL/darban-ovpn.tar.gz"
+curl -fsSL --retry 3 -o "$LOG/REL-SHA256SUMS" "https://github.com/MohZeh/Darban-OVPN/releases/download/$REL/SHA256SUMS"
+(cd "$LOG" && grep ' darban-ovpn.tar.gz$' REL-SHA256SUMS | sed 's/darban-ovpn.tar.gz$/rel.tar.gz/' | sha256sum -c -)
+mkdir "$LOG/rel"
+tar -xzf "$LOG/rel.tar.gz" -C "$LOG/rel"
+(cd "$LOG/rel" && bash setup/server-setup.sh --yes --host 127.0.0.1 --port 1194) >"$LOG/rel-setup.log" 2>&1
+(cd "$LOG/rel" && bash setup/install.sh) >"$LOG/rel-install.log" 2>&1
+[[ $(darban version) == "${REL#v}" ]]
+printf '1\nrel1\n0\n' | darban >/dev/null
+cp /root/openvpn-clients/rel1.ovpn "$LOG/rel1.ovpn"
+cp "$CONF" "$LOG/rel-server.conf"
+bash setup/install.sh | tee "$LOG/rel-update.log"
+cmp "$LOG/rel-server.conf" "$CONF" || { echo "FAIL: the update changed server.conf of a UDP server from $REL."; diff "$LOG/rel-server.conf" "$CONF" || true; exit 1; }
+darban status >"$LOG/rel-status.log" 2>&1 || true
+grep 'Listening on UDP 1194' "$LOG/rel-status.log" >/dev/null
+connect "$LOG/rel1.ovpn" "$LOG/rel1.log"; disconnect
+echo "PASS: after an update from $REL, server.conf of a UDP server is unchanged, and its profile connects."
 echo 'All rc.10 checks passed.'

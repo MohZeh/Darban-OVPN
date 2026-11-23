@@ -3,15 +3,15 @@
 # A part of bin/darban, which sources it after lib/darban/paths.sh and lib/darban/config.sh.
 
 draw_settings() {
-    local host port
+    local host listeners
     host=$(domain)
-    port=$(server_port 2>/dev/null || printf '?')
+    listeners=$(listeners_label 2>/dev/null) || listeners='?'
     clear_screen
     title_bar Settings
     printf ' %sWhat clients connect to, and how profiles are shared. Choose one to see what it does before anything changes.%s\n' "$C_DIM" "$C_RESET" || true
     menu_group SERVER
     menu_item 1 "$(printf '%-24s %s' 'Server address' "${host:-not set}")"
-    menu_item 2 "$(printf '%-24s %s' 'OpenVPN UDP port *' "$port")"
+    menu_item 2 "$(printf '%-24s %s' 'OpenVPN protocol *' "$listeners")"
     menu_group SHARING
     menu_item 3 "$(printf '%-24s %s' 'Shares expire after' "$(hours_label "$(link_hours)")")"
     menu_item 4 "$(printf '%-24s %s' 'Link port' "$(link_port_summary)")"
@@ -83,7 +83,7 @@ settings_menu() {
         ask 'Choose [0-8, Enter = back]: ' || return 0
         case $REPLY in
             1) menu_action 'Change server address' set_domain ;;
-            2) menu_action 'Change OpenVPN UDP port' change_port ;;
+            2) menu_action 'OpenVPN protocol' set_protocol ;;
             3) menu_action 'Shares expire after' set_link_hours ;;
             4) menu_action 'Link port' set_link_port ;;
             5) menu_action 'Link certificate' change_link_cert ;;

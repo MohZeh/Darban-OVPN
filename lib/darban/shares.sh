@@ -621,7 +621,7 @@ prepare_link() {
     ensure_link_cert "$host"
 }
 share_by_link() {
-    local name=$1 host hours minutes label token key now expires url temp note='' boot cs us share=''
+    local name=$1 host hours minutes label token key now expires url temp note='' boot cs us share='' public
     host=$(domain)
     if ! link_sees_connections; then
         warn "This server has no local management interface, so the link cannot see a connection: it works for $(hours_label "$(link_hours)")."
@@ -647,7 +647,8 @@ share_by_link() {
     expires=$(( now + minutes * 60 ))
     install -m 600 "$OUT_DIR/$name.ovpn" "$LINK_DIR/$key.ovpn" || return 1
     url=https://$host
-    if [[ $LINK_PORT != 443 ]]; then url+=:$LINK_PORT; fi
+    public=$(link_public_port)
+    if [[ $public != 443 ]]; then url+=:$public; fi
     url+=/l/$token
     # The address itself, so menu 6 can show a link again. Only root reads it, and root can read the profile
     # anyway; the link service never reads it.
@@ -670,7 +671,7 @@ share_by_link() {
     mv -f -- "$temp" "$LINK_DIR/$key.meta" || return 1
     if ! start_link_service "$host"; then
         rm -f -- "$LINK_DIR/$key.meta" "$LINK_DIR/$key.ovpn" "$LINK_DIR/$key.url"
-        fail "The link service did not start on TCP $LINK_PORT. Check: $(cmd journalctl -u darban-links.service -n 30 --no-pager)"
+        fail "The link service did not start on TCP $(link_listen_port). Check: $(cmd journalctl -u darban-links.service -n 30 --no-pager)"
         return 1
     fi
     # The link holds its own copy, so nothing stays behind in the download folder, nor in the home of the SSH user.
@@ -684,7 +685,7 @@ share_by_link() {
     LINK_MORE_LABEL=$label LINK_MORE_NOTE=$note
     if link_sees_connections; then ok "Link for \"$name\": works $label, or until $name connects"; else ok "Link for \"$name\": works $label"; fi
     # The firewall is said once for each port: after that it is either open, or the first link already failed.
-    if [[ $(cat "$LINK_PORT_TOLD" 2>/dev/null) != "$LINK_PORT" ]]; then
+    if ! port_share_on && [[ $(cat "$LINK_PORT_TOLD" 2>/dev/null) != "$LINK_PORT" ]]; then
         warn "TCP $LINK_PORT must be open in your provider firewall."
         printf '%s\n' "$LINK_PORT" >"$LINK_PORT_TOLD" 2>/dev/null || true
     fi
@@ -697,7 +698,7 @@ link_more_info() {
     say
     if link_sees_connections; then kv Valid "$LINK_MORE_LABEL, or until a connection with this profile is seen"; else kv Valid "$LINK_MORE_LABEL"; fi
     kv Later 'menu 6 shows it again or cancels it'
-    kv Firewall "TCP $LINK_PORT must be open in your provider firewall"
+    kv Firewall "TCP $(link_public_port) must be open in your provider firewall"
     if [[ -n $LINK_MORE_NOTE ]]; then
         warn 'This server has no trusted certificate, so the browser shows a warning for this link. The note tells the person what to do.'
         info "Certificate fingerprint: $(openssl x509 -in "$LINK_CERT" -noout -fingerprint -sha256 | sed 's/^.*=//')"

@@ -71,15 +71,17 @@ needs_reboot() {
     grep -q '^kernel ' "$CONFIG_DIR/.server-setup-started" 2>/dev/null && ! modinfo -k "$(uname -r)" ovpn >/dev/null 2>&1
 }
 next_steps() {
-    local port
-    port=$(server_port 2>/dev/null || printf '?')
+    local listeners proto port
+    listeners=$(server_listeners 2>/dev/null) || listeners='udp ?'
     say
     section 'Your VPN server is ready'
     kv Address "$(domain)"
-    kv Port "$port/UDP"
+    kv Port "$(awk '{printf "%s%s/%s", (NR > 1 ? " + " : ""), $2, toupper($1)} END {print ""}' <<<"$listeners")"
     say
     printf '%sDo this now:%s\n' "$C_BOLD" "$C_RESET" || true
-    bullet "Open UDP $port in your server provider's firewall. This tool cannot see or change it."
+    while read -r proto port; do
+        bullet "Open ${proto^^} $port in your server provider's firewall. This tool cannot see or change it."
+    done <<<"$listeners"
     if needs_reboot; then
         say
         printf '%sLater:%s\n' "$C_BOLD" "$C_RESET" || true

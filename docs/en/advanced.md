@@ -121,7 +121,7 @@ sudo darban enable-events
 
 ## Advanced settings
 
-Open **Settings › Advanced**. Items marked `*` (1 to 6, and the OpenVPN port in **Settings**) change `server.conf` and restart OpenVPN: connected users drop for a few seconds and reconnect by themselves. Each item first says what it changes. Where common values exist, they come as a numbered list: type the number, or type a value of your own.
+Open **Settings › Advanced**. Items marked `*` (1 to 6, and the OpenVPN protocol in **Settings**) change `server.conf` and restart OpenVPN: connected users drop for a few seconds and reconnect by themselves. Each item first says what it changes. Where common values exist, they come as a numbered list: type the number, or type a value of your own.
 
 | # | Setting | Notes |
 |---|---|---|
@@ -137,7 +137,39 @@ Open **Settings › Advanced**. Items marked `*` (1 to 6, and the OpenVPN port i
 
 The link settings are in **Settings** itself, under **SHARING**: **Shares expire after**, which holds for files kept on the server too, **Link port** and **Link certificate**. None of them restarts OpenVPN.
 
-**How a change is applied:** you confirm it, `server.conf` is backed up next to itself (the newest five are kept), and OpenVPN restarts. If the UDP port does not return within 5 seconds, the previous file is restored and OpenVPN restarted. If that also fails, an urgent message says so. This check is local: it cannot prove that clients reach the server from the internet.
+**How a change is applied:** you confirm it, `server.conf` is backed up next to itself (the newest five are kept), and OpenVPN restarts. If a port OpenVPN listens on, UDP or TCP, does not return within 5 seconds, the previous file is restored and OpenVPN restarted. If that also fails, an urgent message says so. This check is local: it cannot prove that clients reach the server from the internet.
+
+### UDP, TCP or both
+
+**Settings › OpenVPN protocol** chooses how clients reach OpenVPN:
+
+| # | Choice | What it means |
+|---|---|---|
+| 1 | UDP only (recommended) | The default, and the fastest |
+| 2 | TCP only | For a network that blocks UDP. Every profile that uses UDP stops working, so the question says so and its default is No |
+| 3 | Both: UDP first, TCP when UDP is blocked | One OpenVPN listens on both. A profile shared afterwards tries UDP, and after 5 seconds without an answer, TCP. Needs OpenVPN `2.7.5` or newer |
+| 4 | Change a port | With both, it asks which one |
+| 5 | Share the TCP port | Shown only while OpenVPN listens on TCP; see below |
+
+**TCP is for networks that block UDP, not a way to hide the VPN.** A careful look still sees OpenVPN. TCP inside TCP is slower, especially on a lossy network, so UDP stays the default and comes first with both. Where only web ports are open, type `443` as the TCP port.
+
+The suggested TCP port is a random free one from 1024 to 1999, as for UDP, never 1194, the link port or this server's UDP port; Enter takes it. A typed port from 1024 to 65535, or `443`, is taken when no other program uses it on TCP and it is not the link port. Before anything changes, the screen says which port to open in your provider's firewall and which profiles stop working or need to be shared again. The mode is read from `server.conf` alone:
+
+```text
+port 1543
+proto udp4
+```
+
+for UDP only, `proto tcp4-server` in place of `proto udp4` for TCP only, and for both:
+
+```text
+local * 1543 udp
+local * 443 tcp
+```
+
+`explicit-exit-notify 1` stays only with a UDP listener, and profiles with a UDP remote have it too: a client that quits ends its session at once, instead of about two minutes later. **Diagnostics** check each port and its ufw rule with its own protocol, a TCP port that is also the link port, and OpenVPN older than `2.7.5` with both.
+
+**Share the TCP port.** Off by default. With it on, a connection to the OpenVPN TCP port that is not OpenVPN goes to the link page, which then listens on `127.0.0.1` only and stays up: whoever probes the port sees an ordinary HTTPS site, and links use that port instead of one of their own, so `443` can serve both. OpenVPN tells the link page each visitor's real address through files in `/run/darban-port-share`, so the limit per address still works. Turning it on or off restarts OpenVPN, with the same backup and rollback.
 
 `/etc/darban/config` holds tool settings. It is read as data and never executed.
 
@@ -202,7 +234,7 @@ A restore onto a server that does not run it tells clients the upstream DNS inst
 
 | Port | Needed for |
 |---|---|
-| Your chosen UDP port | VPN clients |
+| Your chosen UDP port, TCP port, or both | VPN clients (**Settings › OpenVPN protocol**) |
 | 9347, 9563 or 9741 TCP | Temporary links. The first one that no other program uses on any address is chosen and kept, and checked again for each link. If another program has taken it, the tool names that program. These ports are uncommon on purpose: panels such as 3x-ui, and tools such as Portainer, often use 443, 8443 and 9443. **Settings › Link port** sets another one |
 | 80 TCP, for a moment | Only for a Let's Encrypt certificate, when it is requested and at each renewal: about every 60 days for a domain name, and for each new six-day certificate of an IP address |
 
@@ -276,7 +308,7 @@ Instead of the fingerprint, `--ca-from client.ovpn` takes the CA from a profile 
 
 **The server address.** A backup holds the settings of the server it was made on, its address among them. When that address is not one of this server's own, the restore says so before it asks, and **Diagnostics** warn until you change it under **Settings › Server address**. Then send each profile again: one made with the old address connects to the old server. Behind NAT, where the public address of this server is on none of its interfaces, the tool cannot tell, and says nothing.
 
-Nothing changes until every check has passed: the archive must have the manifest of a backup of this tool, and may hold only the files above, as regular files of a limited size; each must match its checksum; the CA must be the one you named, with its private key; the server certificate must come from that CA. `server.conf` is written again from the template of this tool, with only its port, network, routing, DNS, ciphers, keepalive and log detail taken from the backup; any other line, such as `up`, refuses the whole restore. A CRL that is missing, cannot be read or has expired is said so, and a new one is made with the restored CA.
+Nothing changes until every check has passed: the archive must have the manifest of a backup of this tool, and may hold only the files above, as regular files of a limited size; each must match its checksum; the CA must be the one you named, with its private key; the server certificate must come from that CA. `server.conf` is written again from the template of this tool, with only its listeners (UDP, TCP or both), network, routing, DNS, ciphers, keepalive and log detail taken from the backup; any other line, such as `up`, refuses the whole restore. A shared TCP port is not restored: turn it on again in **Settings › OpenVPN protocol**. A Darban older than `v1.1.0` refuses a backup of a server with TCP, which is right: it cannot run one. A CRL that is missing, cannot be read or has expired is said so, and a new one is made with the restored CA.
 
 **Changes after the backup.** When the server still has the same CA, the tool compares the backup with that CA's index and blocklist. A backup that does not know a certificate issued, or a revocation made, after it was made is older than the CA in use: the restore is refused, nothing changes, and the tool names each such client with its serial. Use a newer backup, or keep the CA in use. A certificate that only expired since, or one the backup has revoked, is fine.
 
@@ -286,7 +318,7 @@ On a new server, with another CA, or where the index of the same CA cannot be re
 sudo darban restore --acknowledge
 ```
 
-**What the end of a restore checks:** that OpenVPN is really running, its port is open, and the blocklist and **Diagnostics** are healthy. It does not connect a client.
+**What the end of a restore checks:** that OpenVPN is really running, each of its ports is open, and the blocklist and **Diagnostics** are healthy. It does not connect a client.
 
 **If a restore stops half way,** for example at a power cut, OpenVPN stays off, even after a reboot, until it is done. The next run of this tool, or of the installer, finishes it. OpenVPN is started with the restored files only once they are all in place and checked, and it is enabled at boot again only once the restore is done, so a power cut even then leaves it off after a reboot.
 

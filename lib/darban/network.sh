@@ -1,48 +1,66 @@
 #!/usr/bin/env bash
-# The settings of server.conf: the port, routing, DNS pushed, the VPN network, ciphers and MSS.
+# The settings of server.conf: the protocol and ports, routing, DNS pushed, the VPN network, ciphers and MSS.
 # A part of bin/darban, which sources it after lib/darban/paths.sh and lib/darban/config.sh.
 
 port_listening() {
-    # UDP socket existence plus separate systemd active check below; provider firewall must be tested externally.
-    [[ -n $(ss -H -lun "sport = :$1" 2>/dev/null) ]]
+    # port_listening <udp|tcp> <port>: a socket of that protocol is bound there. The systemd check is separate, and
+    # the provider firewall must be tested from outside.
+    darban_port_busy "$1" "$2"
 }
-wait_for_port() {
-    local port=$1 attempt
+listeners_up() {
+    # listeners_up <listeners>: every "udp N" or "tcp N" line has its socket.
+    local proto port
+    [[ -n $1 ]] || return 1
+    while read -r proto port; do
+        port_listening "$proto" "$port" || return 1
+    done <<<"$1"
+}
+wait_for_listeners() {
+    # wait_for_listeners [server.conf]: OpenVPN is active and listens on each listener of that file, each with its
+    # own protocol, within 5 seconds.
+    local listeners attempt
+    listeners=$(server_listeners "${1:-}") || return 1
     for attempt in 1 2 3 4 5; do
-        if systemctl is-active --quiet "$DARBAN_UNIT" && port_listening "$port"; then return 0; fi
+        if systemctl is-active --quiet "$DARBAN_UNIT" && listeners_up "$listeners"; then return 0; fi
         sleep 1
     done
     return 1
 }
-host_firewall_check() {
-    # Read-only hint: the manager never edits host firewall rules.
-    local old=$1 new=$2 status rules
-    if command -v ufw >/dev/null && status=$(ufw status 2>/dev/null) && [[ $status == *'Status: active'* ]]; then
-        if ! grep -Eq "^$new(/udp)?[[:space:]]" <<<"$status"; then
-            warn "ufw is active and has no rule for $new/udp (ufw allow $new/udp)."
-        fi
-    fi
-    if command -v nft >/dev/null && rules=$(nft list ruleset 2>/dev/null); then
-        if grep -Eq "dport[^;]*\\b$old\\b" <<<"$rules" && ! grep -Eq "dport[^;]*\\b$new\\b" <<<"$rules"; then
-            warn "Host nftables rules reference port $old but not $new; traffic to the new port may be filtered or not forwarded."
-        fi
-    fi
+ufw_allows() {
+    # ufw_allows <udp|tcp> <port> <ufw status>: an ALLOW rule for that port and protocol. A rule without a protocol
+    # allows both.
+    grep -Eq "^$2(/$1)?[[:space:]]+ALLOW[[:space:]]" <<<"$3"
 }
-apply_port_change() {
-    local old=$1 new=$2 backup=$3 temp
-    temp=$(mktemp "$DARBAN_SERVER_DIR/.darban-serverconf.XXXXXXXX") || return 1
-    darban_tmp_register "$temp"
-    if ! awk -v p="$new" '$1=="port" {$0="port "p} {print}' "$DARBAN_SERVER_CONF" >"$temp"; then
-        rm -f -- "$temp"
-        fail 'Failed to write server.conf; the original is unchanged.'
-        return 1
-    fi
-    apply_server_conf "$temp" "$old" "$new" "$backup"
+host_firewall_check() {
+    # host_firewall_check <old listeners> <new listeners>: read-only hints, for each port that is new. The manager
+    # never edits host firewall rules.
+    local old=$1 new=$2 status rules proto port
+    while read -r proto port; do
+        [[ -n $port ]] || continue
+        grep -qx "$proto $port" <<<"$old" && continue
+        if command -v ufw >/dev/null && status=$(ufw status 2>/dev/null) && [[ $status == *'Status: active'* ]]; then
+            if ! ufw_allows "$proto" "$port" "$status"; then
+                warn "ufw is active and has no rule for $port/$proto (ufw allow $port/$proto)."
+            fi
+        fi
+        if command -v nft >/dev/null && rules=$(nft list ruleset 2>/dev/null) && [[ -n $rules ]] \
+            && ! grep -Eq "dport[^;]*\\b$port\\b" <<<"$rules"; then
+            while read -r _ old_port; do
+                if [[ -n $old_port ]] && grep -Eq "dport[^;]*\\b$old_port\\b" <<<"$rules"; then
+                    warn "Host nftables rules reference port $old_port but not $port; traffic to the new port may be filtered or not forwarded."
+                    break
+                fi
+            done <<<"$old"
+        fi
+    done <<<"$new"
 }
 apply_server_conf() {
-    # Puts a prepared file in place of server.conf, restarts OpenVPN, and restores the backup if it does not
-    # come back. Returns 0 = applied, 1 = the previous configuration is running again, 2 = the rollback failed.
-    local temp=$1 old=$2 new=$3 backup=$4
+    # apply_server_conf <prepared file> <backup>: puts it in place of server.conf, restarts OpenVPN, and restores the
+    # backup if it does not come back on each of its listeners. Returns 0 = applied, 1 = the previous configuration
+    # is running again, 2 = the rollback failed.
+    local temp=$1 backup=$2 new old
+    new=$(listeners_label "$temp") || { rm -f -- "$temp"; fail 'The prepared server.conf has no listener form this tool knows; the original is unchanged.'; return 1; }
+    old=$(listeners_label "$backup") || old=''
     if ! chmod --reference="$DARBAN_SERVER_CONF" "$temp" || ! chown --reference="$DARBAN_SERVER_CONF" "$temp" ||
        ! mv -f -- "$temp" "$DARBAN_SERVER_CONF"; then
         rm -f -- "$temp"
@@ -50,15 +68,15 @@ apply_server_conf() {
         return 1
     fi
     ok "server.conf updated (backup: $backup)."
-    info "Restarting OpenVPN and waiting for UDP $new (up to 5 seconds)${S_ELL}"
-    if ! systemctl restart "$DARBAN_UNIT" || ! wait_for_port "$new"; then
-        warn "OpenVPN did not come up on UDP $new. Restoring the previous server.conf${S_ELL}"
+    info "Restarting OpenVPN and waiting for $new (up to 5 seconds)${S_ELL}"
+    if ! systemctl restart "$DARBAN_UNIT" || ! wait_for_listeners; then
+        warn "OpenVPN did not come up on $new. Restoring the previous server.conf${S_ELL}"
         cp -a -- "$backup" "$DARBAN_SERVER_CONF" || { urgent "Could not restore server.conf from $backup."; return 2; }
-        if systemctl restart "$DARBAN_UNIT" && wait_for_port "$old"; then
-            ok "Rolled back: OpenVPN is listening on UDP $old with the previous configuration."
-            audit "server.conf change failed; rolled back (UDP $old)"
+        if systemctl restart "$DARBAN_UNIT" && wait_for_listeners; then
+            ok "Rolled back: OpenVPN is listening on ${old:-its previous ports} with the previous configuration."
+            audit "server.conf change failed; rolled back (${old:-previous ports})"
         else
-            urgent 'Rollback restart or the previous UDP listener FAILED. Check the OpenVPN service immediately.'
+            urgent "Rollback restart or the previous listener ${old:+($old) }FAILED. Check the OpenVPN service immediately."
             return 2
         fi
         return 1
@@ -73,46 +91,244 @@ prune_port_backups() {
     (( excess > 0 )) || return 0
     rm -f -- "${backups[@]:0:excess}"
 }
-change_port() {
-    local old new backup rc=0
-    old=$(server_port) || { warn 'Expected exactly one port directive in server.conf.'; return 1; }
-    server_proto_ok || { warn 'Only udp4 OpenVPN servers are supported.'; return 1; }
-    systemctl is-active --quiet "$DARBAN_UNIT" || { warn 'OpenVPN service is not active. Refusing to change port.'; return 1; }
-    kv Current "$old/UDP"
-    info 'The UDP port clients connect to. It must be open in your provider firewall, and every client profile names it, so clients need a new profile afterwards (menu 5).'
-    say
+
+# ---------- the OpenVPN protocol: UDP only, TCP only, or both ----------
+conf_port_share() {
+    # conf_port_share [server.conf]: the local port of the link service when server.conf has this tool's one
+    # port-share line; fails without one. Exit 2: a port-share line this tool did not write.
+    awk -v dir="$PORT_SHARE_DIR" '
+        $1 == "port-share" { n++; if (NF == 4 && $2 == "127.0.0.1" && $3 ~ /^[0-9][0-9]?[0-9]?[0-9]?[0-9]?$/ && $3 + 0 >= 1 && $3 + 0 <= 65535 && $4 == dir) port = $3 + 0; else bad = 1 }
+        END { if (bad || n > 1) exit 2; if (!n) exit 1; print port }' "${1:-$DARBAN_SERVER_CONF}"
+}
+conf_listeners_file() {
+    # conf_listeners_file <udp port or ''> <tcp port or ''> <port-share local port or ''> <output>: server.conf with
+    # those listeners, in the form of server_listeners, where its listener lines were. explicit-exit-notify stays
+    # with a UDP listener, in its place, or comes back after keepalive as the setup writes it; TCP alone has none.
+    # So UDP only to TCP and back gives the same file, byte for byte.
+    local udp=$1 tcp=$2 share=$3 out=$4 block een=0
+    if [[ -n $udp && -n $tcp ]]; then block="local * $udp udp\\nlocal * $tcp tcp"
+    elif [[ -n $udp ]]; then block="port $udp\\nproto udp4"
+    else block="port $tcp\\nproto tcp4-server"; fi
+    if [[ -n $udp ]]; then een=1; fi
+    if [[ -n $tcp && -n $share ]]; then block+="\\nport-share 127.0.0.1 $share $PORT_SHARE_DIR"; fi
+    awk -v block="$block" -v een="$een" '
+        FNR == NR { if ($1 == "explicit-exit-notify") had = 1; next }
+        $1 == "port" || $1 == "proto" || $1 == "local" || $1 == "port-share" { if (!done) print block; done = 1; next }
+        $1 == "explicit-exit-notify" { if (een && !put) print; put = 1; next }
+        { print }
+        $1 == "keepalive" && een && !had && !put { print "explicit-exit-notify 1"; put = 1 }
+        END { if (!done) print block; if (een && !put) print "explicit-exit-notify 1" }' "$DARBAN_SERVER_CONF" "$DARBAN_SERVER_CONF" >"$out"
+}
+tcp_port_problem() {
+    # tcp_port_problem <port> <current OpenVPN TCP port or ''>: why it cannot be the OpenVPN TCP port; nothing when
+    # it can. From 1024 to 65535, or 443; never the link port; free on TCP, unless OpenVPN itself holds it.
+    local port=$1 current=${2:-}
+    if ! { valid_port "$port" || [[ $port == 443 ]]; }; then printf 'range\n'; return 0; fi
+    port=$((10#$port))
+    if [[ -n $LINK_PORT && $port == "$LINK_PORT" ]]; then printf 'link\n'; return 0; fi
+    if [[ $port != "$current" ]] && darban_port_busy tcp "$port"; then printf 'busy\n'; fi
+}
+ask_openvpn_port() {
+    # ask_openvpn_port <udp|tcp> <other OpenVPN port or ''> <current port of this protocol or ''>: sets PICKED_PORT.
+    # A random free port is suggested and Enter takes it; a typed one is checked. Fails when cancelled.
+    local proto=$1 other=$2 current=$3 suggested name problem
+    local -a avoid=()
+    name=${proto^^}
+    if [[ -n $other ]]; then avoid+=("$other"); fi
+    if [[ -n $current ]]; then avoid+=("$current"); fi
+    if [[ $proto == tcp && -n $LINK_PORT ]]; then avoid+=("$LINK_PORT"); fi
+    suggested=$(darban_free_port "$proto" "${avoid[@]}")
+    say "   Press Enter to use $suggested, a free port picked at random"
+    if [[ $proto == tcp ]]; then
+        say '   Or type another port from 1024 to 65535, or 443 where only web ports are open'
+    else
+        say '   Or type another port from 1024 to 65535'
+    fi
     while :; do
-        prompt_valid 'New UDP port, 1024-65535 (Enter = cancel): ' valid_port 'Enter a number from 1024 to 65535.' || return 0
-        new=$((10#$REPLY))
-        if [[ $new == "$old" ]]; then info 'Same as the current port; nothing changed.'; return 0; fi
-        if port_listening "$new"; then warn "UDP $new is already used by another program. Choose another port."; continue; fi
-        break
+        ask "$name port [$suggested]: " || { cancelled; return 1; }
+        PICKED_PORT=${REPLY:-$suggested}
+        if [[ $proto == tcp ]]; then
+            problem=$(tcp_port_problem "$PICKED_PORT" "$current")
+        elif ! valid_port "$PICKED_PORT"; then
+            problem=range
+        elif [[ $((10#$PICKED_PORT)) != "$current" ]] && darban_port_busy udp "$((10#$PICKED_PORT))"; then
+            problem=busy
+        else
+            problem=''
+        fi
+        case $problem in
+            range) if [[ $proto == tcp ]]; then warn "Enter a number from 1024 to 65535, or 443. Suggested: $suggested"; else warn "Enter a number from 1024 to 65535. Suggested: $suggested"; fi; continue ;;
+            link) warn "TCP $((10#$PICKED_PORT)) is the link port (Settings $S_CRUMB 4). Suggested: $suggested"; continue ;;
+            busy) warn "Port $((10#$PICKED_PORT)) is already in use. Suggested: $suggested"; continue ;;
+        esac
+        PICKED_PORT=$((10#$PICKED_PORT))
+        return 0
     done
-    host_firewall_check "$old" "$new"
+}
+protocol_effect() {
+    # protocol_effect <old mode> <new mode> <changed udp|tcp|''>: what happens to the profiles shared before. The
+    # warning is general: which profile holds what is not read from the files. Returns 1 when every old profile, or
+    # some, stop working, so the question defaults to No.
+    local old=$1 new=$2 changed=$3
+    if [[ $old == "$new" ]]; then
+        case $new/$changed in
+            both/udp) warn 'Profiles that use UDP only stop working; profiles with both connect over TCP, about 5 seconds later, until shared again (menu 5).' ;;
+            both/tcp) warn 'Profiles that use TCP only stop working; profiles with both still connect over UDP. Share them again (menu 5).' ;;
+            *) warn 'Every profile shared before names the old port and stops working. Every client needs its profile shared again (menu 5).' ;;
+        esac
+        return 1
+    fi
+    case $old/$new in
+        udp/both) info 'Profiles shared before still connect over UDP. Share them again (menu 5) for the automatic fallback to TCP.'; return 0 ;;
+        tcp/both) info 'Profiles shared before still connect over TCP. Share them again (menu 5) so they try UDP first.'; return 0 ;;
+        udp/tcp) warn 'Every profile shared before uses UDP and STOPS WORKING. Every client needs its profile shared again (menu 5).' ;;
+        tcp/udp) warn 'Every profile shared before uses TCP and STOPS WORKING. Every client needs its profile shared again (menu 5).' ;;
+        both/udp) warn 'Profiles that use TCP only stop working; profiles with both keep working over UDP.' ;;
+        both/tcp) warn 'Profiles with both connect about 5 seconds later, over TCP, and profiles that use UDP only stop working. Share them again (menu 5).' ;;
+    esac
+    return 1
+}
+protocol_label() {
+    case $1 in udp) printf 'UDP only' ;; tcp) printf 'TCP only' ;; both) printf 'both, UDP first' ;; esac
+}
+apply_listeners() {
+    # apply_listeners <description> <udp port or ''> <tcp port or ''> <port-share local port or ''>: under the lock,
+    # from the current server.conf, with the backup, restart and rollback of every change.
+    local description=$1 udp=$2 tcp=$3 share=$4
+    new_conf_file || return 1
+    conf_listeners_file "$udp" "$tcp" "$share" "$CONF_TEMP" || { fail 'Could not prepare server.conf. Nothing was changed.'; return 1; }
+    server_listeners "$CONF_TEMP" >/dev/null || { fail 'The prepared server.conf is not in a form this tool knows. Nothing was changed.'; return 1; }
+    conf_apply "$description" "$CONF_TEMP"
+}
+set_protocol() {
+    # Settings > 2: UDP only, TCP only, or both; or a port of one of them.
+    local mode udp tcp share=0 rc
+    conf_ready || return 1
+    mode=$(server_mode) || return 1
+    udp=$(listener_port udp) || udp=''
+    tcp=$(listener_port tcp) || tcp=''
+    conf_port_share >/dev/null 2>&1 && share=1
+    kv Current "$(listeners_label)"
+    info 'How clients reach OpenVPN. UDP is faster, and is the default. TCP is for networks that block UDP; it does not hide the VPN. TCP inside TCP is slower, so with both, clients try UDP first.'
     say
-    printf '%sWhat happens next:%s\n' "$C_BOLD" "$C_RESET"
-    bullet 'OpenVPN restarts: all VPN users are disconnected for a few seconds'
-    bullet "if UDP $new is not up within 5 seconds, the previous configuration is restored"
-    bullet 'every downloaded .ovpn must be shared again (menu 5)'
-    warn "Open UDP $new in your provider firewall BEFORE continuing; this tool cannot check it."
+    menu_item 1 "UDP only (recommended)"
+    menu_item 2 'TCP only'
+    menu_item 3 'Both: UDP first, TCP when UDP is blocked'
+    menu_item 4 'Change a port'
+    if [[ -n $tcp ]]; then menu_item 5 "$(printf '%-24s %s' 'Share the TCP port' "$(on_off "$([[ $share == 1 ]] && echo yes || echo no)") (link page on TCP $tcp)")"; fi
     say
-    confirm_choice "Apply UDP port $new now?" 'No, keep the current port' "Apply port $new" caution "$new" || { cancelled; return 0; }
+    ask 'Choose (Enter = cancel): ' || { cancelled; return 0; }
+    case $REPLY in
+        '') cancelled; return 0 ;;
+        1) protocol_switch "$mode" udp "$udp" "$tcp" ;;
+        2) protocol_switch "$mode" tcp "$udp" "$tcp" ;;
+        3) protocol_switch "$mode" both "$udp" "$tcp" ;;
+        4) protocol_port "$mode" "$udp" "$tcp" ;;
+        5) if [[ -n $tcp ]]; then set_port_share "$udp" "$tcp"; else warn "Unknown option \"$REPLY\"."; return 1; fi ;;
+        *) warn "Unknown option \"$REPLY\"."; return 1 ;;
+    esac
+    rc=$?
+    return "$rc"
+}
+protocol_switch() {
+    # protocol_switch <current mode> <new mode> <udp port or ''> <tcp port or ''>
+    local old=$1 new=$2 udp=$3 tcp=$4 share='' had_share='' description version
+    if [[ $old == "$new" ]]; then info "OpenVPN already listens on $(protocol_label "$new"); nothing changed."; return 0; fi
+    if [[ $new == both ]] && ! openvpn_at_least "$OPENVPN_BOTH_MIN"; then
+        version=$(openvpn_version) || version=''
+        fail "Both needs OpenVPN $OPENVPN_BOTH_MIN or newer; this server has ${version:-an unknown version}. Update it first: $(cmd sudo apt update) then $(cmd sudo apt install --only-upgrade openvpn)"
+        return 1
+    fi
+    had_share=$(conf_port_share 2>/dev/null) || had_share=''
+    say
+    if [[ $new != tcp && -z $udp ]]; then
+        printf '%sThe UDP port:%s\n' "$C_BOLD" "$C_RESET" || true
+        ask_openvpn_port udp "$tcp" '' || return 0
+        udp=$PICKED_PORT
+    fi
+    if [[ $new != udp && -z $tcp ]]; then
+        printf '%sThe TCP port:%s\n' "$C_BOLD" "$C_RESET" || true
+        ask_openvpn_port tcp "$udp" '' || return 0
+        tcp=$PICKED_PORT
+    fi
+    if [[ $new == udp ]]; then tcp=''; fi
+    if [[ $new == tcp ]]; then udp=''; fi
+    # port-share stays only while TCP stays.
+    if [[ -n $tcp ]]; then share=$had_share; fi
+    if [[ -n $had_share && -z $tcp ]]; then info "Sharing the TCP port with the link page ends with TCP: links go back to their own port (Settings $S_CRUMB 4)."; fi
+    protocol_confirm "$old" "$new" "$udp" "$tcp" '' || return 0
+    description="OpenVPN protocol $(protocol_label "$new"): $(listeners_text "$udp" "$tcp")"
     ca_lock || return 1
-    # The file may have changed during the question.
-    old=$(server_port) || { warn 'Expected exactly one port directive in server.conf.'; return 1; }
-    backup="$DARBAN_SERVER_CONF.darban-backup.$(date -u +%Y%m%dT%H%M%S.%N)"
-    cp -a -- "$DARBAN_SERVER_CONF" "$backup" || return 1
-    critical_begin
-    apply_port_change "$old" "$new" "$backup" || rc=$?
-    critical_end
-    if (( rc == 2 )); then fail "The rollback did not finish, so the service may be down. server.conf now has: $(server_port 2>/dev/null || printf 'no single port')"; return 1; fi
-    if (( rc != 0 )); then fail "The port was NOT changed."; return 1; fi
-    prune_port_backups || warn 'Could not prune old server.conf port backups.'
-    audit "OpenVPN port changed: $old -> $new"
+    apply_listeners "$description" "$udp" "$tcp" "$share" || return 1
+    if [[ -n $had_share && -z $tcp ]]; then port_share_service_off; fi
+    protocol_done
+}
+protocol_port() {
+    # protocol_port <mode> <udp port or ''> <tcp port or ''>: a new port for one of the listeners.
+    local mode=$1 udp=$2 tcp=$3 which share=''
+    case $mode in
+        udp) which=udp ;;
+        tcp) which=tcp ;;
+        both)
+            say
+            menu_item 1 "UDP $udp"
+            menu_item 2 "TCP $tcp"
+            ask 'Which port? (Enter = cancel): ' || { cancelled; return 0; }
+            case $REPLY in 1) which=udp ;; 2) which=tcp ;; '') cancelled; return 0 ;; *) warn "Unknown option \"$REPLY\"."; return 1 ;; esac ;;
+    esac
     say
-    ok "OpenVPN is running and listening on UDP $new."
+    if [[ $which == udp ]]; then
+        kv Current "UDP $udp"
+        ask_openvpn_port udp "$tcp" "$udp" || return 0
+        if [[ $PICKED_PORT == "$udp" ]]; then info 'Same as the current port; nothing changed.'; return 0; fi
+        udp=$PICKED_PORT
+    else
+        kv Current "TCP $tcp"
+        ask_openvpn_port tcp "$udp" "$tcp" || return 0
+        if [[ $PICKED_PORT == "$tcp" ]]; then info 'Same as the current port; nothing changed.'; return 0; fi
+        tcp=$PICKED_PORT
+    fi
+    if [[ -n $tcp ]]; then share=$(conf_port_share 2>/dev/null) || share=''; fi
+    protocol_confirm "$mode" "$mode" "$udp" "$tcp" "$which" || return 0
+    ca_lock || return 1
+    apply_listeners "OpenVPN port: $(listeners_text "$udp" "$tcp")" "$udp" "$tcp" "$share" || return 1
+    protocol_done
+}
+listeners_text() {
+    # listeners_text <udp port or ''> <tcp port or ''>: as listeners_label says them.
+    if [[ -n $1 && -n $2 ]]; then printf 'UDP %s + TCP %s' "$1" "$2"
+    elif [[ -n $1 ]]; then printf 'UDP %s' "$1"
+    else printf 'TCP %s' "$2"; fi
+}
+protocol_confirm() {
+    # protocol_confirm <old mode> <new mode> <udp port or ''> <tcp port or ''> <changed udp|tcp|''>: what happens,
+    # the port to open, and the question. Fails when not confirmed.
+    local old=$1 new=$2 udp=$3 tcp=$4 changed=$5 target listeners='' proto port
+    if [[ -n $udp ]]; then listeners+="udp $udp"$'\n'; fi
+    if [[ -n $tcp ]]; then listeners+="tcp $tcp"$'\n'; fi
+    host_firewall_check "$(server_listeners)" "$listeners"
+    say
+    printf '%sWhat happens next:%s\n' "$C_BOLD" "$C_RESET" || true
+    bullet "OpenVPN listens on $(listeners_text "$udp" "$tcp")"
+    bullet 'OpenVPN restarts: all VPN users are disconnected for a few seconds'
+    bullet 'if a port is not up within 5 seconds, the previous configuration is restored'
+    protocol_effect "$old" "$new" "$changed" || true
+    while read -r proto port; do
+        [[ -n $port ]] || continue
+        if ! grep -qx "$proto $port" <<<"$(server_listeners)"; then
+            warn "Open ${proto^^} $port in your provider firewall BEFORE continuing; this tool cannot check it."
+        fi
+    done <<<"$listeners"
+    say
+    target=$(listeners_text "$udp" "$tcp")
+    # The safe answer is the default: No.
+    confirm_choice "Apply $target now?" 'No, keep the current setting' "Apply $target" caution || { cancelled; return 1; }
+}
+protocol_done() {
+    say
+    ok "OpenVPN is running and listening on $(listeners_label)."
     info 'Test from a real remote client: local checks cannot prove the provider firewall lets traffic through.'
-    info 'Share profiles again (menu 5) so clients use the new port.'
+    info 'Share profiles again (menu 5) so clients use the new setting.'
 }
 # ---------- advanced settings ----------
 conf_value() { awk -v k="$1" '$1==k {$1=""; sub(/^ /,""); v=$0} END {print v}' "$DARBAN_SERVER_CONF"; }
@@ -121,8 +337,8 @@ conf_dns() {
     awk '$1=="push" && $2=="\"dhcp-option" && $3=="DNS" {gsub(/"/,"",$4); s = s (s == "" ? "" : " ") $4} END {print s}' "$DARBAN_SERVER_CONF"
 }
 conf_ready() {
-    # A change restarts the service, so it needs a healthy starting point and a known port to check.
-    server_port >/dev/null || { warn 'Expected exactly one port directive in server.conf.'; return 1; }
+    # A change restarts the service, so it needs a healthy starting point and known listeners to check.
+    server_listeners >/dev/null || { warn "server.conf has no listener form this tool knows: one 'port' with 'proto udp4' or 'proto tcp4-server', or the two 'local' lines of both."; return 1; }
     systemctl is-active --quiet "$DARBAN_UNIT" || { warn 'OpenVPN service is not active; fix that first (Maintenance).'; return 1; }
 }
 show_presets() {
@@ -151,18 +367,18 @@ restart_notice() {
 }
 conf_apply() {
     # conf_apply <description> <prepared file>: applies it with a backup, a restart and a rollback.
-    local description=$1 temp=$2 port backup rc=0
-    port=$(server_port) || return 1
+    local description=$1 temp=$2 backup rc=0
+    server_listeners >/dev/null || return 1
     backup="$DARBAN_SERVER_CONF.darban-backup.$(date -u +%Y%m%dT%H%M%S.%N)"
     cp -a -- "$DARBAN_SERVER_CONF" "$backup" || return 1
     critical_begin
-    apply_server_conf "$temp" "$port" "$port" "$backup" || rc=$?
+    apply_server_conf "$temp" "$backup" || rc=$?
     critical_end
     if (( rc == 2 )); then fail 'The rollback did not finish, so the service may be down.'; return 2; fi
     if (( rc != 0 )); then fail 'Nothing was changed.'; return 1; fi
     prune_port_backups || warn 'Could not prune old server.conf backups.'
     audit "server.conf changed: $description"
-    ok "Applied: $description. OpenVPN is listening on UDP $port."
+    ok "Applied: $description. OpenVPN is listening on $(listeners_label)."
 }
 conf_set_directive() {
     # conf_set_directive <key> <value> <output>: one line for the key, in its old place or at the end.

@@ -6,7 +6,7 @@
 set -euo pipefail
 SRC=$1; E=$2
 rm -rf "$E"; mkdir -p "$E"
-mkdir -p "$E/pki/issued" "$E/pki/private" "$E/server" "$E/clients" "$E/cfg" "$E/lib" "$E/bin" "$E/run"
+mkdir -p "$E/pki/issued" "$E/pki/private" "$E/server" "$E/clients" "$E/cfg" "$E/lib" "$E/bin" "$E/run" "$E/tmpfiles"
 P=$E/pki
 cd "$P"
 : > index.txt; echo 1000 > crlnumber; echo 01 > serial
@@ -101,10 +101,19 @@ exit 0
 STUB
 cat > "$E/bin/ss" <<'STUB'
 #!/usr/bin/env bash
-# TCP questions go to the real ss: the link service of a test really listens, and must be seen as itself.
-for arg in "$@"; do [[ $arg =~ ^-[A-Za-z]*t ]] && exec /usr/bin/ss "$@"; done
-last=${*: -1}; want=${last##*:}; cur=$(awk '$1=="port"{print $2}' "$SERVER_CONF")
-[[ $want == "$cur" ]] && echo "UNCONN 0 0 0.0.0.0:$want 0.0.0.0:*"
+# OpenVPN "listens" where server.conf says: "port" with its "proto", or each "local * N udp|tcp". Other TCP questions
+# go to the real ss: the link service of a test really listens, and must be seen as itself. FAKE_BUSY_UDP and
+# FAKE_BUSY_TCP name ports another program holds.
+last=${*: -1}; want=${last##*:}; tcp=0
+for arg in "$@"; do [[ $arg =~ ^-[A-Za-z]*t ]] && tcp=1; done
+listening=$(awk '$1=="port"{p=$2} $1=="proto"{pr=$2} $1=="local" && NF==4 {print $4, $3} END {if (p != "") print (pr ~ /^tcp/ ? "tcp" : "udp"), p}' "$SERVER_CONF" 2>/dev/null)
+if (( tcp )); then
+    if grep -qx "tcp $want" <<<"$listening"; then echo "LISTEN 0 32 0.0.0.0:$want 0.0.0.0:*"; exit 0; fi
+    for p in ${FAKE_BUSY_TCP:-}; do if [[ $p == "$want" ]]; then echo "LISTEN 0 32 0.0.0.0:$want 0.0.0.0:* users:((\"nginx\",pid=1,fd=6))"; exit 0; fi; done
+    exec /usr/bin/ss "$@"
+fi
+if grep -qx "udp $want" <<<"$listening"; then echo "UNCONN 0 0 0.0.0.0:$want 0.0.0.0:*"; exit 0; fi
+for p in ${FAKE_BUSY_UDP:-}; do if [[ $p == "$want" ]]; then echo "UNCONN 0 0 0.0.0.0:$want 0.0.0.0:*"; fi; done
 exit 0
 STUB
 # FLOCK_HOOK runs what another session would do while this one waits for the lock. FLOCK_FAIL names the exact
@@ -117,6 +126,13 @@ if [[ -n ${FLOCK_HOOK:-} && $1 != -u ]]; then bash -c "$FLOCK_HOOK" >/dev/null 2
 exit 0
 STUB
 printf '#!/usr/bin/env bash\nexit 0\n' > "$E/bin/chown"
+# systemd-tmpfiles makes the folder of each "d" line of the files it is given.
+cat > "$E/bin/systemd-tmpfiles" <<'STUB'
+#!/usr/bin/env bash
+echo "systemd-tmpfiles $*" >> "${STUB_LOG:-/dev/null}"
+for file in "$@"; do [[ -f $file ]] && awk '$1 == "d" {print $2}' "$file" | while read -r dir; do mkdir -p "$dir"; done; done
+exit 0
+STUB
 # runuser runs the command as the user running the tests; FAKE_RUNUSER_DENY: that user is refused, as nobody is
 # by a file only root can read.
 cat > "$E/bin/runuser" <<'STUB'
@@ -210,6 +226,7 @@ sed -e "s#^OUT_DIR=.*#OUT_DIR=$E/clients#" -e "s#^LINK_DIR=.*#LINK_DIR=$E/links#
     -e "s#^UNBOUND_RPZ=.*#UNBOUND_RPZ=$E/unbound-zone/darban.rpz#" -e "s#^NAMES_DNS_PORT=.*#NAMES_DNS_PORT=15353#" \
     -e "s#^EVENT_SCRIPT=.*#EVENT_SCRIPT=$E/libexec/darban-ovpn-event#" -e "s#^EVENT_DIR=.*#EVENT_DIR=$E/events#" \
     -e "s#^LEDGER_DIR=.*#LEDGER_DIR=$E/varlib/clients#" \
+    -e "s#^PORT_SHARE_DIR=.*#PORT_SHARE_DIR=$E/run/darban-port-share#" -e "s#^PORT_SHARE_TMPFILES=.*#PORT_SHARE_TMPFILES=$E/tmpfiles/darban-port-share.conf#" \
     -e "s#^PKI_BACKUP_DIR=.*#PKI_BACKUP_DIR=$E/pki-backups#" -e "s#^RESTORE_WARN=.*#RESTORE_WARN=$E/varlib/restore-unverified#" \
     -e 's#^EVENT_MAX=.*#EVENT_MAX=${TEST_EVENT_MAX:-500}#' \
     "$SRC/lib/darban/paths.sh" > "$E/lib/modules/paths.sh"

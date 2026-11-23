@@ -40,6 +40,13 @@ printf '4\nb1\nb1\n0\n' | darban >/dev/null
 # A TCP MSS set in Settings > Advanced goes into the backup with the tool's settings.
 printf '7\n6\n9\n1400\n0\n0\n0\n' | darban >/dev/null
 grep -qx 'TCP_MSS=1400' /etc/darban/config
+# T1 (#116): the server listens on UDP and TCP when the backup is made, so the restore on a new server below brings
+# both back. a1's profile, pointed at the TCP port, proves the TCP listener after it.
+printf '7\n2\n3\n4443\n2\n0\n0\n0\n' | darban >"$LOG/both.log" 2>&1
+grep -qx 'local \* 1194 udp' "$CONF" && grep -qx 'local \* 4443 tcp' "$CONF"
+sed -e 's/^proto udp4$/proto tcp4/' -e 's/^remote 127.0.0.1 1194$/remote 127.0.0.1 4443/' "$LOG/a1.ovpn" >"$LOG/a1-tcp.ovpn"
+grep -qx 'remote 127.0.0.1 4443' "$LOG/a1-tcp.ovpn"
+connect "$LOG/a1-tcp.ovpn" "$LOG/a1-tcp-before.log"; disconnect
 
 # D5: Backup now with the owner's public key. The server encrypts it, and only the owner's key opens it.
 printf '8\n4\n%s\n0\n0\n' "$recipient" | darban | tee "$LOG/backup.log"
@@ -141,6 +148,13 @@ grep -qx "client-connect /usr/local/libexec/darban-ovpn-event" "$CONF"
 connect "$LOG/a1.ovpn" "$LOG/after-restore.log"
 disconnect
 echo 'PASS: on a new server, the backup comes back, and a profile made before connects.'
+grep -qx 'local \* 1194 udp' "$CONF" && grep -qx 'local \* 4443 tcp' "$CONF"
+if grep -q '^port \|^proto ' "$CONF"; then echo 'FAIL: the restored server.conf of both has a port or proto line.'; exit 1; fi
+grep -qx 'explicit-exit-notify 1' "$CONF"
+ss -H -ltn 'sport = :4443' | grep -q LISTEN
+connect "$LOG/a1-tcp.ovpn" "$LOG/a1-tcp-after.log"; disconnect
+grep -q 'TCP connection established' "$LOG/a1-tcp-after.log"
+echo 'PASS: a backup of a server with UDP and TCP comes back with both, and a client connects over TCP.'
 grep -qx 'TCP_MSS=1400' /etc/darban/config
 [[ $(grep -c -F 'tcp option maxseg size > 1400 tcp option maxseg size set 1400' /etc/darban/nat.nft) == 4 ]]
 nft list chain ip darban forward | grep 'maxseg size set 1400' >/dev/null

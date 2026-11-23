@@ -63,6 +63,36 @@ darban_tmp_cleanup() {
     DARBAN_TMP_FILES=()
 }
 valid_port() { [[ $1 =~ ^[0-9]{1,5}$ ]] && (( 10#$1 >= 1024 && 10#$1 <= 65535 )); }
+darban_port_busy() {
+    # darban_port_busy <udp|tcp> <port>: something listens on that port of that protocol, on any address.
+    local flags=-lun
+    if [[ $1 == tcp ]]; then flags=-ltn; fi
+    [[ -n $(ss -H "$flags" "sport = :$2" 2>/dev/null) ]]
+}
+darban_free_port() {
+    # darban_free_port <udp|tcp> [port to avoid]...: a random free port of that protocol from 1024 to 1999, so the
+    # server does not stand out on 1194, the usual OpenVPN port. Never 1194, never a port to avoid (the link port,
+    # the other OpenVPN port). Without shuf, or with a crowded range, the first free one.
+    local proto=$1 port tries
+    shift
+    for (( tries = 0; tries < 50; tries++ )); do
+        port=$(shuf -n 1 -i 1024-1999 2>/dev/null) || port=''
+        [[ $port =~ ^[0-9]+$ ]] || break
+        if darban_port_usable "$proto" "$port" "$@"; then printf '%s\n' "$port"; return 0; fi
+    done
+    for (( port = 1024; port <= 1999; port++ )); do
+        if darban_port_usable "$proto" "$port" "$@"; then printf '%s\n' "$port"; return 0; fi
+    done
+    printf '%s\n' 1999
+}
+darban_port_usable() {
+    # darban_port_usable <udp|tcp> <port> [port to avoid]...: the choice of darban_free_port for one port.
+    local proto=$1 port=$2 avoid
+    shift 2
+    (( port != 1194 )) || return 1
+    for avoid in "$@"; do [[ $avoid != "$port" ]] || return 1; done
+    ! darban_port_busy "$proto" "$port"
+}
 valid_domain() {
     local d=$1 label
     [[ ${#d} -le 253 && $d == *.* && $d != .* && $d != *. && $d != *..* && $d =~ ^[A-Za-z0-9.-]+$ ]] || return 1
