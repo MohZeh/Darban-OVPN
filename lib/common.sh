@@ -105,8 +105,9 @@ DARBAN_DNS_REDIRECT=/etc/darban/dns-redirect
 # when asked. Loaded with nft -f in one transaction. The blocked ranges are in the file itself, so they load at boot and
 # follow a new VPN network.
 darban_nat_rules() {
-    local blocked gateway=${1%.0}.1
+    local blocked mss gateway=${1%.0}.1
     blocked=$(darban_blocked_elements)
+    mss=$(darban_mss)
     cat <<EOF
 table ip darban
 delete table ip darban
@@ -146,24 +147,40 @@ EOF
     cat <<EOF
         # TCP segments must fit in one tunnel packet. A larger one is split, and many mobile and home networks
         # drop the pieces: then most websites never open, while apps that send small packets still work.
-        ip saddr $1/24 tcp flags syn tcp option maxseg size > $DARBAN_MSS tcp option maxseg size set $DARBAN_MSS
-        ip daddr $1/24 tcp flags syn tcp option maxseg size > $DARBAN_MSS tcp option maxseg size set $DARBAN_MSS
+        ip saddr $1/24 tcp flags syn tcp option maxseg size > $mss tcp option maxseg size set $mss
+        ip daddr $1/24 tcp flags syn tcp option maxseg size > $mss tcp option maxseg size set $mss
     }
     # The same for connections to this server itself through the VPN, such as a temporary link opened on a
     # device that is already connected: those never pass the forward chain.
     chain input {
         type filter hook input priority filter; policy accept;
-        ip saddr $1/24 tcp flags syn tcp option maxseg size > $DARBAN_MSS tcp option maxseg size set $DARBAN_MSS
+        ip saddr $1/24 tcp flags syn tcp option maxseg size > $mss tcp option maxseg size set $mss
     }
     chain output {
         type filter hook output priority filter; policy accept;
-        ip daddr $1/24 tcp flags syn tcp option maxseg size > $DARBAN_MSS tcp option maxseg size set $DARBAN_MSS
+        ip daddr $1/24 tcp flags syn tcp option maxseg size > $mss tcp option maxseg size set $mss
     }
 }
 EOF
 }
-# The largest TCP segment through the VPN. With the headers of the tunnel, a packet then stays under 1380 bytes.
-DARBAN_MSS=1280
+# The largest TCP segment through the VPN: TCP_MSS in the tool's config file, which Settings > Advanced sets, else the
+# default. With the headers of TCP, IP and the tunnel, a segment of 1330 makes a packet of about 1430 bytes, which fits
+# the paths of most mobile and home networks. The range is that of a TCP segment over IPv4: 536 at least, 1460 at most.
+DARBAN_CONFIG=/etc/darban/config
+DARBAN_MSS_DEFAULT=1330
+DARBAN_MSS_MIN=536
+DARBAN_MSS_MAX=1460
+# A value being applied, before it is saved; set only by the tool itself, never read from the environment.
+DARBAN_MSS=''
+darban_valid_mss() { [[ $1 =~ ^[0-9]{1,4}$ ]] && (( 10#$1 >= DARBAN_MSS_MIN && 10#$1 <= DARBAN_MSS_MAX )); }
+# darban_mss: the MSS the rules use, always a checked whole number. A value in the file that is not one is left out.
+darban_mss() {
+    local value=$DARBAN_MSS
+    if [[ -z $value ]]; then
+        value=$(awk -F= '$1=="TCP_MSS" {v=$2} END {print v}' "$DARBAN_CONFIG" 2>/dev/null) || value=''
+    fi
+    if darban_valid_mss "$value"; then printf '%d\n' "$((10#$value))"; else printf '%d\n' "$DARBAN_MSS_DEFAULT"; fi
+}
 # The VPN network of server.conf, as A.B.C.0, when it is a single /24.
 darban_conf_net() {
     awk '$1=="server" && $3=="255.255.255.0" {print $2; exit}' "${1:-$DARBAN_SERVER_CONF}" 2>/dev/null
@@ -216,7 +233,9 @@ darban_live_blocked_count() {
 }
 darban_live_mss_ok() {
     # Both directions through the server, and both directions of connections to the server itself.
-    local rules clamp="tcp flags syn tcp option maxseg size > $DARBAN_MSS tcp option maxseg size set $DARBAN_MSS"
+    local rules mss clamp
+    mss=$(darban_mss)
+    clamp="tcp flags syn tcp option maxseg size > $mss tcp option maxseg size set $mss"
     rules=$(nft list chain ip darban forward 2>/dev/null) || return 1
     grep -Fq "ip saddr $1/24 $clamp" <<<"$rules" && grep -Fq "ip daddr $1/24 $clamp" <<<"$rules" || return 1
     rules=$(nft list chain ip darban input 2>/dev/null) || return 1

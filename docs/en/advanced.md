@@ -63,7 +63,7 @@ sudo bash -c 'set -o pipefail; curl -fsSL https://github.com/MohZeh/Darban-OVPN/
 - Creates a CA in `/root/pki` and a server certificate valid for 10 years.
 - Writes `/etc/openvpn/server/server.conf`, enables IPv4 forwarding, and adds NAT for the VPN only, in its own nftables table.
 - Keeps clients apart: they cannot reach each other, or the cloud provider's metadata service at `169.254.169.254`, through the server. They can still reach other private networks the server reaches. A `client-to-client` line added to `server.conf` would let OpenVPN pass traffic between clients itself, past these rules, so Diagnostics report it.
-- Limits TCP MSS for VPN traffic to 1280 in both directions, only for connections that announce a larger one: traffic through the server, and connections to the server itself, such as a temporary link opened on a device that is already connected.
+- Limits TCP MSS for VPN traffic to 1330 in both directions, or to the value set in **Settings › Advanced › TCP MSS**, only for connections that announce a larger one: traffic through the server, and connections to the server itself, such as a temporary link opened on a device that is already connected.
 - Starts OpenVPN, and writes details to `/var/log/darban-setup.log`.
 - Turns on [connection events](#connection-events), with one more restart of OpenVPN, before any client exists.
 
@@ -133,6 +133,7 @@ Open **Settings › Advanced**. Items marked `*` (1 to 6, and the OpenVPN port i
 | 6 | Log detail | `0` to `6`, where `3` is normal. `4` and up are for troubleshooting and can log private details |
 | 7 | New client lifetime | Days for new client certificates, such as `365` or `730`, or `0` for the Easy-RSA default of 825 days. No restart |
 | 8 | Download access | SSH address, port and user shown in `scp` and `sftp` commands. No restart |
+| 9 | TCP MSS | The largest TCP segment through the VPN, from `536` to `1460`, or `0` for the default, `1330`. Lower it, for example to `1280`, only when websites still do not open on some network. It applies at once to new connections, with no restart, and backups keep it |
 
 The link settings are in **Settings** itself, under **SHARING**: **Shares expire after**, which holds for files kept on the server too, **Link port** and **Link certificate**. None of them restarts OpenVPN.
 
@@ -147,6 +148,7 @@ DOWNLOAD_SSH_USER=root
 CLIENT_CERT_DAYS=825
 LINK_PORT=9347
 UPDATE_CHECK=no
+TCP_MSS=1280
 ```
 
 The menu looks for a new release when it starts, at most once an hour, by asking GitHub's API, which then sees this server's address, and waits up to two seconds for the answer, so a new version shows on the first screen. After a failed check it tries again ten minutes later, or when GitHub says its limit allows. That limit counts every program on the server's address, the VPN clients' traffic included. **Setup** shows the state beside **Check for updates**: a new version, up to date with the time of the check, or why it is not known. `UPDATE_CHECK=no` turns the notice off, as does **Setup › Update notice**. The tool never installs an update by itself.
