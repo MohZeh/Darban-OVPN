@@ -106,7 +106,15 @@ func index(args []string, stdout io.Writer) error {
 		}
 		o.Now = value
 	}
-	if view == "crl" && o.CRL == "" {
+	// Every argument is checked before the PKI is read: a mistake in the command line is a usage error, whatever is
+	// on the disk.
+	switch view {
+	case "list", "stats", "pending":
+	case "crl":
+		if o.CRL == "" {
+			return errUsage
+		}
+	default:
 		return errUsage
 	}
 	idx, err := caindex.Read(o.PKI)

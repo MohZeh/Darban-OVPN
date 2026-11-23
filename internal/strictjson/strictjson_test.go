@@ -16,6 +16,7 @@ type request struct {
 	Inner  *inner            `json:"inner,omitempty"`
 	List   []inner           `json:"list,omitempty"`
 	Labels map[string]string `json:"labels,omitempty"`
+	Kind   string            `json:"kind,omitempty"`
 	Hidden string            `json:"-"`
 }
 
@@ -29,12 +30,13 @@ func (r *request) Validate() error {
 }
 
 func TestAGoodDocumentIsDecodedAndValidated(t *testing.T) {
+	// The keys of a map are data: "X" and "x" are two keys, unlike the fields of a struct.
 	var r request
 	err := Decode([]byte(`{"scope":"clients","names":["a"],"inner":{"port":1194},"list":[{"port":1}],"labels":{"X":"1","x":"2"}}`), &r)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if r.Scope != "clients" || r.Inner.Port != 1194 || r.List[0].Port != 1 || r.Labels["X"] != "1" {
+	if r.Scope != "clients" || r.Inner.Port != 1194 || r.List[0].Port != 1 || r.Labels["X"] != "1" || r.Labels["x"] != "2" {
 		t.Fatalf("decoded %+v", r)
 	}
 }
@@ -47,8 +49,8 @@ func TestRefused(t *testing.T) {
 		"duplicate key":               {`{"scope":"a","scope":"b"}`, "the key appears twice"},
 		"keys differing only in case": {`{"scope":"a","Scope":"b"}`, `differs only in case from "scope"`},
 		"a key in another case":       {`{"SCOPE":"a"}`, `differs only in case from the field "scope"`},
-		"the Kelvin sign and k":       {`{"scope":"a","labels":{"k":"1","K":"2"}}`, `differs only in case from "k"`},
-		"duplicate key in a map":      {`{"scope":"a","labels":{"x":"1","x":"2"}}`, "the key appears twice"},
+		"the Kelvin sign for k":       {`{"scope":"a","\u212aind":"x"}`, `differs only in case from the field "kind"`},
+		"a map key twice":             {`{"scope":"a","labels":{"x":"1","x":"2"}}`, "the key appears twice"},
 		"a field that is never JSON":  {`{"scope":"a","Hidden":"x"}`, "unknown key"},
 		"two values":                  {`{"scope":"a"} {"scope":"b"}`, "more than one JSON value"},
 		"not an object":               {`["scope"]`, "cannot unmarshal"},

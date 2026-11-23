@@ -104,6 +104,11 @@ jobs:
           go install "golang.org/x/vuln/cmd/govulncheck@$GOVULNCHECK"
           "$(go env GOPATH)/bin/staticcheck" ./...
           "$(go env GOPATH)/bin/govulncheck" ./...
+      # In Lint, so a draft sees them: about half a minute. The race detector needs cgo; the release build has none.
+      - name: 'Go: go test -race'
+        env:
+          CGO_ENABLED: 1
+        run: go test -race -count=1 ./...
       # The suite's runner, which lint.sh starts once, builds a fake server with it.
       - name: Build darban-core
         run: bash scripts/build-core.sh
@@ -211,27 +216,6 @@ jobs:
           path: ${{ runner.temp }}/evidence
           if-no-files-found: ignore
           retention-days: 7
-
-  # The Go tests with the race detector, which needs cgo; the release build of darban-core has no cgo.
-  go-test:
-    name: Go tests (race)
-    needs: lint
-    if: needs.lint.outputs.code == 'true'
-    runs-on: ubuntu-24.04
-    timeout-minutes: 10
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      # The toolchain go.mod pins, for darban-core. No module cache: it has no dependency.
-      - uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0
-        with:
-          go-version-file: go.mod
-          cache: false
-      - name: go test -race
-        env:
-          CGO_ENABLED: 1
-        run: go test -race -count=1 ./...
 
   # Runs the real setup, OpenVPN, Easy-RSA, systemd and a real client on a throwaway runner. After the install and
   # the first client, its checks come in two parts, each on a runner of its own, so neither waits for the other.
@@ -485,7 +469,7 @@ jobs:
   result:
     name: ${{ inputs.vm_only && 'VM qualification result' || inputs.scale && 'Scale measurement result' || 'CI result' }}
     if: always()
-    needs: [lint, go-test, test, acceptance, short, restore, scale, acceptance-arm, reboot]
+    needs: [lint, test, acceptance, short, restore, scale, acceptance-arm, reboot]
     runs-on: ubuntu-24.04
     timeout-minutes: 2
     steps:
@@ -493,7 +477,6 @@ jobs:
         env:
           CODE: ${{ needs.lint.outputs.code }}
           LINT: ${{ needs.lint.result }}
-          GO_TEST: ${{ needs.go-test.result }}
           TEST: ${{ needs.test.result }}
           ACCEPTANCE: ${{ needs.acceptance.result }}
           SHORT: ${{ needs.short.result }}
@@ -506,7 +489,7 @@ jobs:
           DRAFT: ${{ github.event.pull_request.draft && 'true' || 'false' }}
           TREE: ${{ needs.lint.outputs.tree }}
         run: |
-          echo "Lint: $LINT, Go tests: $GO_TEST, Test: $TEST, Acceptance: $ACCEPTANCE, terminal, public address and rc.10: $SHORT, restore: $RESTORE, scale: $SCALE, arm64: $ARM, reboot: $REBOOT, code changed: $CODE, reboot and arm64 only: $VM_ONLY, scale only: $SCALE_ONLY"
+          echo "Lint: $LINT, Test: $TEST, Acceptance: $ACCEPTANCE, terminal, public address and rc.10: $SHORT, restore: $RESTORE, scale: $SCALE, arm64: $ARM, reboot: $REBOOT, code changed: $CODE, reboot and arm64 only: $VM_ONLY, scale only: $SCALE_ONLY"
           echo "Tree $TREE" >> "$GITHUB_STEP_SUMMARY"
           test "$LINT" = success
           # A draft is never a pass: its slow tests did not run, and a skipped required check would count as passed.
@@ -527,13 +510,11 @@ jobs:
           test "$ARM" = success || test "$ARM" = skipped
           test "$REBOOT" = success || test "$REBOOT" = skipped
           if [ "$CODE" = true ]; then
-            test "$GO_TEST" = success
             test "$TEST" = success
             test "$ACCEPTANCE" = success
             test "$SHORT" = success
             test "$RESTORE" = success
           else
-            test "$GO_TEST" = skipped
             test "$TEST" = skipped
             test "$ACCEPTANCE" = skipped
             test "$SHORT" = skipped

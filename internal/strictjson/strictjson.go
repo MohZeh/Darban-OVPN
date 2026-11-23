@@ -187,13 +187,19 @@ func checkObject(dec *json.Decoder, t reflect.Type, path string) error {
 			return &Error{Path: path, Reason: "an object key that is not a string"}
 		}
 		where := path + "." + key
-		if earlier, dup := seen[fold(key)]; dup {
+		// The keys of a struct are matched to its fields without regard to case, so two that differ only in case
+		// would fill one field. The keys of a map are data, matched exactly: "X" and "x" are two keys there.
+		same := key
+		if t.Kind() == reflect.Struct {
+			same = fold(key)
+		}
+		if earlier, dup := seen[same]; dup {
 			if earlier == key {
 				return &Error{Path: where, Reason: "the key appears twice"}
 			}
 			return &Error{Path: where, Reason: fmt.Sprintf("the key differs only in case from %q", earlier)}
 		}
-		seen[fold(key)] = key
+		seen[same] = key
 		next := reflect.TypeOf((*any)(nil)).Elem()
 		switch t.Kind() {
 		case reflect.Struct:
