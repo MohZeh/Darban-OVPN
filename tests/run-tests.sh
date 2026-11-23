@@ -3443,15 +3443,24 @@ test_connected_clients() {
     mgmt_stub
     has 'nobody connected is said plainly' 'No client is connected right now' "$(mgr connected)"
     lacks 'and the header counts nothing' 'connected' "$(menu '0\n' | grep -E '^  Clients')"
-    printf 'TITLE\tOpenVPN\nHEADER\tCLIENT_LIST\tCommon Name\nCLIENT_LIST\talice\t198.51.100.7:51234\t10.8.0.2\t\t10\t20\t2026-11-07 10:00:00\t1\tUNDEF\t0\t0\tAES-256-GCM\nCLIENT_LIST\tUNDEF\t198.51.100.9:4\t\t\t0\t0\t2026-11-07 10:01:00\nEND\n' > "$E/mgmt-reply"
+    # OpenVPN 2.7 writes the real address with the socket's protocol first (udp4:, tcp4-server:); older ones do not.
+    printf 'TITLE\tOpenVPN\nHEADER\tCLIENT_LIST\tCommon Name\nCLIENT_LIST\talice\tudp4:198.51.100.7:51234\t10.8.0.2\t\t10\t20\t2026-11-07 10:00:00\t%s\tUNDEF\t0\t0\tAES-256-GCM\nCLIENT_LIST\tbob\ttcp4-server:198.51.100.8:45642\t10.8.0.3\t\t2500\t1500000\t2026-11-07 10:00:00\t%s\tUNDEF\t1\t1\tAES-256-GCM\nCLIENT_LIST\tcarol\t198.51.100.9:1194\t10.8.0.4\t\t1\t1\t2026-11-07 10:00:00\t%s\tUNDEF\t2\t2\tAES-256-GCM\nCLIENT_LIST\tUNDEF\t198.51.100.9:4\t\t\t0\t0\t2026-11-07 10:01:00\nEND\n' \
+        "$(( $(date -u +%s) - 3720 ))" "$(( $(date -u +%s) - 90000 ))" "$(( $(date -u +%s) - 300 ))" > "$E/mgmt-reply"
     out=$(mgr connected)
     has 'a connected client is listed' 'alice' "$out"
-    has 'with its address, without the port' '198.51.100.7 ' "$out"
+    has 'the table names the protocol' 'PROTOCOL' "$out"
     has 'with how long it is connected' 'CONNECTED FOR' "$out"
-    has 'and the traffic of this session, down first' '20 B / 10 B' "$out"
+    lacks 'an address has no protocol prefix' 'udp4:' "$out"
+    lacks 'nor the TCP one' 'tcp4-server:' "$out"
+    has 'a UDP session: address without the port, protocol, duration and traffic, down first' \
+        "$(printf '  %-20s %-15s %-8s %-13s %s' alice 198.51.100.7 UDP '1 h 2 min' '20 B / 10 B')" "$out"
+    has 'a TCP session the same' \
+        "$(printf '  %-20s %-15s %-8s %-13s %s' bob 198.51.100.8 TCP '1 d 1 h' '1.5 MB / 2.5 KB')" "$out"
+    has 'an address without a prefix keeps working, with the protocol unknown' \
+        "$(printf '  %-20s %-15s %-8s %-13s %s' carol 198.51.100.9 '?' '5 min' '1 B / 1 B')" "$out"
     has 'the client list marks it connected' 'connected' "$(mgr list | grep -E '^  alice ')"
     lacks 'a half-open session is not counted' 'UNDEF' "$out"
-    has 'the header counts it' '1 connected' "$(menu '0\n')"
+    has 'the header counts the three, not the half-open one' '3 connected' "$(menu '0\n')"
     has 'the menu offers it' 'Connected now' "$(menu '3\n\n0\n0\n')"
     sed -i '/^management /d' "$SERVER_CONF"
     has 'without the interface it says so' 'Not available' "$(mgr connected)"
@@ -3507,7 +3516,8 @@ test_first_client_in_a_real_terminal() {
     local script=$E/script out rc
     start_links_stub
     mgmt_stub
-    printf 'TITLE\tOpenVPN\nCLIENT_LIST\tclient1\t198.51.100.7:1\t10.8.0.2\t\t1\t1\t2026-11-07 10:00:00\nEND\n' > "$E/mgmt-reply"
+    # The form of OpenVPN 2.7: the wait shows the address without the protocol in front.
+    printf 'TITLE\tOpenVPN\nCLIENT_LIST\tclient1\tudp4:198.51.100.7:1\t10.8.0.2\t\t1\t1\t2026-11-07 10:00:00\nEND\n' > "$E/mgmt-reply"
     cat > "$script" <<'EOF'
 Enter: Create a client => \r
 Client name [client1] => \r
