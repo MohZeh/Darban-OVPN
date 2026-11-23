@@ -19,11 +19,24 @@ setup_times() {
         printf '**Setup times, %s**\n\n```\n%s\n```\n' "$1" "${times:-none recorded}" >>"$GITHUB_STEP_SUMMARY"
     fi
 }
+snap_retry_lines() {
+    # snap_retry_lines <label>: what the certbot snap install said about its second try, from the setup log, in
+    # the job log and the summary. Those lines stay in the log on a passing run, so without this nobody sees
+    # whether the retry ever fired. Never fails.
+    local lines
+    lines=$(grep -E 'trying once more|still installing certbot|snapd does not answer' /var/log/darban-setup.log 2>/dev/null || true)
+    printf 'Snap retry lines:\n%s\n' "${lines:-none: certbot came on the first try, or was not installed}" || true
+    if [[ -n ${GITHUB_STEP_SUMMARY:-} ]]; then
+        printf '**Snap retry lines, %s**\n\n```\n%s\n```\n' "$1" "${lines:-none}" >>"$GITHUB_STEP_SUMMARY" || true
+    fi
+    return 0
+}
 
 bash setup/server-setup.sh --yes --host "$HOST" --port 1194
 grep -qx setup_complete "$MARKER"
 echo "PASS: the setup on a public IP address finished."
 setup_times "Ubuntu $(. /etc/os-release && echo "$VERSION_ID"), public address, with certbot"
+snap_retry_lines "Ubuntu $(. /etc/os-release && echo "$VERSION_ID"), public address"
 
 # certbot 5.3 or newer is needed for an IP address; Ubuntu's is older, so it comes from the snap.
 if command -v snap >/dev/null; then
