@@ -3,10 +3,11 @@
 # A part of bin/darban, which sources it after lib/darban/paths.sh and lib/darban/config.sh.
 
 mgmt_send() {
-    # mgmt_send <command> [seconds]: prints the reply of a password-less management interface on a unix
+    # mgmt_send <command> [seconds] [last line]: prints the reply of a password-less management interface on a unix
     # socket or localhost TCP. Returns 2 = no usable interface, 1 = failed. OpenVPN drops the reply to a
-    # command that arrives together with "quit", so quit has to wait until the reply has gone out.
-    local command=$1 wait=${2:-0.3} spec addr port extra
+    # command that arrives together with "quit", so quit has to wait until the reply has gone out: <seconds>, or on a
+    # unix socket, when <last line> is given, until a line of the reply starts with it, if that comes sooner.
+    local command=$1 wait=${2:-0.3} last=${3:-} spec addr port extra out rc=0
     spec=$(awk '$1=="management" {n++; s=$2 "\t" $3 "\t" $4} END {if(n==1) print s}' "$DARBAN_SERVER_CONF")
     [[ -n $spec ]] || return 2
     IFS=$'\t' read -r addr port extra <<<"$spec"
@@ -14,11 +15,32 @@ mgmt_send() {
     if [[ $port == unix ]]; then
         addr=$(darban_conf_path "$addr")
         command -v socat >/dev/null && [[ -S $addr ]] || return 2
+        if [[ -n $last ]]; then
+            out=$(mktemp) || return 1
+            { printf '%s\n' "$command"; mgmt_reply_wait "$out" "$wait" "$last"; printf 'quit\n'; } | timeout "$MGMT_TIMEOUT" socat -t 2 - "UNIX-CONNECT:$addr" 2>/dev/null >"$out" || rc=1
+            if (( rc == 0 )); then cat -- "$out" || rc=1; fi
+            rm -f -- "$out"
+            return "$rc"
+        fi
         { printf '%s\n' "$command"; sleep "$wait"; printf 'quit\n'; } | timeout "$MGMT_TIMEOUT" socat -t 2 - "UNIX-CONNECT:$addr" 2>/dev/null || return 1
     else
         [[ $addr == 127.0.0.1 || $addr == localhost || $addr == ::1 ]] && [[ $port =~ ^[0-9]+$ ]] || return 2
         timeout "$MGMT_TIMEOUT" bash -c 'exec 3<>"/dev/tcp/$1/$2" && printf "%s\n" "$3" >&3 && sleep "$4" && printf "quit\n" >&3 && cat <&3' _ "$addr" "$port" "$command" "$wait" 2>/dev/null || return 1
     fi
+}
+mgmt_reply_wait() {
+    # mgmt_reply_wait <file> <seconds> <last line>: returns when the file holds a line that starts with <last line>, or
+    # when <seconds> have passed, whichever comes first. Always 0: the reply itself says whether it is complete.
+    local whole=${2%%.*} part=0 end text
+    if [[ $2 == *.* ]]; then part=${2#*.}000000; part=${part:0:6}; fi
+    if [[ ! $whole =~ ^[0-9]*$ || ! $part =~ ^[0-9]+$ ]]; then sleep "$2" || true; return 0; fi
+    end=$(( ${EPOCHREALTIME//[!0-9]/} + 10#${whole:-0} * 1000000 + 10#$part ))
+    while (( ${EPOCHREALTIME//[!0-9]/} < end )); do
+        text=$(<"$1") || text=''
+        if [[ $'\n'$text == *$'\n'"$3"* ]]; then return 0; fi
+        sleep 0.01 || return 0
+    done
+    return 0
 }
 connected_rows() {
     # One line per connected client, tab-separated: name, address, connected since, since as epoch, bytes received,
@@ -27,7 +49,8 @@ connected_rows() {
     # prefix and its port, and the transport is udp or tcp, or empty when there is no prefix, as with older OpenVPN.
     # The address is for display only: behind a relay every client has the relay's address.
     local reply
-    reply=$(mgmt_send 'status 3') || return 1
+    # The reply of "status 3" ends with END: quit goes as soon as it has come.
+    reply=$(mgmt_send 'status 3' 0.3 END) || return 1
     awk -F '\t' '$1=="CLIENT_LIST" && $2!="" && $2!="UNDEF" {
         a = $3; t = ""
         if (match(a, /^(udp[46]?|tcp[46]?(-server)?):/)) { t = substr(a, 1, 3); a = substr(a, RLENGTH + 1) }

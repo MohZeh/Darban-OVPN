@@ -494,71 +494,72 @@ share_rows() {
     # or home. state: revoked or current from the CA index; unknown when the certificate cannot be identified;
     # orphan for a link record without its profile, which holds no secret. A copy this tool made for the SSH user
     # is a "copy", known from its record, in any home and for any user. Another file in the home of the SSH user
-    # set now is a "home" share only when it holds this CA's profile for that name.
-    local meta name file home state entry
+    # set now is a "home" share only when it holds this CA's profile for that name. The certificate of each share is
+    # found first, and the CA index then answers for all of them in one call to darban-core: one read of the index,
+    # however many shares there are. An index that cannot be read leaves every share unknown, so none is deleted.
+    local meta name file home entry serial data kind place state i
+    local -a sr_states=() sr_kinds=() sr_names=() sr_files=() sr_serials=() sr_known=() sr_found=()
     local -A recorded=()
     if [[ -d $LINK_DIR ]]; then
         for meta in "$LINK_DIR"/*.meta; do
             [[ -e $meta ]] || continue
             name=$(awk -F= '$1=="name" {print substr($0, 6); exit}' "$meta")
-            if [[ ! -e ${meta%.meta}.ovpn ]]; then printf 'orphan\tlink\t%s\t%s\n' "$name" "$meta"; continue; fi
-            printf '%s\tlink\t%s\t%s\n' "$(share_state "${meta%.meta}.ovpn" "$name")" "$name" "$meta"
+            if [[ ! -e ${meta%.meta}.ovpn ]]; then share_row_add orphan link "$name" "$meta" '' 0; continue; fi
+            serial=$(share_serial "${meta%.meta}.ovpn" "$name") || serial=''
+            share_row_add '' link "$name" "$meta" "$serial" 0
         done
     fi
     for file in "$OUT_DIR"/*.ovpn; do
         [[ -f $file ]] || continue
         name=${file##*/}; name=${name%.ovpn}
-        printf '%s\tserver\t%s\t%s\n' "$(kept_state "$file" "$name" "$file")" "$name" "$file"
+        # A kept file's record, when it describes this very file, names its certificate, so the file is not read. A
+        # record that names none it could identify means unknown, as the file itself would.
+        if share_record_read "$file"; then serial=$SR_SERIAL; else serial=$(share_serial "$file" "$name") || serial=''; fi
+        share_row_add '' server "$name" "$file" "$serial" 0
     done
     while IFS= read -r entry; do
         home_copy_read "$entry" && [[ -e $HC_PATH ]] || continue
         recorded[$HC_PATH]=1
         if [[ -n $HC_KEPT_AT ]]; then
             # Changed since it was made: only a certificate of this CA for that name makes it a share.
-            state=$(share_state "$HC_PATH" "$HC_NAME")
-            if [[ $state != unknown ]]; then printf '%s\tcopy\t%s\t%s\n' "$state" "$HC_NAME" "$entry"; fi
-            continue
-        fi
-        if [[ -n $HC_SERIAL ]] && state=$(index_state_of_serial "$HC_SERIAL"); then
-            if [[ $state == R ]]; then state=revoked; else state=current; fi
+            serial=$(share_serial "$HC_PATH" "$HC_NAME") || serial=''
+            share_row_add '' copy "$HC_NAME" "$entry" "$serial" 1
         else
-            state=unknown
+            share_row_add '' copy "$HC_NAME" "$entry" "$HC_SERIAL" 0
         fi
-        printf '%s\tcopy\t%s\t%s\n' "$state" "$HC_NAME" "$entry"
     done < <(home_copy_entries)
-    home=$(ssh_user_home) || return 0
-    for file in "$home"/*.ovpn; do
-        [[ -f $file && -z ${recorded[$file]:-} ]] || continue
-        name=${file##*/}; name=${name%.ovpn}
-        state=$(share_state "$file" "$name")
-        if [[ $state != unknown ]]; then printf '%s\thome\t%s\t%s\n' "$state" "$name" "$file"; fi
+    if home=$(ssh_user_home); then
+        for file in "$home"/*.ovpn; do
+            [[ -f $file && -z ${recorded[$file]:-} ]] || continue
+            name=${file##*/}; name=${name%.ovpn}
+            serial=$(share_serial "$file" "$name") || serial=''
+            share_row_add '' home "$name" "$file" "$serial" 1
+        done
+    fi
+    (( ${#sr_kinds[@]} > 0 )) || return 0
+    # "serial <place> <state>" for each serial the index has, by its place among those given, from 1.
+    if data=$(core_index serials -- "${sr_serials[@]}"); then
+        while IFS=$'\t' read -r kind place state; do
+            if [[ $kind == serial && $place =~ ^[0-9]+$ ]]; then sr_found[place - 1]=$state; fi
+        done <<<"$data"
+    fi
+    for i in "${!sr_kinds[@]}"; do
+        state=${sr_states[i]}
+        if [[ -z $state ]]; then
+            case ${sr_found[i]:-} in
+                '') state=unknown ;;
+                R) state=revoked ;;
+                *) state=current ;;
+            esac
+            if (( sr_known[i] )) && [[ $state == unknown ]]; then continue; fi
+        fi
+        printf '%s\t%s\t%s\t%s\n' "$state" "${sr_kinds[i]}" "${sr_names[i]}" "${sr_files[i]}"
     done
 }
-share_state() {
-    # share_state <profile> <name>: revoked, current or unknown.
-    local serial state
-    if serial=$(share_serial "$1" "$2") && state=$(index_state_of_serial "$serial"); then
-        if [[ $state == R ]]; then printf 'revoked\n'; else printf 'current\n'; fi
-    else
-        printf 'unknown\n'
-    fi
-}
-kept_state() {
-    # kept_state <file> <name> <kept file>: share_state of a kept file, from its record when that record describes
-    # this very file, so it is not read. A record that names no certificate it could identify means unknown, as the
-    # file itself would.
-    local state
-    if share_record_read "$3"; then
-        if [[ $1 == "$3" ]]; then
-            if [[ -n $SR_SERIAL ]] && state=$(index_state_of_serial "$SR_SERIAL"); then
-                if [[ $state == R ]]; then printf 'revoked\n'; else printf 'current\n'; fi
-            else
-                printf 'unknown\n'
-            fi
-            return 0
-        fi
-    fi
-    share_state "$1" "$2"
+share_row_add() {
+    # share_row_add <state, or empty to ask the index> <kind> <name> <file> <serial, or empty> <1: only when known>:
+    # one share for share_rows, into its arrays.
+    sr_states+=("$1"); sr_kinds+=("$2"); sr_names+=("$3"); sr_files+=("$4"); sr_serials+=("$5"); sr_known+=("$6")
 }
 share_names() {
     # share_names <state> [rows]: the names with a share in that state, one per line.

@@ -4,6 +4,7 @@
 //
 //	darban-core version
 //	darban-core index --pki DIR --view list|stats|pending|crl [options]
+//	darban-core index --pki DIR --view serials -- SERIAL...
 package main
 
 import (
@@ -23,20 +24,23 @@ import (
 const usage = `Usage:
   darban-core version
   darban-core index --pki DIR --view VIEW [options]
+  darban-core index --pki DIR --view serials -- SERIAL...
 
 Views of the CA database (index.txt), its certificates and the CRL, as records for the manager:
   list     the rows of "darban list", and why a valid certificate cannot be revoked here
   stats    the number of valid, revoked, expired and soon expiring clients
   pending  revoked clients the CRL does not list yet
   crl      whether the CRL and the database agree (exit 1 and the reason when not)
+  serials  the state of each certificate named by its serial, by its place among them
 
 Options:
   --now EPOCH            the time to judge expiry by; default: now
   --server-serial HEX    the certificate OpenVPN serves, which is never listed
   --all                  list: the revoked clients too
   --ledger DIR           list: the records of when each client was seen
+  --pending              list: the records of pending too, none when its CRL cannot be read
   --warn-days N          stats: a client expiring within N days counts as soon (default 30)
-  --crl FILE             pending, crl: a CRL whose signature was verified
+  --crl FILE             pending, crl, list with --pending: a CRL whose signature was verified
 `
 
 // errUsage is a mistake in the command line.
@@ -95,7 +99,12 @@ func index(args []string, stdout io.Writer) error {
 	flags.StringVar(&o.Ledger, "ledger", "", "")
 	flags.Int64Var(&o.WarnDays, "warn-days", 30, "")
 	flags.StringVar(&o.CRL, "crl", "", "")
-	if err := flags.Parse(args); err != nil || flags.NArg() != 0 || o.PKI == "" || o.WarnDays < 0 {
+	flags.BoolVar(&o.Pending, "pending", false, "")
+	if err := flags.Parse(args); err != nil || o.PKI == "" || o.WarnDays < 0 {
+		return errUsage
+	}
+	// Only serials takes arguments: the serials, after "--". It may be given none.
+	if view != "serials" && flags.NArg() != 0 {
 		return errUsage
 	}
 	o.Now = time.Now().Unix()
@@ -109,7 +118,7 @@ func index(args []string, stdout io.Writer) error {
 	// Every argument is checked before the PKI is read: a mistake in the command line is a usage error, whatever is
 	// on the disk.
 	switch view {
-	case "list", "stats", "pending":
+	case "list", "stats", "pending", "serials":
 	case "crl":
 		if o.CRL == "" {
 			return errUsage
@@ -127,6 +136,8 @@ func index(args []string, stdout io.Writer) error {
 		caindex.List(w, idx, o)
 	case "stats":
 		caindex.Stats(w, idx, o)
+	case "serials":
+		caindex.Serials(w, idx, flags.Args())
 	case "pending":
 		// As before, a CRL that cannot be read is said by the exit status alone: every caller has its own words.
 		if err := caindex.Pending(w, idx, o); err != nil {
