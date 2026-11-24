@@ -118,7 +118,7 @@ conntrack_health() {
     fi
     pct=$((count * 100 / max))
     if (( pct >= 95 )); then
-        check bad "Connection tracking table is $pct% full ($count of $max): new connections are being dropped, so VPN users cannot open sites $S_ARROW find what floods it (a client with a runaway app, or a scan) and disconnect it; raising nf_conntrack_max is a later decision"
+        check bad "Connection tracking table is $pct% full ($count of $max): new connections are being dropped, so VPN users cannot open sites $S_ARROW find what floods it (a client with a runaway app, or a scan) and disconnect it; or raise the limit: sudo sysctl -w net.netfilter.nf_conntrack_max=<number>"
     elif (( pct >= 80 )); then
         check warn "Connection tracking table is $pct% full ($count of $max): when it is full, new connections are dropped $S_ARROW look for a client that opens too many connections, or fewer clients per server"
     else
