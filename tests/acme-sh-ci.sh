@@ -74,13 +74,16 @@ issue)
     echo "PASS: acme.sh's renewal reaches the links through its reload command."
 
     # The staging test, here against Pebble as well: the real certificate, the links and the record stay.
-    real=$(cat /etc/darban/link-cert.pem /etc/darban/link-key.pem /var/lib/darban/link-certificates.log "$ACME_HOME/links/"* \
-        "$ACME_HOME/data/${HOST}_ecc/"* | sha256sum)
+    # Every file of the real certificate, the pair in use and the record, without acme.sh's backup folder.
+    real_state() {
+        { cat /etc/darban/link-cert.pem /etc/darban/link-key.pem /var/lib/darban/link-certificates.log
+          find "$ACME_HOME/links" "$ACME_HOME/data/${HOST}_ecc" -type f -print0 | sort -z | xargs -0 sha256sum; } | sha256sum
+    }
+    real=$(real_state)
     printf '7\n5\n5\n2\n0\n0\n' | darban | tee "$LOG/acme-staging.log"
     grep "The staging server issued a test certificate for $HOST with acme.sh" "$LOG/acme-staging.log" >/dev/null
     [[ -s $ACME_HOME/staging/certificate/fullchain.pem ]]
-    [[ $(cat /etc/darban/link-cert.pem /etc/darban/link-key.pem /var/lib/darban/link-certificates.log "$ACME_HOME/links/"* \
-        "$ACME_HOME/data/${HOST}_ecc/"* | sha256sum) == "$real" ]]
+    [[ $(real_state) == "$real" ]]
     printf '7\n5\n5\n1\n0\n0\n' | darban | tee "$LOG/acme-staging-delete.log"
     grep 'The test certificate was deleted.' "$LOG/acme-staging-delete.log" >/dev/null
     [[ ! -e $ACME_HOME/staging/certificate ]]
