@@ -1213,24 +1213,7 @@ echo 'PASS: a NAT file that is gone is reported before a reboot, and the install
 # This tool's Let's Encrypt certificate from a real ACME server: Pebble, Let's Encrypt's test server, and certbot
 # from Ubuntu, which the tool installs itself. Issued with this tool's hook; a renewal by certbot reaches the open
 # link through that hook. Further down, an uninstall keeps the certificate without the hook.
-PEBBLE=v2.10.1
-pebble_dir=$LOG/pebble
-mkdir -p "$pebble_dir/bin"
-curl -fsSL --retry 2 -o "$pebble_dir/bin.tar.gz" "https://github.com/letsencrypt/pebble/releases/download/$PEBBLE/pebble-linux-$(dpkg --print-architecture).tar.gz"
-curl -fsSL --retry 2 -o "$pebble_dir/src.tar.gz" "https://github.com/letsencrypt/pebble/archive/refs/tags/$PEBBLE.tar.gz"
-tar -xzf "$pebble_dir/bin.tar.gz" -C "$pebble_dir/bin"
-tar -xzf "$pebble_dir/src.tar.gz" -C "$pebble_dir"
-pebble_bin=$(find "$pebble_dir/bin" -type f -name pebble | head -n 1)
-pebble_src=$(find "$pebble_dir" -maxdepth 1 -type d -name 'pebble-*' | head -n 1)
-chmod +x "$pebble_bin"
-# Pebble rejects a share of good nonces by default, to test a client's retry. That is certbot's code, not this
-# tool's, and two rejections in a row made a renewal here fail now and then: the renewals here test the tool.
-(cd "$pebble_src" && PEBBLE_VA_ALWAYS_VALID=1 PEBBLE_VA_NOSLEEP=1 PEBBLE_WFE_NONCEREJECT=0 "$pebble_bin" -config test/config/pebble-config.json </dev/null >"$LOG/pebble.log" 2>&1 &)
-export REQUESTS_CA_BUNDLE=$pebble_src/test/certs/pebble.minica.pem
-for attempt in $(seq 1 20); do
-    if curl -fs --cacert "$REQUESTS_CA_BUNDLE" https://localhost:14000/dir >/dev/null; then break; fi
-    sleep 0.5
-done
+export REQUESTS_CA_BUNDLE=$(bash tests/pebble-start.sh "$LOG")
 mkdir -p /etc/letsencrypt
 printf 'server = https://localhost:14000/dir\n' > /etc/letsencrypt/cli.ini
 cp /etc/darban/domain "$LOG/domain.before"
@@ -1404,9 +1387,7 @@ grep -qx 'renew_hook = /usr/local/sbin/darban reload-links' "$LE_CONF"
 cmp -s "$OTHER_CONF" "$LOG/other-site.before"
 echo 'PASS: the tool can be removed and installed again without touching the VPN, and gets its hook back.'
 
-# acme.sh on a server without snap, with the Pebble started above, in a script of its own. A pull request runs it on
-# Ubuntu 24.04 only (ACME=0 on the other); weekly, by hand, or with the label scale, on both.
-if [[ ${ACME:-1} == 1 ]]; then bash tests/acme-sh-ci.sh issue "$REQUESTS_CA_BUNDLE" "$LOG"; fi
+# acme.sh without snap runs in the short job (tests/acme-short-ci.sh), not here.
 
 # Full removal: keep a backup, keep the links' Let's Encrypt certificate, keep any kernel the setup added, then confirm.
 kernel_answer=''
@@ -1417,7 +1398,6 @@ grep "Kept the Let's Encrypt certificate darban-ovpn-links" "$LOG/remove-all.log
 if grep -q '^renew_hook' "$LE_CONF"; then echo "FAIL: this tool's hook stayed after Remove everything."; exit 1; fi
 cmp -s "$OTHER_CONF" "$LOG/other-site.before"
 echo "PASS: Remove everything keeps the certificate when asked, without this tool's hook."
-if [[ ${ACME:-1} == 1 ]]; then bash tests/acme-sh-ci.sh removed "$LOG"; fi
 if systemctl is-active --quiet "$UNIT"; then echo 'FAIL: OpenVPN still runs after removal.'; exit 1; fi
 if systemctl is-active --quiet darban-expire.timer; then echo 'FAIL: the timer for kept files is still set after removal.'; exit 1; fi
 for path in /root/pki /etc/openvpn/server /root/openvpn-clients /etc/darban /usr/local/sbin/darban /etc/apt/sources.list.d/openvpn-aptrepo.list /var/log/darban-setup.log \

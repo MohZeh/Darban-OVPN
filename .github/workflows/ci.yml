@@ -90,22 +90,42 @@ jobs:
           cache: false
       # darban-core uses the standard library only, so there is no go.sum and no module but its own. The tools are
       # for CI only, each at a pinned version.
+      # The Go steps run when a Go file, go.mod or this workflow changed, and always weekly and by hand. The build cache
+      # and the two pinned tools are kept between runs, keyed on the Go version and the tool versions.
+      - name: Cache the Go build and the tools
+        if: steps.scope.outputs.go == 'true'
+        uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
+        with:
+          path: |
+            ~/.cache/go-build
+            ~/go/bin
+          key: go-${{ hashFiles('go.mod', '.github/workflows/ci.yml') }}-${{ github.run_id }}
+          restore-keys: |
+            go-${{ hashFiles('go.mod', '.github/workflows/ci.yml') }}-
       - name: 'Go: gofmt, go vet, staticcheck, govulncheck, the standard library only'
+        if: steps.scope.outputs.go == 'true'
         env:
           STATICCHECK: v0.8.2
           GOVULNCHECK: v1.9.0
+          VULN: ${{ steps.scope.outputs.vuln }}
         run: |
           test ! -e go.sum
           test "$(go list -m all)" = github.com/MohZeh/Darban-OVPN
           unformatted=$(gofmt -l .)
           if [ -n "$unformatted" ]; then echo "Not formatted with gofmt: $unformatted"; exit 1; fi
           go vet ./...
-          go install "honnef.co/go/tools/cmd/staticcheck@$STATICCHECK"
-          go install "golang.org/x/vuln/cmd/govulncheck@$GOVULNCHECK"
-          "$(go env GOPATH)/bin/staticcheck" ./...
-          "$(go env GOPATH)/bin/govulncheck" ./...
+          bin=$(go env GOPATH)/bin
+          if [ ! -x "$bin/staticcheck" ]; then go install "honnef.co/go/tools/cmd/staticcheck@$STATICCHECK"; fi
+          "$bin/staticcheck" ./...
+          # The standard library and the tool change without any commit here, so the weekly run, a manual run, and a
+          # change of go.mod or this workflow check them; an ordinary change does not.
+          if [ "$VULN" = true ]; then
+            if [ ! -x "$bin/govulncheck" ]; then go install "golang.org/x/vuln/cmd/govulncheck@$GOVULNCHECK"; fi
+            "$bin/govulncheck" ./...
+          fi
       # In Lint, so a draft sees them: about half a minute. The race detector needs cgo; the release build has none.
       - name: 'Go: go test -race'
+        if: steps.scope.outputs.go == 'true'
         env:
           CGO_ENABLED: 1
         run: go test -race -count=1 ./...
@@ -260,9 +280,8 @@ jobs:
         env:
           PART: ${{ matrix.part }}
           # The measurements only record numbers and fail nothing, so an ordinary pull request does not run them.
-          ACME: ${{ (matrix.ubuntu == '24.04' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' || contains(github.event.pull_request.labels.*.name, 'scale')) && '1' || '0' }}
           MEASURE: ${{ (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' || contains(github.event.pull_request.labels.*.name, 'scale')) && '1' || '0' }}
-        run: sudo MEASURE="$MEASURE" ACME="$ACME" GO="$(command -v go)" GITHUB_STEP_SUMMARY="$GITHUB_STEP_SUMMARY" bash tests/acceptance-ci.sh --i-know "$PART"
+        run: sudo MEASURE="$MEASURE" GO="$(command -v go)" GITHUB_STEP_SUMMARY="$GITHUB_STEP_SUMMARY" bash tests/acceptance-ci.sh --i-know "$PART"
 
   # Three checks of about a minute each, on one runner, so a run waits less for runners: the real-terminal tests,
   # which change nothing on the machine, then the setup on a public address, the path the acceptance run skips
@@ -302,6 +321,11 @@ jobs:
         run: sudo test ! -e /root/pki && test ! -e /etc/openvpn/server/server.conf
       - name: rc.10 from its release, the update to this code, Restore previous version, and back
         run: sudo bash tests/rc10-upgrade-ci.sh --i-know
+      # On the machine rc.10 left: acme.sh without snap, against Pebble, then Remove everything. A pull request runs it
+      # on 24.04 only; weekly, by hand, or with the label scale, on both.
+      - name: acme.sh without snap, Pebble, and Remove everything
+        if: matrix.ubuntu == '24.04' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' || contains(github.event.pull_request.labels.*.name, 'scale')
+        run: sudo bash tests/acme-short-ci.sh --i-know
 
   # The backup of the CA with a real age key, and its restore: refused when it would undo a revocation or run a
   # program, and the way back from a lost server.
