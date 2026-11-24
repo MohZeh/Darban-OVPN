@@ -1104,7 +1104,7 @@ test_server_setup_keeps_an_apt_source_the_owner_changed() {
     # As if the first run had stopped before its last step: the record has no end, and the tool is not installed.
     sed -i '/^setup_complete$/d' "$E/cfg/.server-setup-started"; rm -f "$E/fake-sbin/darban"
     out=$(KERNEL_PRESENT=1 setup_run --port 21194 --yes)
-    has 'a changed source file is noticed' 'was changed after the setup wrote it' "$out"
+    has 'a changed source file is noticed' 'was changed after the setup wrote it' "$out$(cat "$E/setup.log" 2>/dev/null)"
     has 'and kept' '# the owner changed this' "$(cat "$SETUP_ROOT/sources/openvpn.list")"
 }
 test_two_setups_at_once_are_refused() {
@@ -4591,7 +4591,7 @@ test_setup_removal_leaves_what_was_there() {
     cat > "$E/bin/ufw" <<'STUB'
 #!/usr/bin/env bash
 echo "ufw $*" >> "$STUB_LOG"
-if [[ ${1:-} == status ]]; then echo 'Status: active'; echo '21194/udp                  ALLOW       Anywhere'; fi
+if [[ ${1:-} == status ]]; then echo 'Status: active'; echo '21194/udp                  ALLOW       Anywhere'; echo 'Anywhere on eth0            ALLOW FWD   Anywhere on tun0           # Darban-OVPN'; fi
 STUB
     chmod +x "$E/bin/ufw"
     sed -i "s#^OUT_DIR=.*#OUT_DIR=$E/clients#" "$E/setup/server-setup.sh"
