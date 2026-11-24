@@ -1213,7 +1213,8 @@ echo 'PASS: a NAT file that is gone is reported before a reboot, and the install
 # This tool's Let's Encrypt certificate from a real ACME server: Pebble, Let's Encrypt's test server, and certbot
 # from Ubuntu, which the tool installs itself. Issued with this tool's hook; a renewal by certbot reaches the open
 # link through that hook. Further down, an uninstall keeps the certificate without the hook.
-export REQUESTS_CA_BUNDLE=$(bash tests/pebble-start.sh "$LOG")
+REQUESTS_CA_BUNDLE=$(bash tests/pebble-start.sh "$LOG")
+export REQUESTS_CA_BUNDLE
 mkdir -p /etc/letsencrypt
 printf 'server = https://localhost:14000/dir\n' > /etc/letsencrypt/cli.ini
 cp /etc/darban/domain "$LOG/domain.before"
