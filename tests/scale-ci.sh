@@ -5,16 +5,26 @@
 #   scale-ci.sh --i-know <valid clients> <part> [folder for the results]
 # The CA index then holds 10,000 rows: the server, the valid clients, and revoked clients for the rest, as a
 # server that has revoked many clients keeps them in its index for the CRL. The times go to the CI summary, and
-# as tab-separated lines to scale.tsv in the results folder. The measurements come in three parts, so CI runs each
-# on a runner of its own, every one after the same setup and data:
+# as tab-separated lines to scale.tsv in the results folder. The measurements come in three parts, every one after
+# the same setup and data:
 #   commands  darban list and darban status
 #   menu      opening the menu, and creating one client
 #   crl       gen-crl and publishing the CRL, the connection events, and the client-connect script
+# The part "all" does the setup and the data once and runs the three in this order, on the same server: commands
+# (the list must count exactly the valid clients, and the menu adds one), crl (it changes no row of the index, the
+# files it leaves are the same ones the setup made), and menu last (it creates clients, so no other part sees them).
+# Each part keeps its own summary table, rows and comparison.
 set -Eeuo pipefail
-[[ ${1:-} == --i-know && ${2:-} =~ ^[0-9]+$ && -n ${3:-} ]] || { echo 'This reconfigures the machine. Use only on a disposable one: scale-ci.sh --i-know <valid clients> commands|menu|crl [results folder]' >&2; exit 2; }
+[[ ${1:-} == --i-know && ${2:-} =~ ^[0-9]+$ && -n ${3:-} ]] || { echo 'This reconfigures the machine. Use only on a disposable one: scale-ci.sh --i-know <valid clients> commands|menu|crl|all [results folder]' >&2; exit 2; }
 CLIENTS=$2
 PART=$3
-[[ $PART == commands || $PART == menu || $PART == crl ]] || { echo "No such part: $PART. The parts are commands, menu and crl." >&2; exit 2; }
+[[ $PART == commands || $PART == menu || $PART == crl || $PART == all ]] || { echo "No such part: $PART. The parts are commands, menu, crl and all." >&2; exit 2; }
+# The parts to run, in the order they are shown; CUR is the one whose numbers are being recorded.
+if [[ $PART == all ]]; then PARTS=(commands menu crl); else PARTS=("$PART"); fi
+declare -A ROWS_BY=() NOTE_BY=() CMP_BY=() CMPNOTE_BY=() FAILED_BY=()
+CUR=${PARTS[0]}
+ALL_FAILED=''
+want() { [[ $PART == all || $PART == "$1" ]]; }
 [[ $EUID == 0 ]] || { echo 'Run as root.' >&2; exit 2; }
 ROWS=10000
 # A server's VPN network is a /24: at most 253 clients are connected at once, so a restart brings back 253.
@@ -39,17 +49,19 @@ LIMIT=1200
 TSV=$RESULTS/scale.tsv
 . /etc/os-release
 printf 'key\twhat\tseconds\truns\n' >"$TSV"
-ROWS_MD=''
 NOTES=''
 
 summary() {
-    # Whatever was measured, also when a later step failed.
-    local text
-    text=$(printf '### Scale: Ubuntu %s, %s valid clients, %s\n\n%s\n\n| Measured | Seconds | Runs |\n|---|---:|---:|\n%s\n' \
-        "$VERSION_ID" "$CLIENTS" "$PART" "${NOTES:-No data was made.}" "${ROWS_MD:-| nothing measured | | |}")
-    text+=$(printf '\n\n#### Against the base commit, in this job\n\n%s\n\n| Compared | Base (s, best) | This change (s, best) | New/base | Runs each | Result |\n|---|---:|---:|---:|---:|---|\n%s\n' \
-        "${CMP_NOTE:-Nothing compared.}" "${CMP_MD:-| nothing compared | | | | | |}")
-    if [[ -n ${CMP_FAILED:-} ]]; then text+=$(printf '\n\n**More than 10%% slower than the base: %s.**\n' "$CMP_FAILED"); fi
+    # One table per part: whatever was measured, also when a later step failed.
+    local text='' p
+    for p in "${PARTS[@]}"; do
+        text+=$(printf '### Scale: Ubuntu %s, %s valid clients, %s\n\n%s\n\n| Measured | Seconds | Runs |\n|---|---:|---:|\n%s\n' \
+            "$VERSION_ID" "$CLIENTS" "$p" "Part: $p. ${NOTES:-No data was made.}${NOTE_BY[$p]:-}" "${ROWS_BY[$p]:-| nothing measured | | |}")
+        text+=$(printf '\n\n#### Against the base commit, in this job: %s\n\n%s\n\n| Compared | Base (s, best) | This change (s, best) | New/base | Runs each | Result |\n|---|---:|---:|---:|---:|---|\n%s\n' \
+            "$p" "${CMPNOTE_BY[$p]:-${CMP_NOTE:-Nothing compared.}}" "${CMP_BY[$p]:-| nothing compared | | | | | |}")
+        if [[ -n ${FAILED_BY[$p]:-} ]]; then text+=$(printf '\n\n**More than 10%% slower than the base: %s.**\n' "${FAILED_BY[$p]}"); fi
+        text+=$'\n\n'
+    done
     printf '%s\n' "$text"
     if [[ -n ${GITHUB_STEP_SUMMARY:-} ]]; then printf '%s\n\n' "$text" >>"$GITHUB_STEP_SUMMARY"; fi
 }
@@ -69,7 +81,7 @@ record() {
     local shown=$3
     if [[ $3 =~ ^[0-9]+$ ]]; then shown=$(seconds "$3"); fi
     printf '%s\t%s\t%s\t%s\n' "$1" "$2" "$shown" "$4" >>"$TSV"
-    ROWS_MD+="| $2 | $shown | $4 |"$'\n'
+    ROWS_BY[$CUR]+="| $2 | $shown | $4 |"$'\n'
     echo "TIME: $2: $shown s ($4 runs)"
 }
 measure() {
@@ -172,8 +184,6 @@ menu_open() {
 # each. Only a change more than 10% slower than its base fails the job.
 BASE_DIR=$WORK/base
 COMPARE_TSV=$RESULTS/compare.tsv
-CMP_MD=''
-CMP_FAILED=''
 COMPARE=0
 printf 'key\twhat\tbase seconds\tnew seconds\tnew/base\truns each\tresult\n' >"$COMPARE_TSV"
 stage_base() {
@@ -228,10 +238,11 @@ compare() {
     result=pass
     if (( best_new * 100 > best_base * 110 )); then
         result='FAIL: more than 10% slower'
-        CMP_FAILED+="${CMP_FAILED:+, }$what"
+        FAILED_BY[$CUR]+="${FAILED_BY[$CUR]:+, }$what"
+        ALL_FAILED+="${ALL_FAILED:+, }$what"
     fi
     printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$key" "$what" "$(seconds "$best_base")" "$(seconds "$best_new")" "$shown" "${#new_runs[@]}" "$result" >>"$COMPARE_TSV"
-    CMP_MD+="| $what | $(seconds "$best_base") | $(seconds "$best_new") | $shown | ${#new_runs[@]} | $result |"$'\n'
+    CMP_BY[$CUR]+="| $what | $(seconds "$best_base") | $(seconds "$best_new") | $shown | ${#new_runs[@]} | $result |"$'\n'
     echo "COMPARE: $what: base $(seconds "$best_base") s, new $(seconds "$best_new") s, new/base $shown: $result"
 }
 prepare_events() {
@@ -256,7 +267,11 @@ stage_base || staged=$?
 case $staged in
     0) COMPARE=1
        CMP_NOTE="Base commit ${BASE_SHA:-unknown}: its manager is staged beside this change's, on this runner, with the same server, CA and data. Each command runs base, new, base, new, up to 3 runs each (2 when a run takes 20 s or more), and the best run of each is compared. Only new/base over 1.100 fails the job."
-       if [[ $PART == crl ]]; then CMP_NOTE+=" gen-crl, publishing the CRL and the client-connect script are not the manager (Easy-RSA, lib/common.sh, bin/darban-ovpn-event), so only the events worker is compared."; fi
+       for CUR in "${PARTS[@]}"; do
+           CMPNOTE_BY[$CUR]=$CMP_NOTE
+           if [[ $CUR == crl ]]; then CMPNOTE_BY[$CUR]+=" gen-crl, publishing the CRL and the client-connect script are not the manager (Easy-RSA, lib/common.sh, bin/darban-ovpn-event), so only the events worker is compared."; fi
+       done
+       CUR=${PARTS[0]}
        echo "Comparing with the base commit ${BASE_SHA:-unknown}, staged in $BASE_DIR." ;;
     1) CMP_NOTE='No base commit was given (only a pull request has one): nothing compared.' ;;
     *) exit 1 ;;
@@ -333,7 +348,7 @@ awk -v count="$revoked" -v expires="$(date -u -d '+700 days' +%y%m%d%H%M%SZ)" -v
     'BEGIN {for (n = 1; n <= count; n++) printf "R\t%s\t%s\tDE%030X\tunknown\t/CN=gone-%05d\n", expires, revoked_at, n, n}' >>"$PKI/index.txt"
 [[ $(wc -l <"$PKI/index.txt") == "$ROWS" ]]
 echo "Made $CLIENTS valid and $revoked revoked clients in $(seconds $(( $(now_us) - start ))) s."
-NOTES="Part: $PART. index.txt: $ROWS rows: $CLIENTS valid clients, $revoked revoked, and the server. Kernel $kernel. $quota_note. The update check is off, so no time waits on the network. A time is the median of up to 3 runs; a command that took 20 s or more ran once."
+NOTES="index.txt: $ROWS rows: $CLIENTS valid clients, $revoked revoked, and the server. Kernel $kernel. $quota_note. The update check is off, so no time waits on the network. A time is the median of up to 3 runs; a command that took 20 s or more ran once."
 
 # ---------- the CRL ----------
 # The revoked clients are blocked, as on a real server: a CRL that lists them all. The crl part publishes it the
@@ -342,15 +357,10 @@ NOTES="Part: $PART. index.txt: $ROWS rows: $CLIENTS valid clients, $revoked revo
 # with the index.
 GEN_CRL="env EASYRSA_PKI=$PKI EASYRSA_BATCH=1 $EASYRSA gen-crl"
 PUBLISH_CRL="source /usr/local/lib/darban/common.sh && darban_publish_crl $PKI/crl.pem"
-if [[ $PART == crl ]]; then
-    measure gen-crl "gen-crl (Easy-RSA, $revoked revoked)" 3 "$GEN_CRL"
-    measure publish-crl 'publish the new CRL (verify and install it)' 3 "$PUBLISH_CRL"
-else
-    bash -c "$GEN_CRL" >/dev/null 2>&1
-    temp=$(mktemp "${CRL%/*}/.darban-crl.XXXXXXXX")
-    install -o root -g root -m 644 "$PKI/crl.pem" "$temp"
-    mv -f -- "$temp" "$CRL"
-fi
+bash -c "$GEN_CRL" >/dev/null 2>&1
+temp=$(mktemp "${CRL%/*}/.darban-crl.XXXXXXXX")
+install -o root -g root -m 644 "$PKI/crl.pem" "$temp"
+mv -f -- "$temp" "$CRL"
 
 # ---------- connection events after a restart ----------
 # OpenVPN restarts, and its 253 clients connect again: each connection leaves an event, and the path unit starts
@@ -373,15 +383,55 @@ darban connected >/dev/null
 rm -f -- "$EVENTS"/bad/*
 start=$(now_us)
 write_events 1
-written=$(( $(now_us) - start ))
+events_written=$(( $(now_us) - start ))
 wait_queue_empty 600
-took=$(( $(now_us) - start ))
+events_took=$(( $(now_us) - start ))
 ledger_after "$start" 1
 [[ -z $(ls -A "$EVENTS/bad") ]] || { cat "$EVENTS"/bad/*.why | sort | uniq -c; echo 'FAIL: connection events were set aside as malformed.'; exit 1; }
 
-if [[ $PART == crl ]]; then
-    record events-written "$CONNECTED connection events written by the client-connect script" "$written" 1
-    record events-applied "$CONNECTED connection events after a restart, from the first written to all applied" "$took" 1
+if [[ $PART != crl ]]; then systemctl start darban-sweep.timer; fi
+
+# ---------- the list and the diagnostics ----------
+if want commands; then
+    CUR=commands
+    measure list 'darban list' 3 'darban list'
+    # The fake clients are what the tool sees: the list counts them, and the diagnostics, which fail on any problem, pass.
+    grep "$CLIENTS valid" "$WORK/list.1.log" >/dev/null || { tail -n 5 "$WORK/list.1.log"; echo "FAIL: the list does not show $CLIENTS valid clients."; exit 1; }
+    grep "$revoked revoked" "$WORK/list.1.log" >/dev/null || { tail -n 5 "$WORK/list.1.log"; echo "FAIL: the list does not show $revoked revoked clients."; exit 1; }
+    # G2's goal: with darban-core, the list of 1000 clients and 10,000 index rows in less than 300 ms. Said in the
+    # summary; like every time here, a slow one does not fail the job.
+    if (( CLIENTS == 1000 )); then
+        took=$(awk -F '\t' '$1 == "list" {print $3}' "$TSV")
+        if [[ $took =~ ^[0-9]+\.[0-9]{3}$ ]] && (( 10#${took/./} < 300 )); then goal='met'; else goal='**not met**'; fi
+        NOTE_BY[commands]+=" Goal of G2, darban list with 1000 clients in less than 0.300 s: $goal ($took s)."
+        echo "GOAL: darban list with 1000 clients in less than 0.300 s: $goal ($took s)"
+    fi
+    # One more run of the list, traced with timestamps, to show where its time goes.
+    start=$(now_us)
+    bash -c 'PS4="+ \${EPOCHREALTIME} \${FUNCNAME[0]:-main} "; set -x; . /usr/local/sbin/darban list' >/dev/null 2>"$WORK/list.trace" </dev/null || true
+    echo "PROFILE: one traced darban list took $(seconds $(( $(now_us) - start ))) s"
+    profile list 'darban list, traced' "$WORK/list.trace"
+    measure status 'darban status' 3 'darban status'
+    echo "PASS: the list shows $CLIENTS valid and $revoked revoked clients, and the diagnostics pass."
+    compare list 'darban list' '' 'darban list' "bash $BASE_DIR/darban list"
+    compare status 'darban status' '' 'darban status' "bash $BASE_DIR/darban status"
+fi
+
+# ---------- the CRL part ----------
+# The CRL is published the tool's own way, and timed. It changes no row of the index, and leaves a CRL that agrees
+# with it, as the setup left; the events leave records of real connections, as the restart above did. The
+# five-minute check stays off meanwhile, as above.
+if want crl; then
+    CUR=crl
+    systemctl stop darban-sweep.timer
+    for attempt in $(seq 1 60); do
+        if ! systemctl is-active --quiet darban-sweep.service; then break; fi
+        sleep 1
+    done
+    measure gen-crl "gen-crl (Easy-RSA, $revoked revoked)" 3 "$GEN_CRL"
+    measure publish-crl 'publish the new CRL (verify and install it)' 3 "$PUBLISH_CRL"
+    record events-written "$CONNECTED connection events written by the client-connect script" "$events_written" 1
+    record events-applied "$CONNECTED connection events after a restart, from the first written to all applied" "$events_took" 1
     # The worker alone, on 253 events already waiting in the queue: the path unit stays off meanwhile, as the
     # five-minute check still does.
     systemctl stop darban-events.path
@@ -408,11 +458,12 @@ if [[ $PART == crl ]]; then
     record connect-script "one run of the client-connect script" "$first" 1
     record connect-script-mean "one run of the client-connect script, the average of 100" "$rest" 100
     wait_queue_empty 120
+    systemctl start darban-sweep.timer
 fi
-systemctl start darban-sweep.timer
 
 # ---------- the menu, and one more client ----------
-if [[ $PART == menu ]]; then
+if want menu; then
+    CUR=menu
     runs=()
     for run in 1 2 3; do
         menu_open || { echo 'FAIL: the menu did not open.'; tail -n 30 "$WORK/menu.screen"; exit 1; }
@@ -450,29 +501,5 @@ if [[ $PART == menu ]]; then
     fi
 fi
 
-# ---------- the list and the diagnostics ----------
-if [[ $PART == commands ]]; then
-    measure list 'darban list' 3 'darban list'
-    # The fake clients are what the tool sees: the list counts them, and the diagnostics, which fail on any problem, pass.
-    grep "$CLIENTS valid" "$WORK/list.1.log" >/dev/null || { tail -n 5 "$WORK/list.1.log"; echo "FAIL: the list does not show $CLIENTS valid clients."; exit 1; }
-    grep "$revoked revoked" "$WORK/list.1.log" >/dev/null || { tail -n 5 "$WORK/list.1.log"; echo "FAIL: the list does not show $revoked revoked clients."; exit 1; }
-    # G2's goal: with darban-core, the list of 1000 clients and 10,000 index rows in less than 300 ms. Said in the
-    # summary; like every time here, a slow one does not fail the job.
-    if (( CLIENTS == 1000 )); then
-        took=$(awk -F '\t' '$1 == "list" {print $3}' "$TSV")
-        if [[ $took =~ ^[0-9]+\.[0-9]{3}$ ]] && (( 10#${took/./} < 300 )); then goal='met'; else goal='**not met**'; fi
-        NOTES+=" Goal of G2, darban list with 1000 clients in less than 0.300 s: $goal ($took s)."
-        echo "GOAL: darban list with 1000 clients in less than 0.300 s: $goal ($took s)"
-    fi
-    # One more run of the list, traced with timestamps, to show where its time goes.
-    start=$(now_us)
-    bash -c 'PS4="+ \${EPOCHREALTIME} \${FUNCNAME[0]:-main} "; set -x; . /usr/local/sbin/darban list' >/dev/null 2>"$WORK/list.trace" </dev/null || true
-    echo "PROFILE: one traced darban list took $(seconds $(( $(now_us) - start ))) s"
-    profile list 'darban list, traced' "$WORK/list.trace"
-    measure status 'darban status' 3 'darban status'
-    echo "PASS: the list shows $CLIENTS valid and $revoked revoked clients, and the diagnostics pass."
-    compare list 'darban list' '' 'darban list' "bash $BASE_DIR/darban list"
-    compare status 'darban status' '' 'darban status' "bash $BASE_DIR/darban status"
-fi
-if [[ -n $CMP_FAILED ]]; then echo "FAIL: more than 10% slower than the base: $CMP_FAILED."; exit 1; fi
-echo "PASS: every measurement of the $PART part ran."
+if [[ -n $ALL_FAILED ]]; then echo "FAIL: more than 10% slower than the base: $ALL_FAILED."; exit 1; fi
+echo "PASS: every measurement of the ${PARTS[*]} part(s) ran."
