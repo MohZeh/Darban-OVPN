@@ -89,6 +89,33 @@ measure() {
     done
     record "$key" "$what" "$(median "${runs[@]}")" "${#runs[@]}"
 }
+profile() {
+    # profile <key> <what> <trace file>: where the time of one traced run went, from its bash -x lines with
+    # timestamps. Each line is charged the time until the next one, so a command that runs a program is charged
+    # that program. Printed, and kept in the results folder; a trace that cannot be read fails nothing.
+    local out=$RESULTS/$1.profile
+    awk '
+        match($0, /^\++ [0-9]+\.[0-9]+ [^ ]+ /) {
+            head = substr($0, 1, RLENGTH); rest = substr($0, RLENGTH + 1); split(head, f, " ")
+            t = f[2] + 0
+            if (n++) { d = t - pt; byfn[pfn] += d; key = pfn " " pword; bycmd[key] += d; calls[key]++; if (d > top[pline]) top[pline] = d }
+            else first = t
+            pt = t; pfn = f[3]; split(rest, w, " "); pword = w[1]; pline = pfn " " substr(rest, 1, 110)
+        }
+        END {
+            printf "traced lines %d, %.3f s from the first to the last\n", n, pt - first
+            print "-- by function (time of its own lines)"
+            for (k in byfn) if (byfn[k] >= 0.002) printf "%8.3f  %s\n", byfn[k], k | "sort -rn | head -n 25"
+            close("sort -rn | head -n 25")
+            print "-- by function and command (calls)"
+            for (k in bycmd) if (bycmd[k] >= 0.002) printf "%8.3f  %6d  %s\n", bycmd[k], calls[k], k | "sort -rn | head -n 30"
+            close("sort -rn | head -n 30")
+            print "-- slowest single lines"
+            for (k in top) if (top[k] >= 0.005) printf "%8.3f  %s\n", top[k], k | "sort -rn | head -n 20"
+        }' "$3" >"$out" 2>&1 || true
+    echo "PROFILE: $2"
+    cat "$out"
+}
 queue_empty() {
     local entry
     for entry in "$EVENTS"/new/* "$EVENTS"/work/*; do [[ -e $entry ]] && return 1; done
@@ -394,6 +421,9 @@ if [[ $PART == menu ]]; then
         (( us < 20000000 )) || break
     done
     record menu "open the menu, until it asks \"Choose [0-9]\"" "$(median "${runs[@]}")" "${#runs[@]}"
+    # One more opening, traced with timestamps, to show where its time goes.
+    python3 tests/time-to-text.py "$LIMIT" 'Choose [0-9]' '0\r' -- bash -c 'exec 2>"$0"; PS4="+ \${EPOCHREALTIME} \${FUNCNAME[0]:-main} "; set -x; . /usr/local/sbin/darban' "$WORK/menu.trace" >/dev/null || true
+    profile menu 'opening the menu, traced' "$WORK/menu.trace"
     # From a script, as tests/vm-reboot.sh creates one: the menu opens, takes the name, and closes.
     measure create 'create one client, from opening the menu to leaving it' 1 "printf '1\\nscale-new\\n0\\n' | darban"
     [[ -s /root/openvpn-clients/scale-new.ovpn ]] || { echo 'FAIL: the new client has no profile.'; exit 1; }
@@ -433,6 +463,11 @@ if [[ $PART == commands ]]; then
         NOTES+=" Goal of G2, darban list with 1000 clients in less than 0.300 s: $goal ($took s)."
         echo "GOAL: darban list with 1000 clients in less than 0.300 s: $goal ($took s)"
     fi
+    # One more run of the list, traced with timestamps, to show where its time goes.
+    start=$(now_us)
+    bash -c 'PS4="+ \${EPOCHREALTIME} \${FUNCNAME[0]:-main} "; set -x; . /usr/local/sbin/darban list' >/dev/null 2>"$WORK/list.trace" </dev/null || true
+    echo "PROFILE: one traced darban list took $(seconds $(( $(now_us) - start ))) s"
+    profile list 'darban list, traced' "$WORK/list.trace"
     measure status 'darban status' 3 'darban status'
     echo "PASS: the list shows $CLIENTS valid and $revoked revoked clients, and the diagnostics pass."
     compare list 'darban list' '' 'darban list' "bash $BASE_DIR/darban list"
