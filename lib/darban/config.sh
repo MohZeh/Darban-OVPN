@@ -210,16 +210,19 @@ load_config() {
     fi
 }
 setup() {
-    local cmd
+    local cmd serial
     darban_require_root
     for cmd in systemctl ss find cp chmod chown timeout; do command -v "$cmd" >/dev/null || { darban_error "Missing dependency: $cmd"; return 1; }; done
     install -d -o root -g root -m 700 "$CONFIG_DIR" "$OUT_DIR"
     load_config
-    SERVER_PROBLEM=$(server_problem)
-    if [[ -z $SERVER_PROBLEM ]]; then SERVER_SERIAL=$(darban_server_serial); fi
+    # The serial of the server's certificate, read once: the check of the server files needs only to know it reads.
+    serial=$(darban_server_serial 2>/dev/null) || serial=''
+    SERVER_PROBLEM=$(server_problem "$serial")
+    if [[ -z $SERVER_PROBLEM ]]; then SERVER_SERIAL=$serial; fi
 }
 server_problem() {
-    # Prints why this server cannot be managed; nothing when it can.
+    # server_problem [serial of the server's certificate, when already read]: prints why this server cannot be
+    # managed; nothing when it can.
     if [[ -f $DARBAN_RESTORE_JOURNAL ]]; then
         if restore_committed; then
             printf 'A restore is done, but its cleanup is unfinished. Finish it: sudo darban restore --resume\n'
@@ -232,14 +235,15 @@ server_problem() {
         fi
         return 0
     fi
-    server_files_problem
+    server_files_problem "$@"
 }
 server_files_problem() {
-    # Prints what in the CA or the server files keeps OpenVPN from running; nothing when they are whole.
+    # server_files_problem [serial of the server's certificate, when already read]: prints what in the CA or the
+    # server files keeps OpenVPN from running; nothing when they are whole.
     local out
     out=$(C_RED='' C_RESET='' darban_preflight 2>&1) || { printf '%s\n' "${out##*ERROR: }"; return 0; }
     if [[ ! -s $TLS_KEY ]]; then printf 'OpenVPN tls-crypt.key is missing.\n'; return 0; fi
-    if ! darban_server_serial >/dev/null 2>&1; then
+    if [[ -z ${1:-} ]] && ! darban_server_serial >/dev/null 2>&1; then
         printf "Cannot read the server certificate from server.conf (one 'cert' directive or an inline <cert> block).\n"
     fi
 }

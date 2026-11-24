@@ -71,4 +71,17 @@ func TestViews(t *testing.T) {
 	if rc, out, _ := call("index", "--pki", dir, "--view", "list", "--now", "1795392000", "--server-serial", "A"); rc != 0 || out != "hidden\t1\n" {
 		t.Errorf("list: %d %q", rc, out)
 	}
+	if rc, out, _ := call("index", "--pki", dir, "--view", "list", "--now", "1795392000", "--server-serial", "A", "--pending"); rc != 0 || out != "hidden\t1\npending\tgone\n" {
+		t.Errorf("list with pending: %d %q", rc, out)
+	}
+	if rc, out, _ := call("index", "--pki", dir, "--view", "serials", "--", "0b", "-1", "a"); rc != 0 || out != "serial\t1\tR\nserial\t3\tV\n" {
+		t.Errorf("serials: %d %q", rc, out)
+	}
+	if rc, out, _ := call("index", "--pki", dir, "--view", "serials"); rc != 0 || out != "" {
+		t.Errorf("serials, none given: %d %q", rc, out)
+	}
+	// An index that cannot be read is an error for serials too, never a list of unknown serials.
+	if rc, out, _ := call("index", "--pki", filepath.Join(dir, "none"), "--view", "serials", "--", "0b"); rc != 1 || out != "" {
+		t.Errorf("serials of a missing index: %d %q", rc, out)
+	}
 }

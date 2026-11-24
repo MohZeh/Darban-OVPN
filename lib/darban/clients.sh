@@ -47,14 +47,13 @@ client_index_lookup() {
 client_index_status() { local row; row=$(client_index_lookup "$1"); printf '%s\n' "${row%%$'\t'*}"; }
 client_index_serial() { local row; row=$(client_index_lookup "$1"); [[ $row != *$'\t'* ]] || printf '%s\n' "${row#*$'\t'}"; }
 index_state_of_serial() {
-    # State of one exact certificate, which a reissued name's status cannot tell.
-    local want rows state expiry serial
-    want=$(darban_norm_serial "$1") || return 1
-    rows=$(darban_index_rows) || return 1
-    while IFS=$'\t' read -r state expiry serial; do
-        if [[ $(darban_norm_serial "$serial") == "$want" ]]; then printf '%s\n' "$state"; return 0; fi
-    done <<<"$rows"
-    return 1
+    # State of one exact certificate, which a reissued name's status cannot tell: the first record with that serial.
+    # Fails when the index cannot be read or does not have it.
+    local data kind place state
+    data=$(core_index serials -- "$1") || return 1
+    IFS=$'\t' read -r kind place state <<<"$data"
+    [[ $kind == serial && -n $state ]] || return 1
+    printf '%s\n' "$state"
 }
 is_server_serial() { [[ $(darban_norm_serial "$1" 2>/dev/null) == "$SERVER_SERIAL" ]]; }
 safe_text() { printf '%s' "${1//[^[:print:]]/?}"; }
@@ -388,13 +387,16 @@ list_clients() {
     # out the table. Its rows come in the order of index.txt and are sorted here, in this locale, as before.
     local kind cn label e day state us rank days name_w=6 out line cell color profile shown reason pending data
     local valid=0 revoked=0 expired=0 soon=0 hidden=0 online='' events=0 seen code serial now
-    local -a rows=() blocks=() options=()
-    now=$(date -u +%s)
+    local -a rows=() blocks=() options=() pendings=()
+    printf -v now '%(%s)T' -1
     # Who is connected now, when the server can say: one look, not one per client.
     if mgmt_available; then online=$'\n'$(connected_rows 2>/dev/null | cut -f1)$'\n'; fi
     # When each was last seen, from its connection events; never means not since they were turned on.
     if events_lines_on; then events=1; fi
-    options=(--now "$now" --server-serial "$SERVER_SERIAL" --ledger "$LEDGER_DIR")
+    # The revoked clients not blocked yet come in the same call, as revocation_pending_names gives them: only a CRL
+    # this CA signed counts, and one darban-core cannot read gives none.
+    options=(--now "$now" --server-serial "$SERVER_SERIAL" --ledger "$LEDGER_DIR" --pending)
+    if darban_crl_signature_ok "$DARBAN_CRL"; then options+=(--crl "$DARBAN_CRL"); fi
     if (( LIST_ALL )); then options+=(--all); fi
     data=$(core_index list "${options[@]}") || return 1
     while IFS=$'\t' read -r kind rank cn label e day state us; do
@@ -405,6 +407,7 @@ list_clients() {
             hidden) hidden=$rank ;;
             # block <name> <reason> <serial>
             block) blocks+=("$rank"$'\t'"$cn"$'\t'"$label") ;;
+            pending) pendings+=("$rank") ;;
         esac
     done <<<"$data"
     LIST_HIDDEN=$hidden
@@ -443,7 +446,8 @@ list_clients() {
         line+="  $cell"
         # The server copy belongs to a reissued name's valid certificate, not to its revoked history.
         profile='-'
-        if { [[ $label == VALID ]] || [[ $state != V ]]; } && profile_path "$cn" >/dev/null; then profile="$S_OK on server"; fi
+        # profile_path, without a call for each row.
+        if { [[ $label == VALID ]] || [[ $state != V ]]; } && [[ -s $OUT_DIR/$cn.ovpn ]]; then profile="$S_OK on server"; fi
         if [[ $label == VALID && $online == *$'\n'"$cn"$'\n'* ]]; then profile+="  $C_GREEN$S_DOT connected$C_RESET"; fi
         out+="$line  $profile"$'\n'
     done < <(printf '%s\n' "${rows[@]}" | sort -t $'\t' -k1,1n -k2,2)
@@ -464,7 +468,8 @@ list_clients() {
             if [[ -n $reason ]]; then out+=$'\n'"  $C_YELLOW$S_WARN$C_RESET $(safe_text "$cn") cannot be revoked here: $reason"; fi
         done < <(printf '%s\n' "${blocks[@]}" | sort -t $'\t' -k1,1)
     fi
-    pending=$(revocation_pending_names | join_lines) || pending=''
+    pending=''
+    if (( ${#pendings[@]} > 0 )); then pending=$(printf '%s\n' "${pendings[@]}" | join_lines) || pending=''; fi
     if [[ -n $pending ]]; then out+=$'\n'"  $C_RED$S_WARN$C_RESET Revoked but NOT blocked yet: $(safe_text "$pending") $S_ARROW Maintenance $S_CRUMB 2"; fi
     out+=$'\n'
     emit "$out"

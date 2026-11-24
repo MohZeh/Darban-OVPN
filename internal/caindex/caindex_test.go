@@ -286,6 +286,28 @@ func TestList(t *testing.T) {
 	}
 }
 
+func TestListWithPending(t *testing.T) {
+	p := newPKI(t)
+	p.row("V", "291231235959Z", "10", "/CN=server")
+	p.row("R", "291231235959Z", "11", "/CN=listed")
+	p.row("R", "291231235959Z", "12", "/CN=waiting")
+	idx := p.index()
+	o := Options{PKI: p.dir, Now: now, ServerSerial: "10", CRL: p.crl(0x11), Pending: true}
+	// The same names as the pending view, after the records of the list.
+	if got := output(t, func(w *records.Writer) { List(w, idx, o) }); got != "hidden\t2\npending\twaiting\n" {
+		t.Errorf("list with pending = %q", got)
+	}
+	// A CRL that cannot be read gives no pending name, and the list is still whole.
+	p.write("crl.pem", "not a CRL\n")
+	if got := output(t, func(w *records.Writer) { List(w, idx, o) }); got != "hidden\t2\n" {
+		t.Errorf("list with pending, CRL unreadable = %q", got)
+	}
+	o.Pending = false
+	if got := output(t, func(w *records.Writer) { List(w, idx, o) }); got != "hidden\t2\n" {
+		t.Errorf("list without pending = %q", got)
+	}
+}
+
 func TestStats(t *testing.T) {
 	p := newPKI(t)
 	p.row("V", "291231235959Z", "10", "/CN=server")
@@ -396,4 +418,21 @@ func mustRead(t *testing.T, path string) string {
 		t.Fatal(err)
 	}
 	return string(data)
+}
+
+func TestSerials(t *testing.T) {
+	p := newPKI(t)
+	p.row("R", "291231235959Z", "0A", "/CN=old")
+	p.row("V", "291231235959Z", "0a", "/CN=again")
+	p.row("V", "291231235959Z", "1F", "/CN=one")
+	idx := p.index()
+	got := output(t, func(w *records.Writer) { Serials(w, idx, []string{"1f", "", "00:0A", "x1", "2B", "1F"}) })
+	// The first record of a serial decides; a serial that is not hex, or not in the database, gets nothing.
+	want := "serial\t1\tV\nserial\t3\tR\nserial\t6\tV\n"
+	if got != want {
+		t.Fatalf("serials:\n%q\nwant\n%q", got, want)
+	}
+	if got := output(t, func(w *records.Writer) { Serials(w, idx, nil) }); got != "" {
+		t.Fatalf("no serials: %q", got)
+	}
 }
