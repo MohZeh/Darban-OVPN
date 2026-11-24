@@ -4591,7 +4591,7 @@ test_setup_removal_leaves_what_was_there() {
     cat > "$E/bin/ufw" <<'STUB'
 #!/usr/bin/env bash
 echo "ufw $*" >> "$STUB_LOG"
-if [[ ${1:-} == status ]]; then echo 'Status: active'; echo '21194/udp                  ALLOW       Anywhere'; echo 'Anywhere on eth0            ALLOW FWD   Anywhere on tun0           # Darban-OVPN'; fi
+if [[ ${1:-} == status ]]; then echo 'Status: active'; echo '21194/udp                  ALLOW       Anywhere'; cat "$STUB_LOG.rules" 2>/dev/null; fi
 STUB
     chmod +x "$E/bin/ufw"
     sed -i "s#^OUT_DIR=.*#OUT_DIR=$E/clients#" "$E/setup/server-setup.sh"
@@ -4599,6 +4599,7 @@ STUB
     setup_run --port 21194 --open-ufw --yes >/dev/null
     if grep -q 'ufw allow 21194/udp' "$STUB_LOG"; then result 0 'an existing ufw rule is not added again'; else result 1 'an existing ufw rule is not added again'; fi
     grep -q 'ufw route allow in on tun0' "$STUB_LOG"; rc_is 'the missing rule is added' 0 "$?"
+    echo 'Anywhere on eth0            ALLOW FWD   Anywhere on tun0           # Darban-OVPN' > "$STUB_LOG.rules"
     grep -qx out_dir_existed "$E/cfg/.server-setup-started"; rc_is 'a folder that held files is recorded' 0 "$?"
     install_removal_scripts
     menu '1\nfirst\n0\n' >/dev/null
