@@ -131,6 +131,8 @@ PORT_SHARE_DIR=/run/darban-port-share
 PORT_SHARE_TMPFILES=/etc/tmpfiles.d/darban-port-share.conf
 # The link service stays up while port-share is on, and starts again if it fails.
 LINK_UNIT_DROPIN=$UNIT_DIR/darban-links.service.d/darban-port-share.conf
+# The kernel's connection tracking table, which NAT uses; Diagnostics read how full it is.
+CONNTRACK_DIR=/proc/sys/net/netfilter
 EXPIRY_WARN_DAYS=30
 # Download hints; overridden by $CONFIG_FILE (see load_config). Empty host disables them.
 DOWNLOAD_SSH_HOST=''

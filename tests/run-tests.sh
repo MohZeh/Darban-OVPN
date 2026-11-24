@@ -5590,6 +5590,23 @@ test_diagnostics_of_connection_events() {
     has 'a failed watcher is a problem' 'darban-events.path is not running' "$(FAKE_FAILED=darban-events.path mgr status)"
     has 'a stopped check too' 'darban-sweep.timer is not active' "$(FAKE_FAILED=darban-sweep.timer mgr status)"
     has 'a small process limit is a problem' 'lets root run only 10 processes (LimitNPROC)' "$(FAKE_LIMITNPROC=10 mgr status)"
+    # Connection tracking: a neutral line without the files, then the count, a warning at 80% and a failure at 95%.
+    rm -rf "$E/conntrack"
+    out=$(mgr status)
+    has 'no conntrack files is a neutral line' 'Connection tracking table: not available' "$out"
+    lacks 'and not a problem' 'Connection tracking table is' "$out"
+    mkdir -p "$E/conntrack"; echo 65536 > "$E/conntrack/nf_conntrack_max"
+    echo 1000 > "$E/conntrack/nf_conntrack_count"
+    has 'a quiet table shows count, max and percent' 'Connection tracking table: 1000 of 65536 entries (1%)' "$(mgr status)"
+    echo 52429 > "$E/conntrack/nf_conntrack_count"
+    out=$(mgr status)
+    has 'a table at 80% warns' 'Connection tracking table is 80% full (52429 of 65536): when it is full, new connections are dropped' "$out"
+    echo 62260 > "$E/conntrack/nf_conntrack_count"
+    out=$(mgr status); rc_is 'a table at 95% is a failure' 1 "$?"
+    has 'and says what users see' 'Connection tracking table is 95% full (62260 of 65536): new connections are being dropped' "$out"
+    echo abc > "$E/conntrack/nf_conntrack_count"
+    has 'an unreadable count is the neutral line, not a partial one' 'Connection tracking table: not available' "$(mgr status)"
+    rm -rf "$E/conntrack"
     raw_event x connect alice 5; touch -d '-11 minutes' "$E/events/new/x"
     has 'an event waiting over 10 minutes is a problem' '1 connection event(s) waited more than 10 minutes' "$(mgr status)"
     rm -f "$E/events/new/x"
