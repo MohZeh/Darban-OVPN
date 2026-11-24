@@ -245,7 +245,8 @@ sed -e "s#^OUT_DIR=.*#OUT_DIR=$E/clients#" -e "s#^LINK_DIR=.*#LINK_DIR=$E/links#
     -e "s#^LEDGER_DIR=.*#LEDGER_DIR=$E/varlib/clients#" \
     -e "s#^ACME_HOME=.*#ACME_HOME=$E/acme-home#" \
     -e "s#^PORT_SHARE_DIR=.*#PORT_SHARE_DIR=$E/run/darban-port-share#" -e "s#^PORT_SHARE_TMPFILES=.*#PORT_SHARE_TMPFILES=$E/tmpfiles/darban-port-share.conf#" \
-    -e "s#^CONNTRACK_DIR=.*#CONNTRACK_DIR=$E/conntrack#"     -e "s#^PKI_BACKUP_DIR=.*#PKI_BACKUP_DIR=$E/pki-backups#" -e "s#^RESTORE_WARN=.*#RESTORE_WARN=$E/varlib/restore-unverified#" -e "s#^RESTORE_EXTRAS=.*#RESTORE_EXTRAS=$E/varlib/restore-extras#" \n    -e 's#^EVENT_MAX=.*#EVENT_MAX=${TEST_EVENT_MAX:-500}#' \
+    -e "s#^CONNTRACK_DIR=.*#CONNTRACK_DIR=$E/conntrack#"     -e "s#^PKI_BACKUP_DIR=.*#PKI_BACKUP_DIR=$E/pki-backups#" -e "s#^RESTORE_WARN=.*#RESTORE_WARN=$E/varlib/restore-unverified#" -e "s#^RESTORE_EXTRAS=.*#RESTORE_EXTRAS=$E/varlib/restore-extras#" \
+    -e 's#^EVENT_MAX=.*#EVENT_MAX=${TEST_EVENT_MAX:-500}#' \
     "$SRC/lib/darban/paths.sh" > "$E/lib/modules/paths.sh"
 # The screens keep their folder. The event_run_id stand-in is a function, not a path: it goes into the module that
 # has it, and the build fails when no module has it.
