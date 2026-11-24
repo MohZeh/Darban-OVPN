@@ -153,6 +153,8 @@ health() {
     else
         check bad 'Server certificate unreadable'
     fi
+    # Which program got the links' Let's Encrypt certificate, and how it renews.
+    if value=$(link_cert_client); then check info "Link certificate from Let's Encrypt by $value; $(link_cert_renewal_text)"; fi
 
     group 'Revocation (CRL)'
     # What OpenVPN does with a broken CRL depends on when it breaks: gone at start, OpenVPN does not start; gone

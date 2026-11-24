@@ -1392,6 +1392,9 @@ grep -qx 'renew_hook = /usr/local/sbin/darban reload-links' "$LE_CONF"
 cmp -s "$OTHER_CONF" "$LOG/other-site.before"
 echo 'PASS: the tool can be removed and installed again without touching the VPN, and gets its hook back.'
 
+# acme.sh on a server without snap, with the Pebble started above, in a script of its own.
+bash tests/acme-sh-ci.sh issue "$REQUESTS_CA_BUNDLE" "$LOG"
+
 # Full removal: keep a backup, keep the links' Let's Encrypt certificate, keep any kernel the setup added, then confirm.
 kernel_answer=''
 if [[ $(bash /usr/local/lib/darban/remove-server.sh --kernel-status) == removable ]]; then kernel_answer='1\n'; fi
@@ -1401,6 +1404,7 @@ grep "Kept the Let's Encrypt certificate darban-ovpn-links" "$LOG/remove-all.log
 if grep -q '^renew_hook' "$LE_CONF"; then echo "FAIL: this tool's hook stayed after Remove everything."; exit 1; fi
 cmp -s "$OTHER_CONF" "$LOG/other-site.before"
 echo "PASS: Remove everything keeps the certificate when asked, without this tool's hook."
+bash tests/acme-sh-ci.sh removed "$LOG"
 if systemctl is-active --quiet "$UNIT"; then echo 'FAIL: OpenVPN still runs after removal.'; exit 1; fi
 if systemctl is-active --quiet darban-expire.timer; then echo 'FAIL: the timer for kept files is still set after removal.'; exit 1; fi
 for path in /root/pki /etc/openvpn/server /root/openvpn-clients /etc/darban /usr/local/sbin/darban /etc/apt/sources.list.d/openvpn-aptrepo.list /var/log/darban-setup.log \

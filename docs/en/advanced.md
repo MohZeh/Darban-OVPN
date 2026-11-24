@@ -139,6 +139,17 @@ Open **Settings › Advanced**. Items marked `*` (1 to 6, and the OpenVPN protoc
 
 The link settings are in **Settings** itself, under **SHARING**: **Shares expire after**, which holds for files kept on the server too, **Link port** and **Link certificate**. None of them restarts OpenVPN.
 
+### Link certificate
+
+**Settings › Link certificate** shows the certificate links use now, and how it is renewed. **Details** also names the program that got it, and **Diagnostics** do too.
+
+- **certbot** gets this tool's Let's Encrypt certificate, as before: Ubuntu's package for a domain name, the Certbot project's snap for an IP address.
+- **acme.sh** only when the server has no snap and certbot cannot do it: an IP address needs certbot 5.3 or newer, which Ubuntu does not ship yet, or Ubuntu's certbot cannot be installed. The tool downloads the one file `acme.sh` of version 3.1.6, at the commit of its release on GitHub, and installs it only when the file has the SHA-256 written in the tool. Nothing else of acme.sh is needed: no DNS, deploy or notify scripts. It lives in `/var/lib/darban-acme`, with its own account and settings, and nothing in root's home or crontab. The timer `darban-acme.timer` renews the certificate twice a day when it is due, and the renewal reaches open links. acme.sh is GPLv3 and runs as a program of its own; none of its code is in this tool.
+  If the download does not have that SHA-256, nothing is installed: the download was cut short or changed on the way. Try again later; if it fails again, update Darban, or install snap so certbot is used.
+- **Test Let's Encrypt with its staging server** asks Let's Encrypt's staging server for a test certificate. It shows that TCP 80, the address and the way to a certificate work, without using one of the 5 certificates a week. Browsers do not trust it. It has a name of its own, `darban-ovpn-links-staging` with certbot or `/var/lib/darban-acme/staging` with acme.sh, and it never replaces, renews or counts as the links' certificate. The screen shows where it is kept and offers to delete it. **Remove everything** deletes it in any case.
+
+**Remove everything** removes acme.sh, its timer and the certificates it got, when this tool installed it.
+
 **How a change is applied:** you confirm it, `server.conf` is backed up next to itself (the newest five are kept), and OpenVPN restarts. If a port OpenVPN listens on, UDP or TCP, does not return within 5 seconds, the previous file is restored and OpenVPN restarted. If that also fails, an urgent message says so. This check is local: it cannot prove that clients reach the server from the internet.
 
 ### UDP, TCP or both

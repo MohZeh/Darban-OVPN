@@ -4230,9 +4230,12 @@ test_old_certbot_is_not_used_for_an_ip() {
     lacks 'and the screen does not' 's, exit 1' "$out"
     has 'a failed install falls back to a working link' "https://203.0.113.9:$LINK_TEST_PORT/l/" "$out"
     menu '6\n1\n2\n0\n' >/dev/null
-    # Without snap there is no way to a new enough certbot, so the question is not asked at all.
+    # Without snap there is no way to a new enough certbot: acme.sh is the way, and a download whose SHA-256 is not
+    # the one written in the tool is refused before anything of it runs.
     rm -f "$E/cfg/link-cert.pem" "$E/cfg/link-key.pem"
     sed -i 's/^have_snap() {.*/have_snap() { false; }/' "$E/lib/modules/certs.sh"
+    fake_apt_cache 2.9.0-1ubuntu1
+    fake_curl_download 'not the acme.sh release'
     : > "$STUB_LOG"
     out=$(menu '5
 alice
@@ -4241,11 +4244,263 @@ alice
 1
 0
 ')
-    has 'without snap it says why' 'this server has no snap' "$out"
-    lacks 'and does not offer the certificate' 'Get a free Let' "$out"
-    if grep -q 'pip\|venv' "$STUB_LOG"; then result 0 'nothing comes from the Python Package Index'; else result 1 'nothing comes from the Python Package Index'; fi
+    has 'without snap it says why acme.sh gets it' 'This server has no snap for certbot 5.3 or newer, so acme.sh 3.1.6 gets it.' "$out"
+    grep -q 'curl .*https://raw.githubusercontent.com/acmesh-official/acme.sh/807da6498377ee5e0cf43a78091f46f12dc59a89/acme.sh' "$STUB_LOG"; rc_is 'acme.sh is its one file at the commit of the 3.1.6 tag' 0 "$?"
+    has 'a wrong SHA-256 is refused' 'does not have the SHA-256 this tool knows for version 3.1.6' "$out"
+    ok_if 'and nothing of it is installed' test ! -e "$E/acme-home/acme.sh-3.1.6"
+    has 'and it says what to do' 'If it fails again, update Darban' "$out"
+    ok_if 'no folder is left that Remove everything would not know of' test ! -e "$E/acme-home"
+    if grep -q '^acme_sh' "$E/cfg/.server-setup-started" 2>/dev/null; then result 0 'nor recorded'; else result 1 'nor recorded'; fi
+    if grep -q 'pip\|venv\|get.acme.sh' "$STUB_LOG"; then result 0 'nothing comes from the Python Package Index or get.acme.sh'; else result 1 'nothing comes from the Python Package Index or get.acme.sh'; fi
     has 'the link still works' "https://203.0.113.9:$LINK_TEST_PORT/l/" "$out"
     stop_links_stub
+}
+
+# ---------- certificate options: the staging test, and acme.sh on a server without snap ----------
+fake_apt_cache() {
+    # fake_apt_cache <candidate|none>: what apt would install of certbot.
+    printf '#!/usr/bin/env bash\necho "apt-cache $*" >> "$STUB_LOG"\nprintf "certbot:\\n  Installed: (none)\\n  Candidate: %s\\n"\n' "${1/none/(none)}" > "$E/bin/apt-cache"
+    chmod +x "$E/bin/apt-cache"
+}
+fake_curl_download() {
+    # fake_curl_download <content>: a download writes this text where -o says, whatever was asked.
+    printf '#!/usr/bin/env bash\necho "curl $*" >> "$STUB_LOG"\nwhile (( $# )); do if [[ $1 == -o ]]; then printf "%%s\\n" %q > "$2"; shift; fi; shift; done\n' "$1" > "$E/bin/curl"
+    chmod +x "$E/bin/curl"
+}
+pair_for() {
+    # pair_for <host> <dir>: a certificate and key for a hostname or an IP address in dir, as fullchain.pem and
+    # privkey.pem.
+    local san=DNS:$1
+    [[ $1 =~ ^[0-9.]+$ ]] && san=IP:$1
+    mkdir -p "$2"
+    openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes -keyout "$2/privkey.pem" -out "$2/fullchain.pem" \
+        -days 30 -subj "/CN=$1" -addext "subjectAltName=$san" >/dev/null 2>&1
+}
+fake_staging_certbot() {
+    # A certbot 2.9 that, asked with --test-cert, puts a test pair under the name it is given, and deletes a name.
+    pair_for vpn.example.com "$E/staging-src"
+    printf '#!/usr/bin/env bash\nE=%q\n' "$E" > "$E/bin/certbot"
+    cat >> "$E/bin/certbot" <<'STUB'
+if [[ $1 == --version ]]; then echo "certbot 2.9.0"; exit 0; fi
+echo "certbot $*" >> "$STUB_LOG"
+name='' args=" $* "
+while (( $# )); do if [[ $1 == --cert-name ]]; then name=$2; fi; shift; done
+case $args in
+    *" delete "*) rm -rf "$E/le/live/$name" "$E/le/renewal/$name.conf" ;;
+    *" certonly "*)
+        [[ -n ${FAKE_CERTBOT_FAIL:-} ]] && exit 1
+        mkdir -p "$E/le/live/$name" "$E/le/renewal"
+        cp "$E/staging-src/"*.pem "$E/le/live/$name/"
+        printf '[renewalparams]\nauthenticator = standalone\n' > "$E/le/renewal/$name.conf" ;;
+esac
+exit 0
+STUB
+    chmod +x "$E/bin/certbot"
+}
+fake_acme_sh() {
+    # The pinned acme.sh as if this tool had installed it: it records what it is asked, "issues" the pair of
+    # $E/acme-src for the address it is given, writes it where --install-cert says, and skips a renewal that is not
+    # due (exit 2), as acme.sh does.
+    local bin=$E/acme-home/acme.sh-3.1.6/acme.sh
+    mkdir -p "${bin%/*}"
+    printf '#!/usr/bin/env bash\nE=%q\n' "$E" > "$bin"
+    cat >> "$bin" <<'STUB'
+echo "acme.sh $*" >> "$STUB_LOG"
+home='' host='' full='' key='' cmd=''
+while (( $# )); do
+    case $1 in
+        --config-home) home=$2; shift ;;
+        -d) host=$2; shift ;;
+        --fullchain-file) full=$2; shift ;;
+        --key-file) key=$2; shift ;;
+        --issue|--renew|--install-cert|--cron) cmd=$1 ;;
+    esac
+    shift
+done
+case $cmd in
+    --issue)
+        [[ -n ${FAKE_ACME_FAIL:-} ]] && { echo 'Verify error: Invalid response from http://x/.well-known' ; exit 1; }
+        mkdir -p "$home/${host}_ecc"; cp "$E/acme-src/fullchain.pem" "$home/${host}_ecc/fullchain.cer"
+        cp "$E/acme-src/privkey.pem" "$home/${host}_ecc/$host.key"; echo "Le_Domain='$host'" > "$home/${host}_ecc/$host.conf" ;;
+    --renew) exit 2 ;;
+    --install-cert) cp "$home/${host}_ecc/fullchain.cer" "$full"; cp "$home/${host}_ecc/$host.key" "$key" ;;
+esac
+exit 0
+STUB
+    chmod +x "$bin"
+}
+lib_call() {
+    # lib_call <function> <argument>...: one function of the manager, with all its modules, in this fake server.
+    sed '$ s/^main "\$@"$/:/' "$E/manager.sh" > "$E/manager-lib.sh"
+    bash -c 'source "$1"; shift; "$@"' _ "$E/manager-lib.sh" "$@" 2>/dev/null
+}
+state_sum() {
+    # state_sum <file or folder>...: one value for what they hold, and for the pair the links use now, whatever its
+    # files are named.
+    { find "$@" -type f -print0 2>/dev/null | sort -z | xargs -0 -r sha256sum; cat "$E/cfg/link-cert.pem" "$E/cfg/link-key.pem"; } | sha256sum
+}
+
+test_the_certificate_client_is_certbot_with_snap_and_acme_without() {
+    rm -f "$E/bin/certbot"
+    fake_snap
+    fake_apt_cache 2.9.0-1ubuntu1
+    [[ $(lib_call cert_client 203.0.113.9) == certbot ]]; rc_is 'with snap an IP address gets certbot, as before' 0 "$?"
+    [[ $(lib_call cert_client vpn.example.com) == certbot ]]; rc_is 'and so does a hostname' 0 "$?"
+    sed -i 's/^have_snap() {.*/have_snap() { false; }/' "$E/lib/modules/certs.sh"
+    [[ $(lib_call cert_client vpn.example.com) == certbot ]]; rc_is "without snap a hostname gets Ubuntu's certbot" 0 "$?"
+    [[ $(lib_call cert_client 203.0.113.9) == acme.sh ]]; rc_is "without snap, and Ubuntu's certbot older than 5.3, an IP address gets acme.sh" 0 "$?"
+    fake_apt_cache 1:5.4.0-1
+    [[ $(lib_call cert_client 203.0.113.9) == certbot ]]; rc_is "an Ubuntu certbot of 5.3 or newer is used for an IP address" 0 "$?"
+    fake_apt_cache none
+    [[ $(lib_call cert_client vpn.example.com) == acme.sh ]]; rc_is "with no certbot to install, a hostname gets acme.sh" 0 "$?"
+    printf '#!/usr/bin/env bash\necho "certbot 5.9.0"\n' > "$E/bin/certbot"; chmod +x "$E/bin/certbot"
+    [[ $(lib_call cert_client 203.0.113.9) == certbot ]]; rc_is 'a certbot already new enough is used' 0 "$?"
+    fake_acme_sh
+    mkdir -p "$E/acme-home/data/203.0.113.9_ecc"; echo "Le_Domain='203.0.113.9'" > "$E/acme-home/data/203.0.113.9_ecc/203.0.113.9.conf"
+    [[ $(lib_call cert_client 203.0.113.9) == acme.sh ]]; rc_is 'a certificate acme.sh got here goes on renewing with it' 0 "$?"
+}
+
+test_acme_sh_gets_the_link_certificate_without_snap() {
+    local out kind
+    echo 203.0.113.9 > "$E/cfg/domain"
+    : > "$E/cfg/.server-setup-started"
+    rm -f "$E/bin/certbot"
+    sed -i 's/^have_snap() {.*/have_snap() { false; }/' "$E/lib/modules/certs.sh"
+    fake_apt_cache 2.9.0-1ubuntu1
+    fake_acme_sh
+    pair_for 203.0.113.9 "$E/acme-src"
+    : > "$STUB_LOG"
+    out=$(menu '7\n5\n2\n0\n0\n')
+    has 'acme.sh is named' 'so acme.sh 3.1.6 gets it' "$out"
+    has 'and the certificate is in use' 'New certificate from Let'"'"'s Encrypt for 203.0.113.9, by acme.sh' "$out"
+    grep -q -- "--home $E/acme-home/acme.sh-3.1.6 --config-home $E/acme-home/data .*--issue --standalone --httpport 80 -d 203.0.113.9 --keylength ec-256 --cert-profile shortlived --days -3 --server letsencrypt" "$STUB_LOG"
+    rc_is 'it asks Let'"'"'s Encrypt on TCP 80 for a six-day IP certificate, in its own folder' 0 "$?"
+    grep -qF -- "--reloadcmd test ! -x $E/sbin/darban || $E/sbin/darban reload-links" "$STUB_LOG"; rc_is 'a renewal reaches the links through its reload command' 0 "$?"
+    kind=$(cat "$E/cfg/link-cert/current/kind" 2>/dev/null)
+    [[ $kind == acme.sh ]]; rc_is 'the links know acme.sh got it' 0 "$?"
+    cmp -s "$E/cfg/link-cert.pem" "$E/acme-home/links/fullchain.pem"; rc_is 'and use its certificate' 0 "$?"
+    ok_if 'its timer is set, not a line in a crontab' test -s "$E/units/darban-acme.timer"
+    grep -qx 'NoNewPrivileges=true' "$E/units/darban-acme.service"; rc_is 'its service gains no privileges' 0 "$?"
+    # Only the one file acme.sh is installed: nothing may ask for its DNS, deploy or notify scripts.
+    if grep -qE -- '--dns|--deploy-hook|--notify|--set-notify|--upgrade|--install( |$)' "$STUB_LOG" "$E/units/darban-acme.service"; then result 0 'no DNS, deploy or notify script of acme.sh is used'; else result 1 'no DNS, deploy or notify script of acme.sh is used'; fi
+    grep -q "ExecStart=$E/acme-home/acme.sh-3.1.6/acme.sh --cron --home $E/acme-home/acme.sh-3.1.6 --config-home $E/acme-home/data" "$E/units/darban-acme.service"; rc_is 'and it renews only what acme.sh got for the links' 0 "$?"
+    grep -q ' 203.0.113.9 new$' "$E/varlib/link-certificates.log"; rc_is 'the new certificate counts in the weekly record' 0 "$?"
+    out=$(menu '7\n5\n4\n0\n0\n')
+    has 'Details name the client' 'acme.sh 3.1.6, installed by this tool in' "$out"
+    has 'and how it renews' 'darban-acme.timer' "$out"
+    has 'Diagnostics name it too' "Link certificate from Let's Encrypt by acme.sh 3.1.6" "$(mgr status)"
+    # A renewal that is not due issues nothing, and counts nothing.
+    : > "$STUB_LOG"
+    out=$(menu '7\n5\n2\n0\n0\n')
+    grep -q -- '--renew -d 203.0.113.9 --ecc' "$STUB_LOG"; rc_is 'the next request is a renewal' 0 "$?"
+    has 'and says nothing was issued' 'Nothing was issued.' "$out"
+    [[ $(grep -c ' 203.0.113.9 ' "$E/varlib/link-certificates.log") == 1 ]]; rc_is 'and nothing more was counted' 0 "$?"
+    # A renewal by the timer reaches the links: darban reload-links copies the new pair.
+    pair_for 203.0.113.9 "$E/acme-renewed"
+    cp "$E/acme-renewed/"*.pem "$E/acme-home/links/"
+    mgr reload-links >/dev/null
+    cmp -s "$E/cfg/link-cert.pem" "$E/acme-home/links/fullchain.pem"; rc_is "acme.sh's renewal reaches the links" 0 "$?"
+}
+
+test_staging_never_touches_the_real_certificate() {
+    # The staging test with certbot: the links' certificate, its renewal file and hook, the pair in use and the record
+    # of the weekly limit stay byte for byte.
+    local out before
+    echo vpn.example.com > "$E/cfg/domain"
+    : > "$E/cfg/.server-setup-started"
+    fake_staging_certbot
+    pair_for vpn.example.com "$E/le/live/darban-ovpn-links"
+    mkdir -p "$E/le/renewal" "$E/varlib"
+    printf '[renewalparams]\nauthenticator = standalone\nrenew_hook = %s/darban reload-links\n' "$E/sbin" > "$E/le/renewal/darban-ovpn-links.conf"
+    printf '%s vpn.example.com new\n' "$(date -u +%s)" > "$E/varlib/link-certificates.log"
+    cp "$E/le/live/darban-ovpn-links/fullchain.pem" "$E/cfg/link-cert.pem"; cp "$E/le/live/darban-ovpn-links/privkey.pem" "$E/cfg/link-key.pem"
+    before=$(state_sum "$E/le/live/darban-ovpn-links" "$E/le/renewal/darban-ovpn-links.conf" "$E/varlib/link-certificates.log")
+    : > "$STUB_LOG"
+    out=$(menu '7\n5\n5\n2\n0\n0\n')
+    has 'the menu offers the test' "Test Let's Encrypt with its staging server" "$out"
+    has 'it says what the test is' 'it does not count in the 5 a week' "$out"
+    has 'and what it found' 'The staging server issued a test certificate for vpn.example.com with certbot' "$out"
+    has 'and where it is kept' "$E/le/live/darban-ovpn-links-staging" "$out"
+    grep -q -- 'certonly --standalone --test-cert --no-autorenew .*--cert-name darban-ovpn-links-staging -d vpn.example.com' "$STUB_LOG"; rc_is 'certbot asks the staging server, under a name of its own' 0 "$?"
+    if grep 'certonly' "$STUB_LOG" | grep -q -- '--deploy-hook\|--cert-name darban-ovpn-links \| renew '; then result 0 'with no hook, and never as the real one'; else result 1 'with no hook, and never as the real one'; fi
+    [[ $(state_sum "$E/le/live/darban-ovpn-links" "$E/le/renewal/darban-ovpn-links.conf" "$E/varlib/link-certificates.log") == "$before" ]]
+    rc_is 'the real certificate, its renewal file, the links and the record are untouched' 0 "$?"
+    grep -qx 'staging_cert darban-ovpn-links-staging' "$E/cfg/.server-setup-started"; rc_is 'the test certificate is recorded for removal, on a line of its own' 0 "$?"
+    if grep -q '^certbot_cert' "$E/cfg/.server-setup-started"; then result 0 'and never as the links'"'"' certificate'; else result 1 'and never as the links'"'"' certificate'; fi
+    ok_if 'No keeps it' test -s "$E/le/live/darban-ovpn-links-staging/fullchain.pem"
+    # Again, and Enter deletes it: only the test certificate goes.
+    out=$(menu '7\n5\n5\n\n0\n0\n')
+    has 'deleting is said' 'The test certificate was deleted.' "$out"
+    ok_if 'the test certificate is gone' test ! -e "$E/le/live/darban-ovpn-links-staging" -a ! -e "$E/le/renewal/darban-ovpn-links-staging.conf"
+    [[ $(state_sum "$E/le/live/darban-ovpn-links" "$E/le/renewal/darban-ovpn-links.conf" "$E/varlib/link-certificates.log") == "$before" ]]
+    rc_is 'and the real one is still untouched' 0 "$?"
+    # A failed test says so, and changes nothing.
+    out=$(FAKE_CERTBOT_FAIL=1 menu '7\n5\n5\n0\n0\n')
+    has 'a failed test says what it means' 'The test failed, so a real request would fail the same way.' "$out"
+    [[ $(state_sum "$E/le/live/darban-ovpn-links" "$E/le/renewal/darban-ovpn-links.conf" "$E/varlib/link-certificates.log") == "$before" ]]
+    rc_is 'and changes nothing either' 0 "$?"
+    echo 10.0.0.9 > "$E/cfg/domain"
+    lacks 'a private address has no test' 'staging server' "$(menu '7\n5\n\n0\n0\n')"
+}
+
+test_staging_with_acme_sh_stays_apart_from_the_real_certificate() {
+    local out before
+    echo 203.0.113.9 > "$E/cfg/domain"
+    : > "$E/cfg/.server-setup-started"
+    rm -f "$E/bin/certbot"
+    sed -i 's/^have_snap() {.*/have_snap() { false; }/' "$E/lib/modules/certs.sh"
+    fake_apt_cache 2.9.0-1ubuntu1
+    fake_acme_sh
+    pair_for 203.0.113.9 "$E/acme-src"
+    menu '7\n5\n2\n0\n0\n' >/dev/null
+    before=$(state_sum "$E/acme-home/data" "$E/acme-home/links" "$E/varlib/link-certificates.log" "$E/units")
+    ok_if 'acme.sh got the real certificate first' test -s "$E/acme-home/links/fullchain.pem"
+    : > "$STUB_LOG"
+    out=$(menu '7\n5\n5\n2\n0\n0\n')
+    has 'the test is done with acme.sh' 'The staging server issued a test certificate for 203.0.113.9 with acme.sh' "$out"
+    grep -q -- "--config-home $E/acme-home/staging .*--issue .*--server letsencrypt_test" "$STUB_LOG"; rc_is 'in a folder of its own, against the staging server' 0 "$?"
+    if grep -q -- '--reloadcmd' "$STUB_LOG"; then result 0 'with no reload command'; else result 1 'with no reload command'; fi
+    if grep -q -- "--config-home $E/acme-home/data " "$STUB_LOG"; then result 0 'and the real folder is not used'; else result 1 'and the real folder is not used'; fi
+    [[ $(state_sum "$E/acme-home/data" "$E/acme-home/links" "$E/varlib/link-certificates.log" "$E/units") == "$before" ]]
+    rc_is 'the real certificate, the links, the record and the timer are untouched' 0 "$?"
+    ok_if 'No keeps it' test -s "$E/acme-home/staging/certificate/fullchain.pem"
+    menu '7\n5\n5\n1\n0\n0\n' >/dev/null
+    ok_if 'Yes deletes it' test ! -e "$E/acme-home/staging/certificate" -a ! -e "$E/acme-home/staging/203.0.113.9_ecc"
+    [[ $(state_sum "$E/acme-home/data" "$E/acme-home/links" "$E/varlib/link-certificates.log" "$E/units") == "$before" ]]
+    rc_is 'and the real one stays' 0 "$?"
+}
+
+test_remove_everything_removes_acme_sh_only_when_recorded() {
+    local out
+    built_server
+    sed -i -e "s#^ACME_HOME=.*#ACME_HOME=$E/acme-home#" -e "s#^ACME_UNITS=.*#ACME_UNITS=$E/fake-units#" "$E/lib/remove-server.sh"
+    fake_acme_sh
+    mkdir -p "$E/acme-home/data" "$E/acme-home/links"; echo cert > "$E/acme-home/links/fullchain.pem"
+    : > "$E/fake-units/darban-acme.timer"; : > "$E/fake-units/darban-acme.service"
+    # Recorded for another folder: nothing there is touched.
+    echo "acme_sh $E/elsewhere" >> "$E/cfg/.server-setup-started"
+    printf '#!/usr/bin/env bash\necho "certbot $*" >> "$STUB_LOG"\n' > "$E/bin/certbot"; chmod +x "$E/bin/certbot"
+    echo 'staging_cert darban-ovpn-links-staging' >> "$E/cfg/.server-setup-started"
+    : > "$STUB_LOG"
+    out=$(printf '1\n1\nremove-everything\n' | bash "$E/manager.sh" remove-all 2>&1)
+    ok_if 'acme.sh it did not record stays' test -x "$E/acme-home/acme.sh-3.1.6/acme.sh" -a -s "$E/acme-home/links/fullchain.pem"
+    ok_if 'and so does its timer' test -e "$E/fake-units/darban-acme.timer"
+    grep -q 'certbot delete --non-interactive --cert-name darban-ovpn-links-staging' "$STUB_LOG"; rc_is 'the test certificate from staging is deleted' 0 "$?"
+    lacks 'nothing is said about acme.sh' 'Removed acme.sh' "$out"
+
+    built_server
+    sed -i -e "s#^ACME_HOME=.*#ACME_HOME=$E/acme-home#" -e "s#^ACME_UNITS=.*#ACME_UNITS=$E/fake-units#" "$E/lib/remove-server.sh"
+    fake_acme_sh
+    mkdir -p "$E/acme-home/data" "$E/acme-home/staging"
+    : > "$E/fake-units/darban-acme.timer"; : > "$E/fake-units/darban-acme.service"; : > "$E/fake-units/other.timer"
+    echo "acme_sh $E/acme-home" >> "$E/cfg/.server-setup-started"
+    : > "$STUB_LOG"
+    out=$(printf '1\n1\nremove-everything\n' | bash "$E/manager.sh" remove-all 2>&1)
+    has 'acme.sh it installed is removed' 'Removed acme.sh, which this setup installed' "$out"
+    ok_if 'with its folder' test ! -e "$E/acme-home"
+    ok_if 'and its timer' test ! -e "$E/fake-units/darban-acme.timer" -a ! -e "$E/fake-units/darban-acme.service"
+    grep -q 'systemctl disable --now darban-acme.timer' "$STUB_LOG"; rc_is 'which is stopped first' 0 "$?"
+    ok_if 'another unit stays' test -e "$E/fake-units/other.timer"
 }
 
 test_vpn_network_change_is_all_or_nothing() {

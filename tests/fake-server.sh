@@ -243,6 +243,7 @@ sed -e "s#^OUT_DIR=.*#OUT_DIR=$E/clients#" -e "s#^LINK_DIR=.*#LINK_DIR=$E/links#
     -e "s#^UNBOUND_RPZ=.*#UNBOUND_RPZ=$E/unbound-zone/darban.rpz#" -e "s#^NAMES_DNS_PORT=.*#NAMES_DNS_PORT=15353#" \
     -e "s#^EVENT_SCRIPT=.*#EVENT_SCRIPT=$E/libexec/darban-ovpn-event#" -e "s#^EVENT_DIR=.*#EVENT_DIR=$E/events#" \
     -e "s#^LEDGER_DIR=.*#LEDGER_DIR=$E/varlib/clients#" \
+    -e "s#^ACME_HOME=.*#ACME_HOME=$E/acme-home#" \
     -e "s#^PORT_SHARE_DIR=.*#PORT_SHARE_DIR=$E/run/darban-port-share#" -e "s#^PORT_SHARE_TMPFILES=.*#PORT_SHARE_TMPFILES=$E/tmpfiles/darban-port-share.conf#" \
     -e "s#^PKI_BACKUP_DIR=.*#PKI_BACKUP_DIR=$E/pki-backups#" -e "s#^RESTORE_WARN=.*#RESTORE_WARN=$E/varlib/restore-unverified#" \
     -e 's#^EVENT_MAX=.*#EVENT_MAX=${TEST_EVENT_MAX:-500}#' \
