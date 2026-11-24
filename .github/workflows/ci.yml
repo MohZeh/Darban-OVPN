@@ -227,8 +227,8 @@ jobs:
       fail-fast: false
       matrix:
         ubuntu: ['24.04', '26.04']
-        # 1: revocation, the CRL, the ends of sessions and the connection events. 2: the settings, the network,
-        # links and files, certbot, the update and the removal.
+        # 1: revocation, the CRL, the ends of sessions, the connection events and UDP, TCP or both with port-share.
+        # 2: the settings, the network, links and files, certbot, the update and the removal.
         part: [1, 2]
     runs-on: ubuntu-${{ matrix.ubuntu }}
     timeout-minutes: 40
@@ -259,7 +259,9 @@ jobs:
         # sudo keeps no variable, so the summary file is named: what a green run did not test is written there.
         env:
           PART: ${{ matrix.part }}
-        run: sudo GO="$(command -v go)" GITHUB_STEP_SUMMARY="$GITHUB_STEP_SUMMARY" bash tests/acceptance-ci.sh --i-know "$PART"
+          # The measurements only record numbers and fail nothing, so an ordinary pull request does not run them.
+          MEASURE: ${{ (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' || contains(github.event.pull_request.labels.*.name, 'scale')) && '1' || '0' }}
+        run: sudo MEASURE="$MEASURE" GO="$(command -v go)" GITHUB_STEP_SUMMARY="$GITHUB_STEP_SUMMARY" bash tests/acceptance-ci.sh --i-know "$PART"
 
   # Three checks of about a minute each, on one runner, so a run waits less for runners: the real-terminal tests,
   # which change nothing on the machine, then the setup on a public address, the path the acceptance run skips
@@ -467,7 +469,10 @@ jobs:
   # A manual run for the reboot and arm64 tests, or for the scale measurements, only gets another name: it skips
   # the other tests on purpose, so it must never stand in for the CI result of the commit.
   result:
-    name: ${{ inputs.vm_only && 'VM qualification result' || inputs.scale && 'Scale measurement result' || 'CI result' }}
+    # A draft gets another name too, so the required "CI result" does not exist on it: it cannot merge, and a check
+    # that is not red wakes nothing. The name comes from the event's own payload, so a re-run of an old draft run
+    # stays a draft result, and a ready pull request, whose run starts at ready_for_review, always gets "CI result".
+    name: ${{ inputs.vm_only && 'VM qualification result' || inputs.scale && 'Scale measurement result' || github.event.pull_request.draft && 'Draft result: Lint only' || 'CI result' }}
     if: always()
     needs: [lint, test, acceptance, short, restore, scale, acceptance-arm, reboot]
     runs-on: ubuntu-24.04
@@ -492,10 +497,10 @@ jobs:
           echo "Lint: $LINT, Test: $TEST, Acceptance: $ACCEPTANCE, terminal, public address and rc.10: $SHORT, restore: $RESTORE, scale: $SCALE, arm64: $ARM, reboot: $REBOOT, code changed: $CODE, reboot and arm64 only: $VM_ONLY, scale only: $SCALE_ONLY"
           echo "Tree $TREE" >> "$GITHUB_STEP_SUMMARY"
           test "$LINT" = success
-          # A draft is never a pass: its slow tests did not run, and a skipped required check would count as passed.
+          # A draft is named "Draft result: Lint only", which no rule requires, so it can pass here: it is never "CI result".
           if [ "$DRAFT" = true ]; then
-            echo 'Draft: the slow tests run when it is marked ready.' | tee -a "$GITHUB_STEP_SUMMARY"
-            exit 1
+            echo 'Draft: only Lint ran. The slow tests run when it is marked ready.' | tee -a "$GITHUB_STEP_SUMMARY"
+            exit 0
           fi
           if [ "$VM_ONLY" = true ]; then
             # What this run was asked for must have run, not been skipped.
