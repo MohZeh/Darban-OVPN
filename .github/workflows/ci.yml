@@ -2,8 +2,9 @@ name: CI
 on:
   push:
     branches: [main]
-  # A draft runs Lint only. The slow tests start when it is marked ready, so pull requests waiting in line are not
-  # tested against a main that the next merge changes anyway. Converting one to a draft cancels its run.
+  # A draft runs Lint and the unit tests, so a wrong test shows up before it is marked ready. The slow tests start
+  # when it is marked ready, so pull requests waiting in line are not tested against a main that the next merge
+  # changes anyway. Converting one to a draft cancels its run.
   pull_request:
     types: [opened, synchronize, reopened, ready_for_review, converted_to_draft]
   # Weekly: OpenVPN's repository and Ubuntu's kernels change without any commit here.
@@ -43,8 +44,10 @@ jobs:
     outputs:
       # The slow tests are skipped for documentation only, for a push to main whose exact files its pull request
       # already tested green, for a manual run that asks for the reboot and arm64 tests or the scale measurements
-      # only, and for a draft.
-      code: ${{ (steps.tested.outputs.tested == 'true' || inputs.vm_only || inputs.scale || github.event.pull_request.draft) && 'false' || steps.scope.outputs.code }}
+      # only. The unit tests run on a draft too.
+      code: ${{ (steps.tested.outputs.tested == 'true' || inputs.vm_only || inputs.scale) && 'false' || steps.scope.outputs.code }}
+      # The slow jobs: the same, but never for a draft.
+      slow: ${{ (steps.tested.outputs.tested == 'true' || inputs.vm_only || inputs.scale || github.event.pull_request.draft) && 'false' || steps.scope.outputs.code }}
       tree: ${{ steps.source.outputs.tree }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -242,7 +245,7 @@ jobs:
   acceptance:
     name: Acceptance (Ubuntu ${{ matrix.ubuntu }}, part ${{ matrix.part }})
     needs: lint
-    if: needs.lint.outputs.code == 'true'
+    if: needs.lint.outputs.slow == 'true'
     strategy:
       fail-fast: false
       matrix:
@@ -290,7 +293,7 @@ jobs:
   short:
     name: Terminal, public address and rc.10 (Ubuntu ${{ matrix.ubuntu }})
     needs: lint
-    if: needs.lint.outputs.code == 'true'
+    if: needs.lint.outputs.slow == 'true'
     strategy:
       fail-fast: false
       matrix:
@@ -332,7 +335,7 @@ jobs:
   restore:
     name: Backup and restore of the CA (Ubuntu ${{ matrix.ubuntu }})
     needs: lint
-    if: needs.lint.outputs.code == 'true'
+    if: needs.lint.outputs.slow == 'true'
     strategy:
       fail-fast: false
       matrix:
@@ -370,7 +373,7 @@ jobs:
   scale:
     name: Scale (Ubuntu ${{ matrix.ubuntu }}, ${{ matrix.clients }} clients, ${{ matrix.part }})
     needs: lint
-    if: inputs.scale || (needs.lint.outputs.code == 'true' && (github.event_name == 'schedule' || contains(github.event.pull_request.labels.*.name, 'scale')))
+    if: inputs.scale || (needs.lint.outputs.slow == 'true' && (github.event_name == 'schedule' || contains(github.event.pull_request.labels.*.name, 'scale')))
     strategy:
       fail-fast: false
       matrix:
@@ -497,7 +500,7 @@ jobs:
     # A draft gets another name too, so the required "CI result" does not exist on it: it cannot merge, and a check
     # that is not red wakes nothing. The name comes from the event's own payload, so a re-run of an old draft run
     # stays a draft result, and a ready pull request, whose run starts at ready_for_review, always gets "CI result".
-    name: "${{ inputs.vm_only && 'VM qualification result' || inputs.scale && 'Scale measurement result' || github.event.pull_request.draft && 'Draft result: Lint only' || 'CI result' }}"
+    name: "${{ inputs.vm_only && 'VM qualification result' || inputs.scale && 'Scale measurement result' || github.event.pull_request.draft && 'Draft result: Lint and unit tests' || 'CI result' }}"
     if: always()
     needs: [lint, test, acceptance, short, restore, scale, acceptance-arm, reboot]
     runs-on: ubuntu-24.04
@@ -522,9 +525,14 @@ jobs:
           echo "Lint: $LINT, Test: $TEST, Acceptance: $ACCEPTANCE, terminal, public address and rc.10: $SHORT, restore: $RESTORE, scale: $SCALE, arm64: $ARM, reboot: $REBOOT, code changed: $CODE, reboot and arm64 only: $VM_ONLY, scale only: $SCALE_ONLY"
           echo "Tree $TREE" >> "$GITHUB_STEP_SUMMARY"
           test "$LINT" = success
-          # A draft is named "Draft result: Lint only", which no rule requires, so it can pass here: it is never "CI result".
+          # A draft is named "Draft result: Lint and unit tests", which no rule requires, so it can pass here: it is
+          # never "CI result". It needs the unit tests green, or skipped when the change needs none.
           if [ "$DRAFT" = true ]; then
-            echo 'Draft: only Lint ran. The slow tests run when it is marked ready.' | tee -a "$GITHUB_STEP_SUMMARY"
+            if [ "$CODE" = true ]; then test "$TEST" = success; else test "$TEST" = skipped; fi
+            test "$ACCEPTANCE" = skipped
+            test "$SHORT" = skipped
+            test "$RESTORE" = skipped
+            echo 'Draft: Lint and the unit tests ran. The slow tests run when it is marked ready.' | tee -a "$GITHUB_STEP_SUMMARY"
             exit 0
           fi
           if [ "$VM_ONLY" = true ]; then
