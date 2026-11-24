@@ -54,6 +54,27 @@ CERT_NAME=darban-ovpn-links
 # Let's Encrypt issues IP address certificates from Certbot 5.3 on; a hostname works with any version.
 CERTBOT_IP_MIN=5.3
 LINK_PAIRS=$CONFIG_DIR/link-cert
+# A test certificate from Let's Encrypt's staging server, which no browser trusts: a name of its own, so it never
+# replaces, renews or counts as the links' certificate.
+STAGING_CERT_NAME=darban-ovpn-links-staging
+# acme.sh, only for a server without snap where certbot cannot get the certificate. This version only: its one file
+# acme.sh at the commit of the signed tag 3.1.6, which has no release file of its own, and only with this SHA-256
+# (T-12). A file at a commit never changes, unlike the tarball GitHub builds for a tag. The standalone mode, --renew,
+# --install-cert, --cron and --cert-profile need nothing else; dnsapi/, deploy/ and notify/ are never used. It runs
+# as a program of its own: it is GPLv3, and none of its code is in this tool (H10).
+ACME_VERSION=3.1.6
+ACME_COMMIT=807da6498377ee5e0cf43a78091f46f12dc59a89
+ACME_SHA256=c7d68b021cfd6380ea83a82962abde5b484779fee0b97d38681dfa1396bbc8d7
+ACME_URL=https://raw.githubusercontent.com/acmesh-official/acme.sh/$ACME_COMMIT/acme.sh
+ACME_PROGRAM_DIR=$ACME_HOME/acme.sh-$ACME_VERSION
+ACME_BIN=$ACME_PROGRAM_DIR/acme.sh
+# Its account, settings and certificates for the links; the links' copy of the certificate, which acme.sh writes again
+# at each renewal; and the staging test, apart from both.
+ACME_DATA=$ACME_HOME/data
+ACME_LINKS_DIR=$ACME_HOME/links
+ACME_STAGING_DATA=$ACME_HOME/staging
+# The timer that renews what acme.sh got, instead of a line in root's crontab.
+ACME_UNIT=darban-acme
 # lib/darban/shares.sh
 SR_ID='' SR_SERIAL='' SR_CREATED='' SR_BOOT='' SR_CS='' SR_US='' SR_EXPIRES='' SR_REMOTE='' SR_FILE='' SR_HOME='' SR_HOME_FILE=''
 # lib/darban/sessions.sh

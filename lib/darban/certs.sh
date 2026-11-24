@@ -15,8 +15,8 @@ link_cert_usable() {
     openssl x509 -in "$LINK_CERT" -noout "$check" "$host" 2>/dev/null | grep 'does match' >/dev/null
 }
 link_cert_source() {
-    # Where the links' certificate came from: letsencrypt (this tool's), copied (from another tool or a file),
-    # self-signed, or none.
+    # Where the links' certificate came from: letsencrypt (this tool's, by certbot), acme.sh (this tool's, by acme.sh),
+    # copied (from another tool or a file), self-signed, or none.
     local kind
     if [[ ! -s $LINK_CERT ]]; then printf 'none\n'; return; fi
     if kind=$(link_pair_kind); then printf '%s\n' "$kind"; return; fi
@@ -56,15 +56,16 @@ record_added() {
 }
 install_certbot() {
     # install_certbot <minimum version>: Ubuntu's own package when it is new enough; otherwise the Certbot
-    # project's snap. There is no third way: get_trusted_cert does not offer one without snap.
-    # How long each part took goes to the journal (journalctl -t darban), so a slow one shows where the time went.
+    # project's snap. A server without snap gets Ubuntu's package only, and acme.sh when that is not enough
+    # (cert_client). How long each part took goes to the journal (journalctl -t darban), so a slow one shows
+    # where the time went.
     local need=$1 start rc=0
     start=$SECONDS
     apt-get -o DPkg::Lock::Timeout=120 -qq update >/dev/null || rc=$?
     audit "certbot install, apt update: $((SECONDS - start)) s, exit $rc"
     rc=0
     start=$SECONDS
-    if [[ $need == 0 ]]; then
+    if [[ $need == 0 ]] || ! have_snap; then
         info "Installing certbot from Ubuntu${S_ELL}"
         apt-get -o DPkg::Lock::Timeout=120 -y -q --no-install-recommends install certbot >/dev/null || rc=$?
         audit "certbot from apt: $((SECONDS - start)) s, exit $rc"
@@ -81,7 +82,7 @@ install_certbot() {
 get_trusted_cert() {
     # get_trusted_cert <host> [asked]: Let's Encrypt for a hostname or a public IP address. It needs TCP 80
     # from the internet for a moment. "asked" means the person already chose it, so there is no question.
-    local host=$1 asked=${2:-} need=0 certbot renewing=0
+    local host=$1 asked=${2:-} need=0 certbot renewing=0 client
     local -a target
     if host_is_ip "$host"; then
         is_private_ip "$host" && return 1
@@ -90,13 +91,14 @@ get_trusted_cert() {
     else
         target=(-d "$host")
     fi
-    if [[ $need != 0 ]] && ! find_certbot "$need" >/dev/null && ! have_snap; then
-        info "A trusted certificate for an IP address needs certbot $CERTBOT_IP_MIN or newer. Ubuntu does not ship it yet, and this server has no snap to get it from the Certbot project."
-        return 1
+    client=$(cert_client "$host")
+    # The certificate of an earlier request is renewed: certbot or acme.sh then tells Let's Encrypt which one it
+    # replaces (ARI), and such a renewal can be exempt from the weekly limit.
+    if [[ $client == acme.sh ]]; then
+        acme_cert_known "$ACME_DATA" "$host" && renewing=1
+    elif [[ -s $LE_DIR/renewal/$CERT_NAME.conf ]] && cert_covers "$LE_DIR/live/$CERT_NAME/fullchain.pem" "$host"; then
+        renewing=1
     fi
-    # The certificate of an earlier request is renewed: certbot then tells Let's Encrypt which one it replaces
-    # (ARI), and such a renewal can be exempt from the weekly limit.
-    if [[ -s $LE_DIR/renewal/$CERT_NAME.conf ]] && cert_covers "$LE_DIR/live/$CERT_NAME/fullchain.pem" "$host"; then renewing=1; fi
     if [[ $asked != asked ]]; then
         say
         info "A trusted certificate means no browser warning for the person opening the link. It needs TCP port 80 open for a moment, and yes accepts the Let's Encrypt subscriber agreement."
@@ -108,13 +110,27 @@ get_trusted_cert() {
         fi
         (( CHOSEN == 1 )) || return 1
     fi
-    if [[ $need != 0 ]]; then
+    if [[ $need != 0 && $client == acme.sh ]]; then
+        info "For an IP address it lasts six days, and a new one is requested when a link needs it. This server has no snap for certbot $CERTBOT_IP_MIN or newer, so acme.sh $ACME_VERSION gets it."
+    elif [[ $need != 0 ]]; then
         info "For an IP address it lasts six days, and a new one is requested when a link needs it. It needs certbot $CERTBOT_IP_MIN or newer, from the Certbot project."
     fi
-    if tcp_port_taken 80; then warn "TCP port 80 is used by $(safe_text "$(tcp_port_program 80)"), so certbot cannot answer on it."; return 1; fi
-    if ! certbot=$(find_certbot "$need"); then
-        install_certbot "$need" || { warn 'Could not install certbot.'; return 1; }
-        certbot=$(find_certbot "$need") || { warn "No certbot $need or newer is available."; return 1; }
+    if tcp_port_taken 80; then warn "TCP port 80 is used by $(safe_text "$(tcp_port_program 80)"), so $client cannot answer on it."; return 1; fi
+    if [[ $client == certbot ]] && ! certbot=$(find_certbot "$need"); then
+        if install_certbot "$need" && certbot=$(find_certbot "$need"); then
+            :
+        elif have_snap; then
+            warn 'Could not install certbot.'
+            return 1
+        else
+            info "certbot could not be installed on this server, and it has no snap. acme.sh gets the certificate instead."
+            client=acme.sh
+            acme_cert_known "$ACME_DATA" "$host" && renewing=1
+        fi
+    fi
+    if [[ $client == acme.sh ]]; then
+        get_acme_cert "$host" "$renewing"
+        return
     fi
     local live=$LE_DIR/live/$CERT_NAME/fullchain.pem before after out used next rc=0 kind=new
     before=$(cert_fingerprint "$live")
@@ -137,7 +153,7 @@ get_trusted_cert() {
             "${target[@]}" --deploy-hook "$SBIN_DIR/darban reload-links" >"$out" 2>&1 || rc=$?
     fi
     if (( rc != 0 )); then
-        explain_certbot_failure "$out"
+        explain_certbot_failure "$out" certbot
         rm -f -- "$out"
         return 1
     fi
@@ -157,14 +173,262 @@ get_trusted_cert() {
 }
 cert_fingerprint() { openssl x509 -in "$1" -noout -fingerprint -sha256 2>/dev/null | sed 's/^.*=//'; }
 explain_certbot_failure() {
-    # explain_certbot_failure <certbot output>: the weekly limit is named with the time Let's Encrypt gave.
-    local retry
+    # explain_certbot_failure <output> <certbot|acme.sh> [log]: the weekly limit is named with the time Let's Encrypt
+    # gave. The log is certbot's own by default.
+    local retry client=${2:-certbot} log=${3:-/var/log/letsencrypt/letsencrypt.log}
     if grep -qiE 'too many certificates|rateLimited' "$1"; then
         retry=$(grep -oiE 'retry after [0-9]{4}-[0-9]{2}-[0-9]{2}[ T][0-9:]+( UTC)?' "$1" | head -n 1 | cut -c13-)
         warn "Let's Encrypt gives at most 5 new certificates a week for the same address, and they are used up${retry:+. The next one can be issued after $retry}."
     else
-        warn 'certbot could not get a certificate. Check that the address points here and TCP 80 is open in the provider firewall.'
-        info "Details: $(cmd tail -n 20 /var/log/letsencrypt/letsencrypt.log)"
+        warn "$client could not get a certificate. Check that the address points here and TCP 80 is open in the provider firewall."
+        info "Details: $(cmd tail -n 20 "$log")"
+    fi
+}
+
+# ---------- which program gets the certificate: certbot, or acme.sh on a server without snap ----------
+apt_candidate_version() {
+    # apt_candidate_version <package>: the version apt would install, as numbers only (2.9.0 of 2.9.0-1ubuntu1), or
+    # nothing. A reader that stopped at the Candidate line would kill apt-cache with SIGPIPE under pipefail.
+    local version
+    version=$(apt-cache policy "$1" 2>/dev/null | awk '$1 == "Candidate:" && !seen { print $2; seen = 1 }') || version=''
+    version=${version#*:}
+    if [[ $version =~ ^([0-9]+(\.[0-9]+)*) ]]; then printf '%s\n' "${BASH_REMATCH[1]}"; fi
+}
+cert_client() {
+    # cert_client <host>: the program that gets this tool's Let's Encrypt certificate for host. certbot as before,
+    # from snap or Ubuntu's package; acme.sh only on a server without snap where certbot cannot do it: an IP address
+    # needs certbot 5.3 or newer, and Ubuntu's package may be older or missing. A certificate acme.sh already got
+    # here goes on renewing with it.
+    local host=$1 need=0 candidate
+    host_is_ip "$host" && need=$CERTBOT_IP_MIN
+    if acme_cert_known "$ACME_DATA" "$host"; then printf 'acme.sh\n'; return 0; fi
+    if have_snap || find_certbot "$need" >/dev/null; then printf 'certbot\n'; return 0; fi
+    candidate=$(apt_candidate_version certbot)
+    if [[ -n $candidate ]] && version_at_least "$candidate" "$need"; then printf 'certbot\n'; return 0; fi
+    printf 'acme.sh\n'
+}
+
+# ---------- acme.sh: a fixed version, checked, in a folder of this tool ----------
+# The pinned acme.sh runs from $ACME_PROGRAM_DIR with its account, settings and certificates in a folder given to it
+# each time, never in root's home or crontab. These functions take the folder, the address and where the result goes,
+# so another certificate of this tool can use them too.
+acme_cert_known() {
+    # acme_cert_known <data dir> <host>: acme.sh got a certificate for host there, so it can renew it.
+    [[ -x $ACME_BIN && -s $1/${2}_ecc/$2.conf ]]
+}
+acme_run() {
+    # acme_run <data dir> <acme.sh arguments>...: the pinned acme.sh with that folder, and its log in it.
+    local data=$1
+    shift
+    "$ACME_BIN" --home "$ACME_PROGRAM_DIR" --config-home "$data" --log "$data/acme.sh.log" --no-color "$@"
+}
+acme_install_undo() {
+    # acme_install_undo <download folder> <1 when this install created $ACME_HOME>: a failed install leaves nothing,
+    # not even an empty folder that Remove everything would not know of.
+    rm -rf -- "$1"
+    if [[ $2 == 1 ]]; then rmdir -- "$ACME_HOME" 2>/dev/null || true; fi
+    return 1
+}
+acme_install() {
+    # The pinned acme.sh, its one file at the commit of its release on GitHub. It is put in place only when it has the
+    # SHA-256 written in config.sh, and recorded for Remove everything once it is there. Nothing is run before the
+    # check.
+    local temp sum created=0
+    [[ -x $ACME_BIN ]] && return 0
+    [[ -d $ACME_HOME ]] || created=1
+    install -d -m 700 "$ACME_HOME" || { warn "Could not create $ACME_HOME for acme.sh."; return 1; }
+    temp=$(mktemp -d "$ACME_HOME/.download.XXXXXXXX") || { acme_install_undo '' "$created"; return 1; }
+    info "Downloading acme.sh $ACME_VERSION from GitHub${S_ELL}"
+    if ! curl -fsSL --proto '=https' --proto-redir '=https' --max-time 120 --retry 2 -o "$temp/acme.sh" "$ACME_URL" 2>/dev/null; then
+        warn "Could not download acme.sh $ACME_VERSION from $ACME_URL."
+        acme_install_undo "$temp" "$created"
+        return 1
+    fi
+    sum=$(sha256sum "$temp/acme.sh" 2>/dev/null | awk '{print $1}')
+    if [[ $sum != "$ACME_SHA256" ]]; then
+        warn "The acme.sh download does not have the SHA-256 this tool knows for version $ACME_VERSION, so it was not installed and nothing of it ran."
+        # The file at that commit never changes, so the download was cut short or altered on the way.
+        info "The download was cut short or changed on the way. Try again later. If it fails again, update Darban (Setup ${S_CRUMB} Check for updates), or install snap so certbot from the Certbot project can be used."
+        audit "acme.sh $ACME_VERSION refused: SHA-256 ${sum:-unknown}, expected $ACME_SHA256"
+        acme_install_undo "$temp" "$created"
+        return 1
+    fi
+    chmod 700 "$temp/acme.sh"
+    rm -rf -- "$ACME_PROGRAM_DIR"
+    if ! install -d -m 700 "$ACME_PROGRAM_DIR" || ! mv -f -- "$temp/acme.sh" "$ACME_BIN"; then
+        rm -rf -- "$ACME_PROGRAM_DIR"
+        acme_install_undo "$temp" "$created"
+        return 1
+    fi
+    rm -rf -- "$temp"
+    record_added "acme_sh $ACME_HOME"
+    audit "acme.sh $ACME_VERSION installed in $ACME_PROGRAM_DIR"
+    ok "acme.sh $ACME_VERSION is installed in $ACME_PROGRAM_DIR, checked by its SHA-256."
+}
+acme_issue() {
+    # acme_issue <data dir> <host> <install dir> <server> <output file> [reload command]: a new certificate for host
+    # on TCP 80, or a renewal when acme.sh already has one there (ARI, so it can be exempt from the weekly limit). Then
+    # fullchain.pem and privkey.pem go to install dir, where acme.sh writes them again at each renewal and runs the
+    # reload command after. An IP address gets the six-day profile that Let's Encrypt requires for it.
+    # Returns 0 also when nothing was due.
+    local data=$1 host=$2 dir=$3 server=$4 out=$5 reload=${6:-} rc=0
+    local -a common=(--server "${DARBAN_TEST_ACME_SERVER:-$server}") put=()
+    if [[ -n ${DARBAN_TEST_ACME_CA:-} ]]; then common+=(--ca-bundle "$DARBAN_TEST_ACME_CA"); fi
+    install -d -m 700 "$data" "$dir" || return 1
+    if acme_cert_known "$data" "$host"; then
+        acme_run "$data" --renew -d "$host" --ecc "${common[@]}" >>"$out" 2>&1 || rc=$?
+    else
+        local -a profile=()
+        if host_is_ip "$host"; then profile=(--cert-profile shortlived --days -3); fi
+        acme_run "$data" --issue --standalone --httpport 80 -d "$host" --keylength ec-256 "${profile[@]}" "${common[@]}" >>"$out" 2>&1 || rc=$?
+    fi
+    # 2: acme.sh skipped it, because it is not due yet.
+    (( rc == 0 || rc == 2 )) || return 1
+    put=(--install-cert -d "$host" --ecc --fullchain-file "$dir/fullchain.pem" --key-file "$dir/privkey.pem")
+    if [[ -n $reload ]]; then put+=(--reloadcmd "$reload"); fi
+    acme_run "$data" "${put[@]}" >>"$out" 2>&1 || return 1
+    [[ -s $dir/fullchain.pem && -s $dir/privkey.pem ]]
+}
+acme_timer_install() {
+    # acme.sh renews from a timer of this tool, twice a day as it asks, and only what is due. Remove everything takes
+    # it with the folder; an uninstall of the tool alone leaves it, as it leaves certbot, and the reload command then
+    # does nothing.
+    local service=$UNIT_DIR/$ACME_UNIT.service timer=$UNIT_DIR/$ACME_UNIT.timer
+    install -d -m 755 "$UNIT_DIR" || return 1
+    printf '[Unit]\nDescription=Darban OVPN: acme.sh renews the link certificate when it is due\nAfter=network-online.target\nWants=network-online.target\n\n[Service]\nType=oneshot\nNoNewPrivileges=true\nPrivateTmp=true\nExecStart=%s --cron --home %s --config-home %s --log %s/acme.sh.log --no-color\n' \
+        "$ACME_BIN" "$ACME_PROGRAM_DIR" "$ACME_DATA" "$ACME_DATA" >"$service.new" \
+        && printf '[Unit]\nDescription=Darban OVPN: acme.sh renewal of the link certificate, twice a day\n\n[Timer]\nOnCalendar=*-*-* 00/12:00:00\nRandomizedDelaySec=1h\nPersistent=true\n\n[Install]\nWantedBy=timers.target\n' >"$timer.new" \
+        && mv -f -- "$service.new" "$service" && mv -f -- "$timer.new" "$timer" || { rm -f -- "$service.new" "$timer.new"; return 1; }
+    systemctl daemon-reload >/dev/null 2>&1 || true
+    systemctl enable --now "$ACME_UNIT.timer" >/dev/null 2>&1
+}
+acme_reload_command() { printf 'test ! -x %s/darban || %s/darban reload-links\n' "$SBIN_DIR" "$SBIN_DIR"; }
+get_acme_cert() {
+    # get_acme_cert <host> <renewing 0|1>: the links' Let's Encrypt certificate from acme.sh, recorded in the weekly
+    # count like certbot's, and put in use like it.
+    local host=$1 renewing=$2 before after out kind=new
+    (( renewing )) && kind=renew
+    acme_install || return 1
+    before=$(cert_fingerprint "$ACME_LINKS_DIR/fullchain.pem")
+    out=$(mktemp) || return 1
+    if (( renewing )); then
+        info "Renewing the certificate for $host with acme.sh${S_ELL}"
+    else
+        local used next
+        read -r used next <<<"$(issue_budget "$host")"
+        if (( next > 0 )); then
+            warn "This server recorded $used new certificates for $host in the last 7 days. Let's Encrypt gives 5 a week for the same address, one more every 34 hours, so it may refuse until about $(date -u -d "@$next" '+%Y-%m-%d %H:%M UTC'). Asking anyway."
+        fi
+        info "Requesting a certificate for $host with acme.sh${S_ELL}"
+    fi
+    if ! acme_issue "$ACME_DATA" "$host" "$ACME_LINKS_DIR" letsencrypt "$out" "$(acme_reload_command)"; then
+        explain_certbot_failure "$out" acme.sh "$ACME_DATA/acme.sh.log"
+        rm -f -- "$out"
+        return 1
+    fi
+    rm -f -- "$out"
+    acme_timer_install || warn "The renewal timer of acme.sh could not be set; a link renews the certificate when it needs it."
+    after=$(cert_fingerprint "$ACME_LINKS_DIR/fullchain.pem")
+    if [[ -n $after && $after != "$before" ]]; then
+        log_link_cert_issue "$host" "$kind"
+        if [[ $kind == renew ]]; then
+            use_acme_cert "Renewed with acme.sh: the certificate for $host is valid until $(cert_end_date "$ACME_LINKS_DIR/fullchain.pem")."
+        else
+            use_acme_cert "New certificate from Let's Encrypt for $host, by acme.sh, valid until $(cert_end_date "$ACME_LINKS_DIR/fullchain.pem")."
+        fi
+    else
+        use_acme_cert "Not due for renewal yet: the certificate for $host stays valid until $(cert_end_date "$ACME_LINKS_DIR/fullchain.pem"). Nothing was issued."
+    fi
+}
+use_acme_cert() {
+    # use_acme_cert <message>: the links take a copy of what acme.sh got; a renewal reaches them through its reload
+    # command, darban reload-links.
+    if with_link_lock link_pair_install acme.sh "$ACME_LINKS_DIR/fullchain.pem" "$ACME_LINKS_DIR/privkey.pem"; then
+        ok "$1"
+        return 0
+    fi
+    warn 'The certificate could not be put in place; the current one stays.'
+    return 1
+}
+
+# ---------- a test with Let's Encrypt's staging server ----------
+# It shows that TCP 80, the address and the way to a certificate work here, without one of the 5 a week. The test
+# certificate has a name and a folder of its own. It never becomes the links' certificate, never counts in the record
+# of the weekly limit, and never writes, renews or replaces the links' certificate, its renewal file or its hooks.
+staging_cert_files() {
+    # staging_cert_files <client>: where the test certificate is kept, "<fullchain> <folder>".
+    if [[ $1 == acme.sh ]]; then
+        printf '%s %s\n' "$ACME_STAGING_DATA/certificate/fullchain.pem" "$ACME_STAGING_DATA"
+    else
+        printf '%s %s\n' "$LE_DIR/live/$STAGING_CERT_NAME/fullchain.pem" "$LE_DIR/live/$STAGING_CERT_NAME"
+    fi
+}
+staging_cert_delete() {
+    # staging_cert_delete <client> [certbot]: the test certificate goes; the links' certificate stays as it is.
+    if [[ $1 == acme.sh ]]; then
+        rm -rf -- "${ACME_STAGING_DATA:?}"/*_ecc "$ACME_STAGING_DATA/certificate"
+    elif [[ -n ${2:-} && -e $LE_DIR/renewal/$STAGING_CERT_NAME.conf ]]; then
+        "$2" delete --non-interactive --cert-name "$STAGING_CERT_NAME" >/dev/null 2>&1
+    fi
+}
+test_staging_cert() {
+    # test_staging_cert <host>: one request to the staging server, which no browser trusts. The result is shown with
+    # where it is kept, and deleting it is offered.
+    local host=$1 client need=0 certbot='' out rc=0 file folder
+    local -a target
+    if host_is_ip "$host"; then
+        is_private_ip "$host" && { info "Let's Encrypt cannot check a private address."; return 1; }
+        need=$CERTBOT_IP_MIN
+        target=(--preferred-profile shortlived --ip-address "$host")
+    else
+        target=(-d "$host")
+    fi
+    info "This asks Let's Encrypt's staging server for a test certificate for $host. Browsers do not trust it, it does not count in the 5 a week, and the links keep their certificate. It needs TCP port 80 open for a moment."
+    client=$(cert_client "$host")
+    if tcp_port_taken 80; then warn "TCP port 80 is used by $(safe_text "$(tcp_port_program 80)"), so $client cannot answer on it."; return 1; fi
+    if [[ $client == certbot ]] && ! certbot=$(find_certbot "$need"); then
+        if install_certbot "$need" && certbot=$(find_certbot "$need"); then
+            :
+        elif have_snap; then
+            warn 'Could not install certbot.'
+            return 1
+        else
+            client=acme.sh
+        fi
+    fi
+    out=$(mktemp) || return 1
+    info "Asking the staging server with $client${S_ELL}"
+    # A test from before goes first, so the result is always this one.
+    staging_cert_delete "$client" "$certbot" || true
+    if [[ $client == acme.sh ]]; then
+        acme_install || { rm -f -- "$out"; return 1; }
+        acme_issue "$ACME_STAGING_DATA" "$host" "$ACME_STAGING_DATA/certificate" letsencrypt_test "$out" || rc=$?
+    else
+        # No deploy hook, and no renewal by certbot's timer: nothing of it reaches the links.
+        "$certbot" certonly --standalone --test-cert --no-autorenew --non-interactive --agree-tos --register-unsafely-without-email \
+            --cert-name "$STAGING_CERT_NAME" "${target[@]}" >"$out" 2>&1 || rc=$?
+        record_added "staging_cert $STAGING_CERT_NAME"
+    fi
+    read -r file folder <<<"$(staging_cert_files "$client")"
+    if (( rc != 0 )) || [[ ! -s $file ]]; then
+        if [[ $client == acme.sh ]]; then
+            explain_certbot_failure "$out" acme.sh "$ACME_STAGING_DATA/acme.sh.log"
+        else
+            explain_certbot_failure "$out" certbot
+        fi
+        rm -f -- "$out"
+        info "The test failed, so a real request would fail the same way. The links' certificate did not change."
+        return 1
+    fi
+    rm -f -- "$out"
+    ok "The staging server issued a test certificate for $host with $client, valid until $(cert_end_date "$file"). A real request should work too."
+    kv Kept "$folder"
+    kv Issuer "$(safe_text "$(openssl x509 -in "$file" -noout -issuer 2>/dev/null | sed 's/^issuer=//')")"
+    info "The links' certificate did not change, and the record of the weekly limit counts nothing for this test."
+    if choose_one 'Delete the test certificate? Nothing uses it.' 'Yes, delete it' 'No, keep it' && (( CHOSEN == 1 )); then
+        if staging_cert_delete "$client" "$certbot"; then ok 'The test certificate was deleted.'; else warn "Could not delete the test certificate in $folder."; fi
+    else
+        info "Kept in $folder. Remove everything deletes it."
     fi
 }
 log_link_cert_issue() {
@@ -210,8 +474,14 @@ own_cert_usable() {
 }
 link_lifetime_seconds() { printf '%s\n' "$(( ($(link_hours) + 1) * 3600 ))"; }
 own_cert_renewable() {
-    # This tool's certificate for host can be renewed: certbot knows it, and it names host.
-    [[ -s $LE_DIR/renewal/$CERT_NAME.conf ]] && cert_covers "$LE_DIR/live/$CERT_NAME/fullchain.pem" "$1"
+    # This tool's certificate for host can be renewed: certbot knows it, and it names host, or acme.sh got it.
+    { [[ -s $LE_DIR/renewal/$CERT_NAME.conf ]] && cert_covers "$LE_DIR/live/$CERT_NAME/fullchain.pem" "$1"; } \
+        || acme_cert_known "$ACME_DATA" "$1"
+}
+acme_cert_usable() {
+    # acme_cert_usable <host>: the certificate acme.sh got for the links still serves host as long as a link lasts.
+    acme_cert_known "$ACME_DATA" "$1" \
+        && [[ -z $(cert_problem "$ACME_LINKS_DIR/fullchain.pem" "$ACME_LINKS_DIR/privkey.pem" "$1" "$(link_lifetime_seconds)") ]]
 }
 explain_kept_cert() {
     # A Let's Encrypt certificate this tool got before, kept through a removal, that cannot serve host: why, so
@@ -275,7 +545,7 @@ link_pair_current() {
     printf '%s\n' "$target"
 }
 link_pair_kind() {
-    # letsencrypt, copied or self-signed: what the pair in use says of itself.
+    # letsencrypt, acme.sh, copied or self-signed: what the pair in use says of itself.
     local id kind=''
     link_pair_layout && id=$(link_pair_current) || return 1
     [[ -r $LINK_PAIRS/pairs/$id/kind ]] && IFS= read -r kind <"$LINK_PAIRS/pairs/$id/kind"
@@ -526,6 +796,7 @@ refresh_link_pair() {
             # A link into /etc/letsencrypt from before v1.0.0 follows the renewal by itself, until its first change.
             link_pair_layout || return 0
             cert=$LE_DIR/live/$CERT_NAME/fullchain.pem key=$LE_DIR/live/$CERT_NAME/privkey.pem label="Let's Encrypt" ;;
+        acme.sh) cert=$ACME_LINKS_DIR/fullchain.pem key=$ACME_LINKS_DIR/privkey.pem label="acme.sh's folder" ;;
         copied)
             [[ -r $LINK_CERT_SOURCE ]] && { IFS= read -r cert; IFS= read -r key; } <"$LINK_CERT_SOURCE"
             label=$(safe_text "$cert") ;;
@@ -533,8 +804,8 @@ refresh_link_pair() {
     esac
     [[ -n $cert && -n $key && -s $cert && -s $key ]] || return 0
     if cmp -s -- "$cert" "$LINK_CERT" && cmp -s -- "$key" "$LINK_KEY"; then return 0; fi
-    if [[ $(link_cert_source) == letsencrypt ]]; then
-        with_link_lock link_pair_install letsencrypt "$cert" "$key" || return 1
+    if [[ $(link_cert_source) == letsencrypt || $(link_cert_source) == acme.sh ]]; then
+        with_link_lock link_pair_install "$(link_cert_source)" "$cert" "$key" || return 1
     else
         [[ -z $(cert_problem "$cert" "$key" "$host") ]] && copy_cert_pair "$cert" "$key" "$host" || return 1
     fi
@@ -545,6 +816,10 @@ offer_trusted_cert() {
     local host=$1 found cert key end
     # The one this tool got before, kept through a removal: taken back without a question or a new request.
     if own_cert_usable "$host"; then use_own_cert; return; fi
+    if acme_cert_usable "$host"; then
+        use_acme_cert "Links use the Let's Encrypt certificate acme.sh got earlier, valid until $(cert_end_date "$ACME_LINKS_DIR/fullchain.pem"). Nothing was requested."
+        return
+    fi
     if own_cert_renewable "$host"; then
         info "The Let's Encrypt certificate kept on this server for $host ends sooner than a link may last. Renewing it${S_ELL}"
         get_trusted_cert "$host" asked
@@ -625,6 +900,7 @@ choose_link_cert() {
 link_cert_source_label() {
     case $(link_cert_source) in
         letsencrypt) printf "Let's Encrypt\n" ;;
+        acme.sh) printf "Let's Encrypt by acme.sh\n" ;;
         copied) printf 'from %s\n' "$(head -n 1 "$LINK_CERT_SOURCE")" ;;
         self-signed) printf 'self-signed\n' ;;
         *) printf 'none\n' ;;
@@ -647,25 +923,48 @@ link_cert_summary() {
     fi
 }
 certbot_timer_active() { systemctl is-active --quiet snap.certbot.renew.timer 2>/dev/null || systemctl is-active --quiet certbot.timer 2>/dev/null; }
+acme_timer_active() { systemctl is-active --quiet "$ACME_UNIT.timer" 2>/dev/null; }
+link_cert_client() {
+    # Which program got the links' certificate, for Details and Diagnostics; 1 when no program of this tool did.
+    case $(link_cert_source) in
+        letsencrypt)
+            if [[ -x /snap/bin/certbot ]]; then printf 'certbot, the Certbot snap\n'
+            elif command -v certbot >/dev/null 2>&1; then printf "certbot, Ubuntu's package\n"
+            else printf 'certbot, which is no longer on this server\n'
+            fi ;;
+        acme.sh) printf 'acme.sh %s, installed by this tool in %s\n' "$ACME_VERSION" "$ACME_HOME" ;;
+        *) return 1 ;;
+    esac
+}
+link_cert_renewal_text() {
+    # How this tool's Let's Encrypt certificate is renewed, in one sentence; 1 for any other certificate.
+    case $(link_cert_source) in
+        letsencrypt)
+            if certbot_timer_active; then printf "certbot's timer is active; a link also renews it when needed\n"
+            else printf 'no certbot timer is active; a link renews it when needed\n'
+            fi ;;
+        acme.sh)
+            if acme_timer_active; then printf '%s.timer runs acme.sh twice a day; a link also renews it when needed\n' "$ACME_UNIT"
+            else printf '%s.timer is not active; a link renews it when needed\n' "$ACME_UNIT"
+            fi ;;
+        *) return 1 ;;
+    esac
+}
 show_link_cert_details() {
-    local host=$1 new renewed unknown
+    local host=$1 new renewed unknown client renewal
     kv Current "$(safe_text "$(link_cert_summary)")"
     if [[ -s $LINK_CERT ]]; then
         kv Valid "from $(cert_start_date "$LINK_CERT") until $(cert_end_date "$LINK_CERT")"
         case $(link_cert_source) in
             letsencrypt) kv Source "Let's Encrypt, in $LE_DIR/live/$CERT_NAME" ;;
+            acme.sh) kv Source "Let's Encrypt, in $ACME_LINKS_DIR" ;;
             copied) kv Source "a copy of $(safe_text "$(head -n 1 "$LINK_CERT_SOURCE")")" ;;
             *) kv Source 'made on this server' ;;
         esac
         kv SHA-256 "$(cert_fingerprint "$LINK_CERT")"
     fi
-    if [[ $(link_cert_source) == letsencrypt ]]; then
-        if certbot_timer_active; then
-            kv Renewal "certbot's timer is active; a link also renews it when needed"
-        else
-            kv Renewal "no certbot timer is active; a link renews it when needed"
-        fi
-    fi
+    if client=$(link_cert_client); then kv Client "$client"; fi
+    if renewal=$(link_cert_renewal_text); then kv Renewal "$renewal"; fi
     if ! { host_is_ip "$host" && is_private_ip "$host"; }; then
         read -r new renewed unknown <<<"$(issue_counts "$host")"
         kv Recorded "$new new, $renewed renewed$( (( unknown > 0 )) && printf ', %s of unknown kind' "$unknown") in the last 7 days, by this tool for $host"
@@ -675,8 +974,11 @@ show_link_cert_details() {
 }
 link_cert_renewal_line() {
     # One line for the main screen: how the certificate stays valid, only for this tool's Let's Encrypt one.
-    [[ $(link_cert_source) == letsencrypt ]] || return 1
-    if certbot_timer_active; then printf 'automatic\n'; else printf 'when a link needs it\n'; fi
+    case $(link_cert_source) in
+        letsencrypt) if certbot_timer_active; then printf 'automatic\n'; else printf 'when a link needs it\n'; fi ;;
+        acme.sh) if acme_timer_active; then printf 'automatic, by acme.sh\n'; else printf 'when a link needs it\n'; fi ;;
+        *) return 1 ;;
+    esac
 }
 change_link_cert() {
     # Two lines of state and four choices; everything else is one level down.
@@ -694,12 +996,17 @@ change_link_cert() {
         actions+=(letsencrypt)
     fi
     labels+=('Use another certificate' 'Details'); actions+=(another details)
+    # A test that changes nothing comes after the four choices, so their numbers stay.
+    if ! { host_is_ip "$host" && is_private_ip "$host"; }; then
+        labels+=("Test Let's Encrypt with its staging server"); actions+=(staging)
+    fi
     choose_one 'What do you want to do?' "${labels[@]}" || { cancelled; return 0; }
     case ${actions[CHOSEN - 1]} in
         keep) info 'The current certificate stays.' ;;
         letsencrypt) change_link_cert_to "$host" letsencrypt ;;
         another) choose_another_cert "$host" ;;
         details) show_link_cert_details "$host" ;;
+        staging) test_staging_cert "$host" ;;
     esac
 }
 choose_another_cert() {
@@ -734,7 +1041,7 @@ change_link_cert_choice() {
         letsencrypt)
             # What it costs is said once it is chosen, not on the list.
             if own_cert_renewable "$host"; then
-                info "certbot renews this tool's certificate only when it is due, and tells Let's Encrypt which one it replaces."
+                info "$(cert_client "$host") renews this tool's certificate only when it is due, and tells Let's Encrypt which one it replaces."
             else
                 info "This asks Let's Encrypt for a new certificate for $host: one of the 5 it gives a week for one address."
             fi

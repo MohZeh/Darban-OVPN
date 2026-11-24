@@ -260,8 +260,9 @@ jobs:
         env:
           PART: ${{ matrix.part }}
           # The measurements only record numbers and fail nothing, so an ordinary pull request does not run them.
+          ACME: ${{ (matrix.ubuntu == '24.04' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' || contains(github.event.pull_request.labels.*.name, 'scale')) && '1' || '0' }}
           MEASURE: ${{ (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' || contains(github.event.pull_request.labels.*.name, 'scale')) && '1' || '0' }}
-        run: sudo MEASURE="$MEASURE" GO="$(command -v go)" GITHUB_STEP_SUMMARY="$GITHUB_STEP_SUMMARY" bash tests/acceptance-ci.sh --i-know "$PART"
+        run: sudo MEASURE="$MEASURE" ACME="$ACME" GO="$(command -v go)" GITHUB_STEP_SUMMARY="$GITHUB_STEP_SUMMARY" bash tests/acceptance-ci.sh --i-know "$PART"
 
   # Three checks of about a minute each, on one runner, so a run waits less for runners: the real-terminal tests,
   # which change nothing on the machine, then the setup on a public address, the path the acceptance run skips
