@@ -23,4 +23,21 @@ scope() {
     done <<<"$changed"
     echo false
 }
-printf 'code=%s\n' "$(scope)"
+# go=true when a Go file, go.mod (which pins the Go version) or this workflow (which pins the tools) changed, and
+# vuln=true when go.mod or the workflow changed: a new vulnerability in the toolchain or the tools is found by the
+# weekly run otherwise. Anything uncertain counts as changed.
+golang() {
+    local from='' changed
+    case ${EVENT:-} in
+        push) if [[ ${GITHUB_REF:-refs/heads/main} == refs/heads/* ]]; then from=${BEFORE:-}; fi ;;
+        pull_request) from=${BASE:-} ;;
+    esac
+    if [[ -z $from || $from =~ ^0+$ ]] || ! changed=$(git diff --name-only "$from" HEAD 2>/dev/null) || [[ -z $changed ]]; then
+        echo 'go=true'; echo 'vuln=true'; return
+    fi
+    if grep -Eq '(\.go|^go\.mod|^\.github/workflows/ci\.yml)$' <<<"$changed"; then echo 'go=true'; else echo 'go=false'; fi
+    if grep -Eq '^(go\.mod|\.github/workflows/ci\.yml)$' <<<"$changed"; then echo 'vuln=true'; else echo 'vuln=false'; fi
+}
+printf 'code=%s
+' "$(scope)"
+golang

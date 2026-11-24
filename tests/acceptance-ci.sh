@@ -295,8 +295,14 @@ darban status >/dev/null
 echo 'PASS: a CRL OpenVPN cannot read is named, refuses every client, and works again once readable.'
 
 # T67 and C.15.1: when the server records the end of a session. It runs client-disconnect when it closes the
-# session, which may be well after the device went away; a kill -9 must still be recorded within 130 seconds.
+# session, which may be well after the device went away; a kill -9 must still be recorded in time. The product
+# default (keepalive 10 60) takes about two minutes; this test's server uses keepalive 2 10, so it notices a dead
+# client in about 20 seconds. Only the test's copy of the config changes: it is put back before the restart below.
 PROFILE=$LOG/accept1.ovpn
+KEEPALIVE_OLD=$(grep -E '^keepalive ' "$CONF")
+disconnect
+sed -i 's/^keepalive .*/keepalive 2 10/' "$CONF"
+systemctl restart "$UNIT"
 session_end() { awk -F= '$1=="session_end" {print $2}' "$LEDGER/${1:-accept1}" 2>/dev/null || true; }
 wait_session_end() {
     # wait_session_end <value before> <seconds> [client]: prints how long the record took, or fails.
@@ -317,28 +323,29 @@ connect "$PROFILE" "$LOG/t67-term.log"; before=$(session_end)
 connect "$LOG/t67kill.ovpn" "$LOG/t67-kill.log" tun8 "$LOG/t67kill.pid"; before_kill=$(session_end t67kill)
 kill -TERM "$(cat "$PIDFILE")"
 kill_client "$LOG/t67kill.pid" tun8
-wait_session_end "$before" 150 >"$LOG/t67-term.took" || true &
+wait_session_end "$before" 60 >"$LOG/t67-term.took" || true &
 term_wait=$!
-took=$(wait_session_end "$before_kill" 150 t67kill) || { echo 'FAIL: the end of a session after kill -9 was not recorded in 150 seconds.'; exit 1; }
+took=$(wait_session_end "$before_kill" 60 t67kill) || { echo 'FAIL: the end of a session after kill -9 was not recorded in 60 seconds.'; exit 1; }
 wait "$term_wait"
-[[ -s $LOG/t67-term.took ]] || { echo 'FAIL: the end of a session after SIGTERM was not recorded in 150 seconds.'; exit 1; }
+[[ -s $LOG/t67-term.took ]] || { echo 'FAIL: the end of a session after SIGTERM was not recorded in 60 seconds.'; exit 1; }
 echo "T67: client stopped by SIGTERM: the end recorded after $(cat "$LOG/t67-term.took") s"
 echo "T67: client killed with kill -9: the end recorded after ${took} s"
-if (( took >= 130 )); then echo 'FAIL: the end of a killed session took 130 seconds or more.'; exit 1; fi
+if (( took >= 40 )); then echo 'FAIL: the end of a killed session took 40 seconds or more.'; exit 1; fi
 sleep 1
 connect "$PROFILE" "$LOG/t67-again.log"; before=$(session_end)
 kill_client
 connect "$PROFILE" "$LOG/t67-again2.log"
-took=$(wait_session_end "$before" 150) || { echo 'FAIL: a new session of the same name did not end the old one in 150 seconds.'; exit 1; }
+took=$(wait_session_end "$before" 60) || { echo 'FAIL: a new session of the same name did not end the old one in 60 seconds.'; exit 1; }
 echo "T67: the same name connecting again: the old session's end recorded after ${took} s"
 before=$(session_end)
+sed -i "s/^keepalive .*/$KEEPALIVE_OLD/" "$CONF"
 systemctl restart "$UNIT"
 # OpenVPN closes every session when it stops, so the end is recorded at once (PR 0 and round 17).
 took=$(wait_session_end "$before" 30) || { echo 'FAIL: the end of a session at a server restart was not recorded in 30 seconds.'; exit 1; }
 echo "T67: server restarted: the end recorded after ${took} s"
 disconnect
 journalctl -u "$UNIT" --since '-10min' --no-pager | grep -Ei 'client-disconnect|Inactivity timeout|SIGTERM|exit notification|soft,|restart' | tail -n 12 || true
-echo 'PASS: the end of every session was recorded, a killed one within 130 seconds.'
+echo 'PASS: the end of every session was recorded, a killed one within 40 seconds.'
 
 # T70, EV1, C.14.2 and C.15.5: 500 events from the product's own script, as nobody, all at once, while real clients
 # connect again and again. The real worker takes them all: none is lost, the queue empties, its watcher stays up.
@@ -441,10 +448,194 @@ darban list --all
 
 # T0 (#115): facts about OpenVPN 2.7 with a UDP and a TCP socket in one process, for the design of T1, from a
 # temporary OpenVPN of its own. The facts go to the summary as seen; it fails only if the installed server changed.
+# Only recorded numbers, no check: the pull request does not run it (MEASURE is set weekly, by hand, or with the label scale).
+if [[ ${MEASURE:-0} == 1 ]]; then
 bash tests/openvpn-facts-ci.sh --i-know
 systemctl is-active --quiet "$UNIT"
 connect "$PROFILE" "$LOG/after-facts.log"; disconnect
 echo 'PASS: after the facts test, the installed server still runs and a client connects.'
+fi
+
+# ---------- T1 (#116): UDP only, TCP only, or both, against the real OpenVPN ----------
+T1_TCP=4443
+t1_summary() { if [[ -n ${GITHUB_STEP_SUMMARY:-} ]]; then printf '%s\n' "$*" >>"$GITHUB_STEP_SUMMARY"; fi; echo "$*"; }
+# t1_connect_ns <profile> <log> <seconds>: a client in the namespace; T1_SECONDS is how long it took to connect.
+T1_SECONDS=''
+t1_connect_ns() {
+    local start now
+    rm -f "$LOG/t1ns.pid"
+    start=$(date +%s%N)
+    ip netns exec "$NS-t" openvpn --config "$1" --route-nopull --dev tun7 --daemon --writepid "$LOG/t1ns.pid" --log "$2" --verb 3
+    while :; do
+        now=$(date +%s%N)
+        if grep -q 'Initialization Sequence Completed' "$2"; then T1_SECONDS=$(awk -v n=$(( (now - start) / 100000000 )) 'BEGIN {printf "%.1f", n / 10}'); return 0; fi
+        if (( (now - start) / 1000000000 >= $3 )); then T1_SECONDS="more than $3"; return 1; fi
+        sleep 0.2
+    done
+}
+t1_disconnect_ns() { stop_client "$LOG/t1ns.pid"; sleep 0.5; }
+# t1_transport <log>: the protocol a client log ended on.
+t1_transport() { if grep -q 'TCP connection established' "$1"; then echo TCP; elif grep -q 'UDPv4 link remote' "$1"; then echo UDP; else echo unknown; fi; }
+t1_conf_before=$(cat "$CONF")
+t1_summary '#### T1: UDP only, TCP only, or both'
+
+# Both, from the menu: UDP 1194 stays, and TCP comes beside it, each with its own socket.
+printf '7\n2\n3\n%s\n2\n0\n0\n0\n' "$T1_TCP" | darban | tee "$LOG/t1-both.log"
+grep -qx 'local \* 1194 udp' "$CONF" && grep -qx "local \\* $T1_TCP tcp" "$CONF"
+if grep -q '^port \|^proto ' "$CONF"; then echo 'FAIL: both left a port or proto line.'; exit 1; fi
+grep -qx 'explicit-exit-notify 1' "$CONF"
+ss -H -lun 'sport = :1194' | grep -q . && ss -H -ltn "sport = :$T1_TCP" | grep -q LISTEN
+if (( USE_UFW )); then ufw allow "$T1_TCP/tcp" >/dev/null; fi
+darban status >"$LOG/t1-status.log" 2>&1 || true
+grep "Listening on TCP $T1_TCP" "$LOG/t1-status.log" >/dev/null
+printf '1\nt1both\n0\n' | darban >/dev/null
+cp /root/openvpn-clients/t1both.ovpn "$LOG/t1both.ovpn"
+grep -qx "remote 127.0.0.1 $T1_TCP tcp4" "$LOG/t1both.ovpn" && grep -qx 'server-poll-timeout 5' "$LOG/t1both.ovpn"
+connect "$LOG/t1both.ovpn" "$LOG/t1-both-client.log"
+[[ $(t1_transport "$LOG/t1-both-client.log") == UDP ]] || { echo 'FAIL: a profile with both did not start on UDP.'; exit 1; }
+disconnect
+echo 'PASS: both listens on UDP and TCP, and a profile with both connects over UDP first.'
+
+# A TCP connection of a client ends its UDP connection: one OpenVPN knows each name once.
+sed -e "/ udp4$/d" -e '/^server-poll-timeout/d' "$LOG/t1both.ovpn" >"$LOG/t1both-tcp.ovpn"
+connect "$LOG/t1both.ovpn" "$LOG/t1-same-udp.log"
+connect "$LOG/t1both-tcp.ovpn" "$LOG/t1-same-tcp.log" tun8 "$LOG/t1-tcp.pid"
+[[ $(t1_transport "$LOG/t1-same-tcp.log") == TCP ]]
+# The rows of Connected now for t1both, with its PROTOCOL column (G27, #153).
+t1_rows() { darban connected 2>/dev/null | awk '$1 == "t1both"' || true; }
+# The UDP client tries again once it is dropped, and may take the name back for a moment: what counts is that the
+# name is never listed twice, and that its one session is the TCP one.
+seen_tcp=0
+for attempt in $(seq 1 30); do
+    rows=$(t1_rows)
+    if (( $(grep -c . <<<"$rows" || true) > 1 )); then echo 'FAIL: t1both is listed twice, over UDP and TCP at once.'; exit 1; fi
+    if awk '$3 == "TCP" {found = 1} END {exit !found}' <<<"$rows"; then seen_tcp=1; break; fi
+    sleep 0.5
+done
+(( seen_tcp )) || { echo "FAIL: the TCP connection of t1both did not take its session: $(t1_rows)"; exit 1; }
+stop_client "$LOG/t1-tcp.pid"
+disconnect
+echo 'PASS: a TCP connection of a client ends its UDP connection; the name is never listed twice.'
+
+# With UDP dropped in the client's own network, a profile with both reaches TCP.
+ip netns add "$NS-t"
+ip link add dt4 type veth peer name dt5
+ip link set dt5 netns "$NS-t"
+ip addr add 198.18.0.9/30 dev dt4
+ip link set dt4 up
+ip netns exec "$NS-t" ip link set lo up
+ip netns exec "$NS-t" ip addr add 198.18.0.10/30 dev dt5
+ip netns exec "$NS-t" ip link set dt5 up
+sed 's/^remote 127\.0\.0\.1 /remote 198.18.0.9 /' "$LOG/t1both.ovpn" >"$LOG/t1ns.ovpn"
+t1_connect_ns "$LOG/t1ns.ovpn" "$LOG/t1-ns-open.log" 30
+t1_summary "- UDP open, from a network namespace: connected in $T1_SECONDS s, over $(t1_transport "$LOG/t1-ns-open.log")."
+t1_disconnect_ns
+ip netns exec "$NS-t" nft add table inet t1drop
+ip netns exec "$NS-t" nft add chain inet t1drop out '{ type filter hook output priority 0; policy accept; }'
+ip netns exec "$NS-t" nft add rule inet t1drop out udp dport 1194 drop
+t1_connect_ns "$LOG/t1ns.ovpn" "$LOG/t1-ns-dropped.log" 60 || { echo "FAIL: with UDP dropped, the client did not reach TCP ($T1_SECONDS s)."; exit 1; }
+[[ $(t1_transport "$LOG/t1-ns-dropped.log") == TCP ]]
+t1_summary "- **UDP dropped in the client's network: reached TCP in $T1_SECONDS s.**"
+t1_disconnect_ns
+ip netns exec "$NS-t" nft delete table inet t1drop
+echo "PASS: with UDP dropped, a profile with both reaches TCP, in $T1_SECONDS s."
+
+# A measurement, never a failure: 300 ms more and 10% loss on UDP alone, and which protocol the client ends on.
+if [[ ${MEASURE:-0} != 1 ]]; then
+    t1_summary '- UDP with 300 ms delay and 10% loss: not measured in a pull request, it runs weekly, by hand, or with the label scale.'
+elif ip netns exec "$NS-t" tc qdisc add dev dt5 root handle 1: prio 2>/dev/null \
+    && ip netns exec "$NS-t" tc qdisc add dev dt5 parent 1:3 handle 30: netem delay 300ms loss 10% 2>/dev/null \
+    && ip netns exec "$NS-t" tc filter add dev dt5 protocol ip parent 1:0 prio 3 u32 match ip protocol 17 0xff flowid 1:3 2>/dev/null; then
+    if t1_connect_ns "$LOG/t1ns.ovpn" "$LOG/t1-ns-netem.log" 90; then
+        sleep 20
+        t1_summary "- UDP with 300 ms delay and 10% loss (tc netem): connected in $T1_SECONDS s, over $(t1_transport "$LOG/t1-ns-netem.log"); after 20 s more: $(if grep -q 'SIGUSR1' "$LOG/t1-ns-netem.log"; then echo 'it restarted on the way'; else echo 'still on it'; fi). A measurement, not a check."
+    else
+        t1_summary "- UDP with 300 ms delay and 10% loss (tc netem): did not connect in 90 s. A measurement, not a check."
+    fi
+    t1_disconnect_ns
+    ip netns exec "$NS-t" tc qdisc del dev dt5 root 2>/dev/null || true
+else
+    t1_summary '- UDP with 300 ms delay and 10% loss: not measured, tc netem is not available here.'
+fi
+
+# TCP only, from the menu: the namespace client with a TCP-only profile connects.
+printf '7\n2\n2\n2\n0\n0\n0\n' | darban | tee "$LOG/t1-tcp.log"
+grep -qx "port $T1_TCP" "$CONF" && grep -qx 'proto tcp4-server' "$CONF"
+if grep -q 'explicit-exit-notify' "$CONF"; then echo 'FAIL: TCP only kept explicit-exit-notify.'; exit 1; fi
+printf '1\nt1tcp\n0\n' | darban >/dev/null
+cp /root/openvpn-clients/t1tcp.ovpn "$LOG/t1tcp.ovpn"
+grep -qx 'proto tcp4' "$LOG/t1tcp.ovpn"
+if grep -q 'explicit-exit-notify' "$LOG/t1tcp.ovpn"; then echo 'FAIL: a TCP-only profile has explicit-exit-notify.'; exit 1; fi
+connect "$LOG/t1tcp.ovpn" "$LOG/t1-tcp-client.log"
+[[ $(t1_transport "$LOG/t1-tcp-client.log") == TCP ]]
+disconnect
+echo 'PASS: TCP only listens on TCP alone, and a TCP-only profile connects.'
+
+# Rollback: a TCP port another program takes after the screen checked it, as one starting at that moment would, so
+# OpenVPN cannot bind it when it restarts.
+rm -f "$LOG/t1-in"; mkfifo "$LOG/t1-in"
+darban <"$LOG/t1-in" >"$LOG/t1-rollback.log" 2>&1 &
+t1_darban=$!
+exec 7>"$LOG/t1-in"
+printf '7\n2\n4\n4444\n' >&7
+for attempt in $(seq 1 60); do grep -q 'Apply TCP 4444 now?' "$LOG/t1-rollback.log" && break; sleep 0.5; done
+grep -q 'Apply TCP 4444 now?' "$LOG/t1-rollback.log"
+python3 -c 'import socket, time; s = socket.socket(); s.bind(("0.0.0.0", 4444)); s.listen(); time.sleep(60)' &
+holder=$!
+for attempt in $(seq 1 20); do ss -H -ltn 'sport = :4444' | grep -q LISTEN && break; sleep 0.2; done
+printf '2\n0\n0\n0\n' >&7
+exec 7>&-
+wait "$t1_darban" || true
+kill "$holder" 2>/dev/null || true; wait "$holder" 2>/dev/null || true
+cat "$LOG/t1-rollback.log"
+grep 'Rolled back' "$LOG/t1-rollback.log" >/dev/null
+grep -qx "port $T1_TCP" "$CONF"
+systemctl is-active --quiet "$UNIT"
+ss -H -ltn "sport = :$T1_TCP" | grep -q LISTEN
+echo 'PASS: a TCP port that is taken when OpenVPN restarts is rolled back.'
+
+# port-share: the OpenVPN TCP port also serves the link page. An OpenVPN client connects, an HTTPS request to the
+# same port gets the page, and the link service counts the real address, read from OpenVPN's file.
+t1_share_start=$(date +%s); sleep 1
+printf '7\n2\n5\n2\n0\n0\n0\n' | darban | tee "$LOG/t1-share.log"
+grep -Eq "^port-share 127\.0\.0\.1 [0-9]+ /run/darban-port-share$" "$CONF"
+local_port=$(awk '$1=="port-share" {print $3}' "$CONF")
+journalctl -u "$UNIT" --since "@$t1_share_start" --no-pager | grep 'PORT SHARE PROXY: proxy starting' >/dev/null
+[[ $(stat -c '%U %G %a' /run/darban-port-share) == 'nobody root 2750' ]]
+systemctl is-enabled --quiet darban-links.service
+systemctl is-active --quiet darban-links.service
+ss -H -ltn "sport = :$local_port" | grep -q '127.0.0.1'
+curl -ks -o "$LOG/t1-probe.html" -w '%{http_code}\n' "https://127.0.0.1:$T1_TCP/" | tee "$LOG/t1-probe.code"
+[[ $(cat "$LOG/t1-probe.code") == 410 ]]
+connect "$LOG/t1tcp.ovpn" "$LOG/t1-share-client.log"
+disconnect
+url=$(printf '5\nt1tcp\n1\n1\n0\n' | darban | grep -oE 'https://[^ ]+/l/[0-9a-f]{64}')
+[[ $url == "https://127.0.0.1:$T1_TCP/l/"* ]] || { echo "FAIL: the link does not use the shared port: $url"; exit 1; }
+# From the namespace, so the real address differs from the proxy's 127.0.0.1.
+ip netns exec "$NS-t" curl -ksf "https://198.18.0.9:$T1_TCP${url#https://127.0.0.1:$T1_TCP}/file" -o "$LOG/t1-share.ovpn"
+grep -q '^client$' "$LOG/t1-share.ovpn"
+journalctl -u darban-links.service -n 20 --no-pager | tee "$LOG/t1-links.log" | grep 'profile downloaded: t1tcp from 198.18.0.10' >/dev/null
+echo 'PASS: with port-share, a client connects, the same port answers HTTPS with the link page, and the link service sees the real address.'
+# Once the last link is gone, the page still answers, as the service stays up while the port is shared.
+rm -f /run/darban-links/*.meta /run/darban-links/*.ovpn /run/darban-links/*.url
+sleep 75
+systemctl is-active --quiet darban-links.service
+[[ $(curl -ks -o /dev/null -w '%{http_code}' "https://127.0.0.1:$T1_TCP/") == 410 ]]
+echo 'PASS: with port-share, the link page still answers after the last link is gone.'
+printf '7\n2\n5\n2\n0\n0\n0\n' | darban | tee "$LOG/t1-share-off.log"
+if grep -q '^port-share' "$CONF"; then echo 'FAIL: port-share stayed after it was turned off.'; exit 1; fi
+if systemctl is-enabled --quiet darban-links.service; then echo 'FAIL: the link service stayed enabled.'; exit 1; fi
+[[ ! -e /etc/tmpfiles.d/darban-port-share.conf && ! -e /etc/systemd/system/darban-links.service.d/darban-port-share.conf ]]
+echo 'PASS: port-share off: the line, the folder and the always-on link service go.'
+
+# Back to UDP 1194 alone: server.conf is as before T1, byte for byte.
+printf '7\n2\n1\n1194\n2\n0\n0\n0\n' | darban | tee "$LOG/t1-udp.log"
+[[ $(cat "$CONF") == "$t1_conf_before" ]] || { echo 'FAIL: back to UDP only, server.conf differs from before.'; diff <(printf '%s\n' "$t1_conf_before") "$CONF" || true; exit 1; }
+if (( USE_UFW )); then ufw delete allow "$T1_TCP/tcp" >/dev/null || true; fi
+ip netns del "$NS-t"
+ip link del dt4 2>/dev/null || true
+connect "$PROFILE" "$LOG/t1-back.log"; disconnect
+echo 'PASS: back to UDP only, server.conf is the same as before, byte for byte, and the first profile connects.'
 fi
 
 # ---------- part 2: the settings, the network, links and files, certbot, the update and the removal ----------
@@ -762,185 +953,6 @@ if (( ! USE_UFW )); then
     iptables -D FORWARD -o tun0 -j ACCEPT
 fi
 
-# ---------- T1 (#116): UDP only, TCP only, or both, against the real OpenVPN ----------
-T1_TCP=4443
-t1_summary() { if [[ -n ${GITHUB_STEP_SUMMARY:-} ]]; then printf '%s\n' "$*" >>"$GITHUB_STEP_SUMMARY"; fi; echo "$*"; }
-# t1_connect_ns <profile> <log> <seconds>: a client in the namespace; T1_SECONDS is how long it took to connect.
-T1_SECONDS=''
-t1_connect_ns() {
-    local start now
-    rm -f "$LOG/t1ns.pid"
-    start=$(date +%s%N)
-    ip netns exec "$NS-t" openvpn --config "$1" --route-nopull --dev tun7 --daemon --writepid "$LOG/t1ns.pid" --log "$2" --verb 3
-    while :; do
-        now=$(date +%s%N)
-        if grep -q 'Initialization Sequence Completed' "$2"; then T1_SECONDS=$(awk -v n=$(( (now - start) / 100000000 )) 'BEGIN {printf "%.1f", n / 10}'); return 0; fi
-        if (( (now - start) / 1000000000 >= $3 )); then T1_SECONDS="more than $3"; return 1; fi
-        sleep 0.2
-    done
-}
-t1_disconnect_ns() { stop_client "$LOG/t1ns.pid"; sleep 0.5; }
-# t1_transport <log>: the protocol a client log ended on.
-t1_transport() { if grep -q 'TCP connection established' "$1"; then echo TCP; elif grep -q 'UDPv4 link remote' "$1"; then echo UDP; else echo unknown; fi; }
-t1_conf_before=$(cat "$CONF")
-t1_summary '#### T1: UDP only, TCP only, or both'
-
-# Both, from the menu: UDP 1194 stays, and TCP comes beside it, each with its own socket.
-printf '7\n2\n3\n%s\n2\n0\n0\n0\n' "$T1_TCP" | darban | tee "$LOG/t1-both.log"
-grep -qx 'local \* 1194 udp' "$CONF" && grep -qx "local \\* $T1_TCP tcp" "$CONF"
-if grep -q '^port \|^proto ' "$CONF"; then echo 'FAIL: both left a port or proto line.'; exit 1; fi
-grep -qx 'explicit-exit-notify 1' "$CONF"
-ss -H -lun 'sport = :1194' | grep -q . && ss -H -ltn "sport = :$T1_TCP" | grep -q LISTEN
-if (( USE_UFW )); then ufw allow "$T1_TCP/tcp" >/dev/null; fi
-darban status >"$LOG/t1-status.log" 2>&1 || true
-grep "Listening on TCP $T1_TCP" "$LOG/t1-status.log" >/dev/null
-printf '1\nt1both\n0\n' | darban >/dev/null
-cp /root/openvpn-clients/t1both.ovpn "$LOG/t1both.ovpn"
-grep -qx "remote 127.0.0.1 $T1_TCP tcp4" "$LOG/t1both.ovpn" && grep -qx 'server-poll-timeout 5' "$LOG/t1both.ovpn"
-connect "$LOG/t1both.ovpn" "$LOG/t1-both-client.log"
-[[ $(t1_transport "$LOG/t1-both-client.log") == UDP ]] || { echo 'FAIL: a profile with both did not start on UDP.'; exit 1; }
-disconnect
-echo 'PASS: both listens on UDP and TCP, and a profile with both connects over UDP first.'
-
-# A TCP connection of a client ends its UDP connection: one OpenVPN knows each name once.
-sed -e "/ udp4$/d" -e '/^server-poll-timeout/d' "$LOG/t1both.ovpn" >"$LOG/t1both-tcp.ovpn"
-connect "$LOG/t1both.ovpn" "$LOG/t1-same-udp.log"
-connect "$LOG/t1both-tcp.ovpn" "$LOG/t1-same-tcp.log" tun8 "$LOG/t1-tcp.pid"
-[[ $(t1_transport "$LOG/t1-same-tcp.log") == TCP ]]
-# The rows of Connected now for t1both, with its PROTOCOL column (G27, #153).
-t1_rows() { darban connected 2>/dev/null | awk '$1 == "t1both"' || true; }
-# The UDP client tries again once it is dropped, and may take the name back for a moment: what counts is that the
-# name is never listed twice, and that its one session is the TCP one.
-seen_tcp=0
-for attempt in $(seq 1 30); do
-    rows=$(t1_rows)
-    if (( $(grep -c . <<<"$rows" || true) > 1 )); then echo 'FAIL: t1both is listed twice, over UDP and TCP at once.'; exit 1; fi
-    if awk '$3 == "TCP" {found = 1} END {exit !found}' <<<"$rows"; then seen_tcp=1; break; fi
-    sleep 0.5
-done
-(( seen_tcp )) || { echo "FAIL: the TCP connection of t1both did not take its session: $(t1_rows)"; exit 1; }
-stop_client "$LOG/t1-tcp.pid"
-disconnect
-echo 'PASS: a TCP connection of a client ends its UDP connection; the name is never listed twice.'
-
-# With UDP dropped in the client's own network, a profile with both reaches TCP.
-ip netns add "$NS-t"
-ip link add dt4 type veth peer name dt5
-ip link set dt5 netns "$NS-t"
-ip addr add 198.18.0.9/30 dev dt4
-ip link set dt4 up
-ip netns exec "$NS-t" ip link set lo up
-ip netns exec "$NS-t" ip addr add 198.18.0.10/30 dev dt5
-ip netns exec "$NS-t" ip link set dt5 up
-sed 's/^remote 127\.0\.0\.1 /remote 198.18.0.9 /' "$LOG/t1both.ovpn" >"$LOG/t1ns.ovpn"
-t1_connect_ns "$LOG/t1ns.ovpn" "$LOG/t1-ns-open.log" 30
-t1_summary "- UDP open, from a network namespace: connected in $T1_SECONDS s, over $(t1_transport "$LOG/t1-ns-open.log")."
-t1_disconnect_ns
-ip netns exec "$NS-t" nft add table inet t1drop
-ip netns exec "$NS-t" nft add chain inet t1drop out '{ type filter hook output priority 0; policy accept; }'
-ip netns exec "$NS-t" nft add rule inet t1drop out udp dport 1194 drop
-t1_connect_ns "$LOG/t1ns.ovpn" "$LOG/t1-ns-dropped.log" 60 || { echo "FAIL: with UDP dropped, the client did not reach TCP ($T1_SECONDS s)."; exit 1; }
-[[ $(t1_transport "$LOG/t1-ns-dropped.log") == TCP ]]
-t1_summary "- **UDP dropped in the client's network: reached TCP in $T1_SECONDS s.**"
-t1_disconnect_ns
-ip netns exec "$NS-t" nft delete table inet t1drop
-echo "PASS: with UDP dropped, a profile with both reaches TCP, in $T1_SECONDS s."
-
-# A measurement, never a failure: 300 ms more and 10% loss on UDP alone, and which protocol the client ends on.
-if ip netns exec "$NS-t" tc qdisc add dev dt5 root handle 1: prio 2>/dev/null \
-    && ip netns exec "$NS-t" tc qdisc add dev dt5 parent 1:3 handle 30: netem delay 300ms loss 10% 2>/dev/null \
-    && ip netns exec "$NS-t" tc filter add dev dt5 protocol ip parent 1:0 prio 3 u32 match ip protocol 17 0xff flowid 1:3 2>/dev/null; then
-    if t1_connect_ns "$LOG/t1ns.ovpn" "$LOG/t1-ns-netem.log" 90; then
-        sleep 20
-        t1_summary "- UDP with 300 ms delay and 10% loss (tc netem): connected in $T1_SECONDS s, over $(t1_transport "$LOG/t1-ns-netem.log"); after 20 s more: $(if grep -q 'SIGUSR1' "$LOG/t1-ns-netem.log"; then echo 'it restarted on the way'; else echo 'still on it'; fi). A measurement, not a check."
-    else
-        t1_summary "- UDP with 300 ms delay and 10% loss (tc netem): did not connect in 90 s. A measurement, not a check."
-    fi
-    t1_disconnect_ns
-    ip netns exec "$NS-t" tc qdisc del dev dt5 root 2>/dev/null || true
-else
-    t1_summary '- UDP with 300 ms delay and 10% loss: not measured, tc netem is not available here.'
-fi
-
-# TCP only, from the menu: the namespace client with a TCP-only profile connects.
-printf '7\n2\n2\n2\n0\n0\n0\n' | darban | tee "$LOG/t1-tcp.log"
-grep -qx "port $T1_TCP" "$CONF" && grep -qx 'proto tcp4-server' "$CONF"
-if grep -q 'explicit-exit-notify' "$CONF"; then echo 'FAIL: TCP only kept explicit-exit-notify.'; exit 1; fi
-printf '1\nt1tcp\n0\n' | darban >/dev/null
-cp /root/openvpn-clients/t1tcp.ovpn "$LOG/t1tcp.ovpn"
-grep -qx 'proto tcp4' "$LOG/t1tcp.ovpn"
-if grep -q 'explicit-exit-notify' "$LOG/t1tcp.ovpn"; then echo 'FAIL: a TCP-only profile has explicit-exit-notify.'; exit 1; fi
-connect "$LOG/t1tcp.ovpn" "$LOG/t1-tcp-client.log"
-[[ $(t1_transport "$LOG/t1-tcp-client.log") == TCP ]]
-disconnect
-echo 'PASS: TCP only listens on TCP alone, and a TCP-only profile connects.'
-
-# Rollback: a TCP port another program takes after the screen checked it, as one starting at that moment would, so
-# OpenVPN cannot bind it when it restarts.
-rm -f "$LOG/t1-in"; mkfifo "$LOG/t1-in"
-darban <"$LOG/t1-in" >"$LOG/t1-rollback.log" 2>&1 &
-t1_darban=$!
-exec 7>"$LOG/t1-in"
-printf '7\n2\n4\n4444\n' >&7
-for attempt in $(seq 1 60); do grep -q 'Apply TCP 4444 now?' "$LOG/t1-rollback.log" && break; sleep 0.5; done
-grep -q 'Apply TCP 4444 now?' "$LOG/t1-rollback.log"
-python3 -c 'import socket, time; s = socket.socket(); s.bind(("0.0.0.0", 4444)); s.listen(); time.sleep(60)' &
-holder=$!
-for attempt in $(seq 1 20); do ss -H -ltn 'sport = :4444' | grep -q LISTEN && break; sleep 0.2; done
-printf '2\n0\n0\n0\n' >&7
-exec 7>&-
-wait "$t1_darban" || true
-kill "$holder" 2>/dev/null || true; wait "$holder" 2>/dev/null || true
-cat "$LOG/t1-rollback.log"
-grep 'Rolled back' "$LOG/t1-rollback.log" >/dev/null
-grep -qx "port $T1_TCP" "$CONF"
-systemctl is-active --quiet "$UNIT"
-ss -H -ltn "sport = :$T1_TCP" | grep -q LISTEN
-echo 'PASS: a TCP port that is taken when OpenVPN restarts is rolled back.'
-
-# port-share: the OpenVPN TCP port also serves the link page. An OpenVPN client connects, an HTTPS request to the
-# same port gets the page, and the link service counts the real address, read from OpenVPN's file.
-t1_share_start=$(date +%s); sleep 1
-printf '7\n2\n5\n2\n0\n0\n0\n' | darban | tee "$LOG/t1-share.log"
-grep -Eq "^port-share 127\.0\.0\.1 [0-9]+ /run/darban-port-share$" "$CONF"
-local_port=$(awk '$1=="port-share" {print $3}' "$CONF")
-journalctl -u "$UNIT" --since "@$t1_share_start" --no-pager | grep 'PORT SHARE PROXY: proxy starting' >/dev/null
-[[ $(stat -c '%U %G %a' /run/darban-port-share) == 'nobody root 2750' ]]
-systemctl is-enabled --quiet darban-links.service
-systemctl is-active --quiet darban-links.service
-ss -H -ltn "sport = :$local_port" | grep -q '127.0.0.1'
-curl -ks -o "$LOG/t1-probe.html" -w '%{http_code}\n' "https://127.0.0.1:$T1_TCP/" | tee "$LOG/t1-probe.code"
-[[ $(cat "$LOG/t1-probe.code") == 410 ]]
-connect "$LOG/t1tcp.ovpn" "$LOG/t1-share-client.log"
-disconnect
-url=$(printf '5\nt1tcp\n1\n1\n0\n' | darban | grep -oE 'https://[^ ]+/l/[0-9a-f]{64}')
-[[ $url == "https://127.0.0.1:$T1_TCP/l/"* ]] || { echo "FAIL: the link does not use the shared port: $url"; exit 1; }
-# From the namespace, so the real address differs from the proxy's 127.0.0.1.
-ip netns exec "$NS-t" curl -ksf "https://198.18.0.9:$T1_TCP${url#https://127.0.0.1:$T1_TCP}/file" -o "$LOG/t1-share.ovpn"
-grep -q '^client$' "$LOG/t1-share.ovpn"
-journalctl -u darban-links.service -n 20 --no-pager | tee "$LOG/t1-links.log" | grep 'profile downloaded: t1tcp from 198.18.0.10' >/dev/null
-echo 'PASS: with port-share, a client connects, the same port answers HTTPS with the link page, and the link service sees the real address.'
-# Once the last link is gone, the page still answers, as the service stays up while the port is shared.
-rm -f /run/darban-links/*.meta /run/darban-links/*.ovpn /run/darban-links/*.url
-sleep 75
-systemctl is-active --quiet darban-links.service
-[[ $(curl -ks -o /dev/null -w '%{http_code}' "https://127.0.0.1:$T1_TCP/") == 410 ]]
-echo 'PASS: with port-share, the link page still answers after the last link is gone.'
-printf '7\n2\n5\n2\n0\n0\n0\n' | darban | tee "$LOG/t1-share-off.log"
-if grep -q '^port-share' "$CONF"; then echo 'FAIL: port-share stayed after it was turned off.'; exit 1; fi
-if systemctl is-enabled --quiet darban-links.service; then echo 'FAIL: the link service stayed enabled.'; exit 1; fi
-[[ ! -e /etc/tmpfiles.d/darban-port-share.conf && ! -e /etc/systemd/system/darban-links.service.d/darban-port-share.conf ]]
-echo 'PASS: port-share off: the line, the folder and the always-on link service go.'
-
-# Back to UDP 1194 alone: server.conf is as before T1, byte for byte.
-printf '7\n2\n1\n1194\n2\n0\n0\n0\n' | darban | tee "$LOG/t1-udp.log"
-[[ $(cat "$CONF") == "$t1_conf_before" ]] || { echo 'FAIL: back to UDP only, server.conf differs from before.'; diff <(printf '%s\n' "$t1_conf_before") "$CONF" || true; exit 1; }
-if (( USE_UFW )); then ufw delete allow "$T1_TCP/tcp" >/dev/null || true; fi
-ip netns del "$NS-t"
-ip link del dt4 2>/dev/null || true
-connect "$PROFILE" "$LOG/t1-back.log"; disconnect
-echo 'PASS: back to UDP only, server.conf is the same as before, byte for byte, and the first profile connects.'
-
 # A real temporary link: it can be opened again until the client connects, and then it ends.
 url=$(printf '5\naccept1\n1\n1\n0\n' | darban | grep -oE 'https://[^ ]+/l/[0-9a-f]{64}')
 curl -ksf "$url" | grep 'Download profile' >/dev/null
@@ -1201,24 +1213,9 @@ echo 'PASS: a NAT file that is gone is reported before a reboot, and the install
 # This tool's Let's Encrypt certificate from a real ACME server: Pebble, Let's Encrypt's test server, and certbot
 # from Ubuntu, which the tool installs itself. Issued with this tool's hook; a renewal by certbot reaches the open
 # link through that hook. Further down, an uninstall keeps the certificate without the hook.
-PEBBLE=v2.10.1
-pebble_dir=$LOG/pebble
-mkdir -p "$pebble_dir/bin"
-curl -fsSL --retry 2 -o "$pebble_dir/bin.tar.gz" "https://github.com/letsencrypt/pebble/releases/download/$PEBBLE/pebble-linux-$(dpkg --print-architecture).tar.gz"
-curl -fsSL --retry 2 -o "$pebble_dir/src.tar.gz" "https://github.com/letsencrypt/pebble/archive/refs/tags/$PEBBLE.tar.gz"
-tar -xzf "$pebble_dir/bin.tar.gz" -C "$pebble_dir/bin"
-tar -xzf "$pebble_dir/src.tar.gz" -C "$pebble_dir"
-pebble_bin=$(find "$pebble_dir/bin" -type f -name pebble | head -n 1)
-pebble_src=$(find "$pebble_dir" -maxdepth 1 -type d -name 'pebble-*' | head -n 1)
-chmod +x "$pebble_bin"
-# Pebble rejects a share of good nonces by default, to test a client's retry. That is certbot's code, not this
-# tool's, and two rejections in a row made a renewal here fail now and then: the renewals here test the tool.
-(cd "$pebble_src" && PEBBLE_VA_ALWAYS_VALID=1 PEBBLE_VA_NOSLEEP=1 PEBBLE_WFE_NONCEREJECT=0 "$pebble_bin" -config test/config/pebble-config.json </dev/null >"$LOG/pebble.log" 2>&1 &)
-export REQUESTS_CA_BUNDLE=$pebble_src/test/certs/pebble.minica.pem
-for attempt in $(seq 1 20); do
-    if curl -fs --cacert "$REQUESTS_CA_BUNDLE" https://localhost:14000/dir >/dev/null; then break; fi
-    sleep 0.5
-done
+timeout 300 bash tests/pebble-start.sh "$LOG" </dev/null
+REQUESTS_CA_BUNDLE=$(cat "$LOG/pebble-ca")
+export REQUESTS_CA_BUNDLE
 mkdir -p /etc/letsencrypt
 printf 'server = https://localhost:14000/dir\n' > /etc/letsencrypt/cli.ini
 cp /etc/darban/domain "$LOG/domain.before"
@@ -1392,8 +1389,7 @@ grep -qx 'renew_hook = /usr/local/sbin/darban reload-links' "$LE_CONF"
 cmp -s "$OTHER_CONF" "$LOG/other-site.before"
 echo 'PASS: the tool can be removed and installed again without touching the VPN, and gets its hook back.'
 
-# acme.sh on a server without snap, with the Pebble started above, in a script of its own.
-bash tests/acme-sh-ci.sh issue "$REQUESTS_CA_BUNDLE" "$LOG"
+# acme.sh without snap runs in the short job (tests/acme-short-ci.sh), not here.
 
 # Full removal: keep a backup, keep the links' Let's Encrypt certificate, keep any kernel the setup added, then confirm.
 kernel_answer=''
@@ -1404,7 +1400,6 @@ grep "Kept the Let's Encrypt certificate darban-ovpn-links" "$LOG/remove-all.log
 if grep -q '^renew_hook' "$LE_CONF"; then echo "FAIL: this tool's hook stayed after Remove everything."; exit 1; fi
 cmp -s "$OTHER_CONF" "$LOG/other-site.before"
 echo "PASS: Remove everything keeps the certificate when asked, without this tool's hook."
-bash tests/acme-sh-ci.sh removed "$LOG"
 if systemctl is-active --quiet "$UNIT"; then echo 'FAIL: OpenVPN still runs after removal.'; exit 1; fi
 if systemctl is-active --quiet darban-expire.timer; then echo 'FAIL: the timer for kept files is still set after removal.'; exit 1; fi
 for path in /root/pki /etc/openvpn/server /root/openvpn-clients /etc/darban /usr/local/sbin/darban /etc/apt/sources.list.d/openvpn-aptrepo.list /var/log/darban-setup.log \
