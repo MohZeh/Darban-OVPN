@@ -281,7 +281,7 @@ jobs:
       - name: Real setup and client on Ubuntu ${{ matrix.ubuntu }}, part ${{ matrix.part }}
         # sudo keeps no variable, so the summary file is named: what a green run did not test is written there.
         env:
-          PART: ${{ matrix.part }}
+          PART: all
           # The measurements only record numbers and fail nothing, so an ordinary pull request does not run them.
           MEASURE: ${{ (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' || contains(github.event.pull_request.labels.*.name, 'scale')) && '1' || '0' }}
         run: sudo MEASURE="$MEASURE" GO="$(command -v go)" GITHUB_STEP_SUMMARY="$GITHUB_STEP_SUMMARY" bash tests/acceptance-ci.sh --i-know "$PART"
@@ -364,14 +364,14 @@ jobs:
   # How long the everyday commands take with many clients: the real setup, then the real CA filled to 10,000 rows,
   # with 253 valid clients (a full /24 VPN network) or 1000. The times go to the summary and to an artifact, so a
   # later change is judged by numbers. Nothing here fails on a slow time; a command that fails does. The measurements
-  # come in three parts, each on a runner of its own after the same setup and data: the list and the diagnostics,
-  # the menu and a new client, and the CRL with the connection events. A part takes up to about 10 minutes, so not on
+  # come in three parts, run one after the other on one runner after one setup and one set of data: the list and the
+  # diagnostics, the CRL with the connection events, and last the menu and a new client. A job takes about 5 to 8 minutes, so not on
   # every pull request: only one labelled scale, the weekly run of main, and a manual run with scale. A label added
   # later counts from the next push. For a pull request, the same job also runs the manager of its base commit on the
   # same runner and data, in turn with its own, since runners differ by up to about 40% between jobs: the job fails
   # when a command of the change is more than 10% slower than the base. Both numbers and the ratio go to the summary.
   scale:
-    name: Scale (Ubuntu ${{ matrix.ubuntu }}, ${{ matrix.clients }} clients, ${{ matrix.part }})
+    name: Scale (Ubuntu ${{ matrix.ubuntu }}, ${{ matrix.clients }} clients)
     needs: lint
     if: inputs.scale || (needs.lint.outputs.slow == 'true' && (github.event_name == 'schedule' || contains(github.event.pull_request.labels.*.name, 'scale')))
     strategy:
@@ -379,10 +379,9 @@ jobs:
       matrix:
         ubuntu: ['24.04', '26.04']
         clients: [253, 1000]
-        part: [commands, menu, crl]
     runs-on: ubuntu-${{ matrix.ubuntu }}
     # The comparison with the base runs each command up to six times more.
-    timeout-minutes: 120
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -416,10 +415,10 @@ jobs:
           echo "Ubuntu $VERSION_ID, kernel $(uname -r), $(nproc) CPUs" >> "$GITHUB_STEP_SUMMARY"
       - name: The runner must not already have a PKI or server
         run: sudo test ! -e /root/pki && test ! -e /etc/openvpn/server/server.conf
-      - name: Real setup, ${{ matrix.clients }} clients, and the times of ${{ matrix.part }}
+      - name: Real setup, ${{ matrix.clients }} clients, and the times of all three parts
         env:
           CLIENTS: ${{ matrix.clients }}
-          PART: ${{ matrix.part }}
+          PART: all
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
         run: |
           base=''
@@ -429,7 +428,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: scale-${{ matrix.ubuntu }}-${{ matrix.clients }}-clients-${{ matrix.part }}
+          name: scale-${{ matrix.ubuntu }}-${{ matrix.clients }}-clients
           path: |
             ${{ runner.temp }}/scale/scale.tsv
             ${{ runner.temp }}/scale/compare.tsv
