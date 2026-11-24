@@ -472,7 +472,7 @@ jobs:
     # A draft gets another name too, so the required "CI result" does not exist on it: it cannot merge, and a check
     # that is not red wakes nothing. The name comes from the event's own payload, so a re-run of an old draft run
     # stays a draft result, and a ready pull request, whose run starts at ready_for_review, always gets "CI result".
-    name: ${{ inputs.vm_only && 'VM qualification result' || inputs.scale && 'Scale measurement result' || github.event.pull_request.draft && 'Draft result: Lint only' || 'CI result' }}
+    name: "${{ inputs.vm_only && 'VM qualification result' || inputs.scale && 'Scale measurement result' || github.event.pull_request.draft && 'Draft result: Lint only' || 'CI result' }}"
     if: always()
     needs: [lint, test, acceptance, short, restore, scale, acceptance-arm, reboot]
     runs-on: ubuntu-24.04
