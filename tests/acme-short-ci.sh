@@ -10,7 +10,8 @@ UNIT=openvpn-server@server.service
 trap 'echo "FAILED at line $LINENO"; journalctl -u "$UNIT" -n 30 --no-pager || true; tail -n 20 "$LOG"/*.log 2>/dev/null || true' ERR
 systemctl is-active --quiet "$UNIT"
 darban status >/dev/null
-ca=$(bash tests/pebble-start.sh "$LOG")
+bash tests/pebble-start.sh "$LOG"
+ca=$(cat "$LOG/pebble-ca")
 bash tests/acme-sh-ci.sh issue "$ca" "$LOG"
 kernel_answer=''
 if [[ $(bash /usr/local/lib/darban/remove-server.sh --kernel-status) == removable ]]; then kernel_answer='1\n'; fi
