@@ -14,6 +14,8 @@ DARBAN_CRL=$DARBAN_SERVER_DIR/crl.pem
 DARBAN_UNIT=openvpn-server@server.service
 # Root-owned /run, not the world-writable /run/lock, so other users cannot pre-create or redirect it.
 DARBAN_LOCK=/run/darban.lock
+# One setup or install at a time. A file of its own, so the CA lock above is never taken twice by the same run.
+DARBAN_SETUP_LOCK=/run/darban-setup.lock
 # A restore of the CA that has not finished; while it is there, nothing starts OpenVPN.
 DARBAN_RESTORE_JOURNAL=/var/lib/darban/restore.journal
 # Set only by the restore itself, which may hold the lock while its journal is there.
@@ -40,6 +42,16 @@ darban_events_units_remove() {
         mountpoint -q /run/darban-events 2>/dev/null || return 0
         sleep 0.5
     done
+}
+darban_setup_lock() {
+    # Held by file descriptor 8 until the script ends. The file is root-only, in the root-owned /run.
+    local old_umask
+    old_umask=$(umask); umask 077
+    exec 8>>"$DARBAN_SETUP_LOCK" || { umask "$old_umask"; printf 'Cannot open %s.
+' "$DARBAN_SETUP_LOCK" >&2; return 1; }
+    umask "$old_umask"
+    flock -n 8 || { printf 'Another setup is running; wait until it is done, then run this again. Nothing was changed.
+' >&2; return 1; }
 }
 darban_require_root() { (( EUID == 0 )) || { darban_error 'Run with sudo/root.'; return 1; }; }
 darban_lock() {

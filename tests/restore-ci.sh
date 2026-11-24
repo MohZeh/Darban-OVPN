@@ -145,9 +145,15 @@ bash setup/install.sh >"$LOG/install2.log" 2>&1
 if connect "$LOG/a1.ovpn" "$LOG/before-restore.log"; then echo 'FAIL: a profile of the old CA connected to the new one.'; exit 1; fi
 disconnect
 host=$(hostname -s | tr -cd 'A-Za-z0-9.-')
+install -D -m 600 /dev/null /var/lib/darban/clients/stranger-record
 printf '%s\n' "${host:-server}" | darban restore "$LOG/backup.tar" --ca-from "$LOG/a1.ovpn" 2>&1 | tee "$LOG/restore.log"
 grep 'Revocations and certificates issued after' "$LOG/restore.log" >/dev/null
 grep 'then deleted' "$LOG/restore.log" >/dev/null
+# G26: a record the backup does not have is reported, in the summary and in Diagnostics, and not deleted.
+grep 'stranger-record' "$LOG/restore.log" >/dev/null
+[[ -e /var/lib/darban/clients/stranger-record ]]
+darban status 2>&1 | grep 'stranger-record' >/dev/null
+echo 'PASS: a record the backup does not have was reported, and left.'
 grep 'Restored the backup of' "$LOG/restore.log" >/dev/null
 [[ $(fingerprint) == "$fp" ]]
 systemctl is-active --quiet "$UNIT"
