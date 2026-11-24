@@ -1058,20 +1058,63 @@ STUB
     cat > "$E/bin/ufw" <<'STUB'
 #!/usr/bin/env bash
 echo "ufw $*" >> "$STUB_LOG"
-if [[ ${1:-} == status ]]; then echo 'Status: active'; fi
+if [[ ${1:-} == status ]]; then echo 'Status: active'; cat "$STUB_LOG.rules" 2>/dev/null; fi
 STUB
     chmod +x "$E/bin/ufw"
     : > "$STUB_LOG"
     out=$(setup_run --port 21194 --open-ufw --yes); rc=$?
     rc_is 'setup with --open-ufw finishes' 0 "$rc"
-    grep -q 'ufw allow 21194/udp' "$STUB_LOG"; rc_is 'the port rule is added' 0 "$?"
-    grep -q 'ufw route allow in on tun0 out on eth0' "$STUB_LOG"; rc_is 'the forwarding rule is added' 0 "$?"
+    grep -q 'ufw allow 21194/udp comment Darban-OVPN' "$STUB_LOG"; rc_is 'the port rule is added, with the tag' 0 "$?"
+    grep -q 'ufw route allow in on tun0 out on eth0 comment Darban-OVPN' "$STUB_LOG"; rc_is 'the forwarding rule is added, with the tag' 0 "$?"
     install_removal_scripts
+    # The owner replaced both rules with rules of their own: they carry another comment, and stay.
+    printf '21194/udp  ALLOW  Anywhere  # mine
+Anywhere on eth0  ALLOW FWD  Anywhere on tun0  # mine
+' > "$STUB_LOG.rules"
     : > "$STUB_LOG"
     out=$(bash "$E/lib/remove-server.sh" --yes 2>&1 </dev/null); rc=$?
     rc_is 'removal finishes' 0 "$rc"
-    grep -q 'ufw delete allow 21194/udp' "$STUB_LOG"; rc_is 'the port rule is removed' 0 "$?"
-    grep -q 'ufw route delete allow in on tun0 out on eth0' "$STUB_LOG"; rc_is 'the forwarding rule is removed' 0 "$?"
+    ! grep -q 'ufw delete allow 21194/udp\|ufw route delete' "$STUB_LOG"; rc_is "the owner's ufw rules are not removed" 0 "$?"
+}
+test_remove_everything_deletes_the_ufw_rules_it_tagged() {
+    prepare_blank_server
+    cat > "$E/bin/ufw" <<'STUB'
+#!/usr/bin/env bash
+echo "ufw $*" >> "$STUB_LOG"
+if [[ ${1:-} == status ]]; then echo 'Status: active'; cat "$STUB_LOG.rules" 2>/dev/null; fi
+STUB
+    chmod +x "$E/bin/ufw"
+    : > "$STUB_LOG"
+    setup_run --port 21194 --open-ufw --yes >/dev/null
+    install_removal_scripts
+    printf '21194/udp  ALLOW  Anywhere  # Darban-OVPN
+Anywhere on eth0  ALLOW FWD  Anywhere on tun0  # Darban-OVPN
+' > "$STUB_LOG.rules"
+    : > "$STUB_LOG"
+    bash "$E/lib/remove-server.sh" --yes >/dev/null 2>&1 </dev/null; rc_is 'removal finishes' 0 "$?"
+    grep -q 'ufw delete allow 21194/udp' "$STUB_LOG"; rc_is 'the port rule it added is removed' 0 "$?"
+    grep -q 'ufw route delete allow in on tun0 out on eth0' "$STUB_LOG"; rc_is 'the forwarding rule it added is removed' 0 "$?"
+}
+test_server_setup_keeps_an_apt_source_the_owner_changed() {
+    local out
+    prepare_blank_server
+    setup_run --port 21194 --yes >/dev/null
+    grep -q '^apt_hash ' "$E/cfg/.server-setup-started"; rc_is 'the hash of what it wrote is recorded' 0 "$?"
+    echo '# the owner changed this' >> "$SETUP_ROOT/sources/openvpn.list"
+    # As if the first run had stopped before its last step: the record has no end, and the tool is not installed.
+    sed -i '/^setup_complete$/d' "$E/cfg/.server-setup-started"; rm -f "$E/fake-sbin/darban"
+    out=$(KERNEL_PRESENT=1 setup_run --port 21194 --yes)
+    has 'a changed source file is noticed' 'was changed after the setup wrote it' "$out"
+    has 'and kept' '# the owner changed this' "$(cat "$SETUP_ROOT/sources/openvpn.list")"
+}
+test_two_setups_at_once_are_refused() {
+    local out rc
+    prepare_blank_server
+    : > "$STUB_LOG"
+    out=$(FLOCK_FAIL='-n 8' setup_run --port 21194 --yes); rc=$?
+    rc_not0 'a second setup does not run' "$rc"
+    has 'it says why' 'Another setup is running' "$out"
+    ok_if 'and it changed nothing' test ! -e "$SETUP_ROOT/sources/openvpn.list"
 }
 
 test_server_certificate_expiry_is_in_the_header() {
@@ -6346,6 +6389,20 @@ test_restore_puts_the_ca_back() {
     has 'and that nothing changed' 'Nothing on this server was changed.' "$out"
     [[ $(cat "$PKI/index.txt" "$SERVER_CONF" "$CRL") == "$before" && ! -e $E/varlib/restore.journal ]]; rc_is 'and nothing did' 0 "$?"
     lacks 'OpenVPN was not touched' 'systemctl disable' "$(cat "$STUB_LOG")"
+}
+test_a_restore_reports_a_record_the_backup_does_not_have() {
+    local out fp
+    backed_up_server
+    fp=$(ca_fp)
+    mkdir -p "$E/varlib/clients"
+    echo 'first_seen=1' > "$E/varlib/clients/stranger"
+    out=$(printf '2
+' | bash "$E/manager.sh" restore "$E/backup.tar" --ca-fingerprint "$fp" 2>&1); rc_is 'the restore succeeds' 0 "$?"
+    has 'the summary names the extra record' 'stranger' "$out"
+    ok_if 'which is not deleted' test -e "$E/varlib/clients/stranger"
+    has 'Diagnostics lists it' 'stranger' "$(mgr status)"
+    rm -f "$E/varlib/clients/stranger"
+    lacks 'and stops when it is gone' 'stranger' "$(mgr status)"
 }
 
 test_a_restore_refuses_before_changing_anything() {

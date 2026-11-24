@@ -219,6 +219,7 @@ restore_commit() {
         install -D -m 600 "$file" "$LEDGER_DIR/$name" 2>/dev/null && sync -- "$LEDGER_DIR/$name" 2>/dev/null \
             || { RESTORE_WHY="the record of when $name was seen could not be put back in $LEDGER_DIR"; return 1; }
     done
+    restore_extras_note "$stage/files/clients" || true
     dns_restore_check || true
     if ! restore_nat; then journal_write nat=failed || return 1; fi
     # Connection events, when this server can have them: the lines go into the new server.conf while OpenVPN is off.
@@ -237,6 +238,34 @@ restore_commit() {
     if ! wait_for_listeners; then RESTORE_WHY='OpenVPN did not come back with the restored files'; return 1; fi
     journal_write state=committed || return 1
     restore_point committed
+}
+restore_extras_note() {
+    # restore_extras_note <the backup's records folder>: the records in the clients folder that the backup does not have
+    # are named in a file, for the summary and for Diagnostics. Nothing is deleted. The list is written through a
+    # temp file; a failed read of the folder never leaves an empty or half list.
+    local from=$1 file name temp list=''
+    for file in "$LEDGER_DIR"/*; do
+        [[ -f $file ]] || continue
+        name=${file##*/}
+        valid_existing_name "$name" || continue
+        [[ -e $from/$name ]] || list+=$name$'\n'
+    done
+    if [[ -z $list ]]; then rm -f -- "$RESTORE_EXTRAS"; return 0; fi
+    temp=$(mktemp "$RESTORE_EXTRAS.XXXXXX") || return 1
+    printf '%s' "$list" >"$temp" && sync -- "$temp" 2>/dev/null
+    mv -f -- "$temp" "$RESTORE_EXTRAS" || { rm -f -- "$temp"; return 1; }
+}
+restore_extras_present() {
+    # The names of the list that are still in the clients folder, one a line; the file is removed when none is left.
+    local name found=0
+    [[ -f $RESTORE_EXTRAS ]] || return 1
+    while IFS= read -r name; do
+        valid_existing_name "$name" || continue
+        if [[ -e $LEDGER_DIR/$name ]]; then printf '%s\n' "$name"; found=1; fi
+    done <"$RESTORE_EXTRAS"
+    (( found )) && return 0
+    rm -f -- "$RESTORE_EXTRAS"
+    return 1
 }
 restore_cleanup() {
     # After the commit: what the restore replaced goes to where it is kept, each step once, so a stop at any point
@@ -296,9 +325,11 @@ restore_cleanup() {
 }
 restore_done_message() {
     # The end of a restore, the same from restore_from and from resume.
-    local until
+    local until extras
     until=$(date -u -d "@$(( $(cat "$RESTORE_KEPT/.restored" 2>/dev/null || date -u +%s) + PRE_RESTORE_KEEP_DAYS * 86400 ))" +%Y-%m-%d 2>/dev/null) || until=''
     info "What this replaced is kept in $RESTORE_KEPT until ${until:-$PRE_RESTORE_KEEP_DAYS days from now}, then deleted."
+    extras=$(restore_extras_present | head -n 20 | tr '\n' ' ') || extras=''
+    if [[ -n $extras ]]; then info "These records are in $LEDGER_DIR and not in the backup. They were left as they are: $(safe_text "$extras")"; fi
     if (( RESTORE_NAT_FAILED )); then
         urgent 'The NAT rules are not loaded, so clients may connect without reaching the internet. Run the installer again, or see: sudo darban status'
         return 1

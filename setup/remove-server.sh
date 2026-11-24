@@ -128,6 +128,11 @@ forward_before=$(awk '$1=="ip_forward_before" {print $2}' "$MARKER")
 ufw_port=$(awk '$1=="ufw_port" {print $2}' "$MARKER")
 ufw_iface=$(awk '$1=="ufw_iface" {print $2}' "$MARKER")
 ufw_dns=$(awk '$1=="ufw_dns" {print $2}' "$MARKER")
+# A rule recorded "tagged" carries the setup's comment; it is deleted only while it still does, so a rule the owner
+# added or replaced since stays. A record from before the comment existed has no word, and is deleted as it was.
+ufw_port_tagged=$(awk '$1=="ufw_port" {print $3}' "$MARKER")
+ufw_iface_tagged=$(awk '$1=="ufw_iface" {print $3}' "$MARKER")
+ufw_dns_tagged=$(awk '$1=="ufw_dns" {print $3}' "$MARKER")
 mapfile -t certificates < <(awk '$1=="certbot_cert" && $2 ~ /^[A-Za-z0-9._-]+$/ {print $2}' "$MARKER" | sort -u)
 mapfile -t apt_added < <(awk '$1=="apt_added" {print $2}' "$MARKER")
 mapfile -t apt_saved < <(awk '$1=="apt_saved" {print $2}' "$MARKER")
@@ -151,9 +156,16 @@ if [[ $forward_before == 0 ]]; then sysctl -q -w net.ipv4.ip_forward=0 >/dev/nul
 
 # Only the rules the setup added; anything else in ufw stays.
 if command -v ufw >/dev/null; then
-    if [[ $ufw_port =~ ^[0-9]+$ ]]; then ufw delete allow "$ufw_port/udp" >/dev/null 2>&1 || true; fi
-    if [[ $ufw_iface =~ ^[A-Za-z0-9_.@-]+$ ]]; then ufw route delete allow in on tun0 out on "$ufw_iface" >/dev/null 2>&1 || true; fi
-    if [[ $ufw_dns == tun0 ]]; then ufw delete allow in on tun0 to any port 53 >/dev/null 2>&1 || true; fi
+    ufw_rules=$(ufw status 2>/dev/null || true)
+    if [[ $ufw_port =~ ^[0-9]+$ ]] && { [[ $ufw_port_tagged != tagged ]] || grep -Eq "^$ufw_port/udp[[:space:]].*#[[:space:]]*Darban-OVPN$" <<<"$ufw_rules"; }; then
+        ufw delete allow "$ufw_port/udp" >/dev/null 2>&1 || true
+    fi
+    if [[ $ufw_iface =~ ^[A-Za-z0-9_.@-]+$ ]] && { [[ $ufw_iface_tagged != tagged ]] || grep -Eq "on ${ufw_iface}[[:space:]].*ALLOW FWD.*on tun0.*#[[:space:]]*Darban-OVPN$" <<<"$ufw_rules"; }; then
+        ufw route delete allow in on tun0 out on "$ufw_iface" >/dev/null 2>&1 || true
+    fi
+    if [[ $ufw_dns == tun0 ]] && { [[ $ufw_dns_tagged != tagged ]] || grep -Eq "^53 on tun0[[:space:]].*#[[:space:]]*Darban-OVPN$" <<<"$ufw_rules"; }; then
+        ufw delete allow in on tun0 to any port 53 >/dev/null 2>&1 || true
+    fi
 fi
 # DNS on this server: the tool's file of Unbound and its drop-in. Unbound itself goes with the packages, when the tool
 # installed it; one that was here before goes on without them.

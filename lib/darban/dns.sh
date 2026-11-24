@@ -139,8 +139,8 @@ ufw_dns_open() {
     command -v ufw >/dev/null 2>&1 || return 0
     ufw status 2>/dev/null | grep -q '^Status: active' || return 0
     ufw status 2>/dev/null | grep -q '53 on tun0' && return 0
-    ufw allow in on tun0 to any port 53 >/dev/null 2>&1 || { warn 'ufw did not take the rule for DNS: ufw allow in on tun0 to any port 53'; return 0; }
-    record_added 'ufw_dns tun0'
+    ufw allow in on tun0 to any port 53 comment Darban-OVPN >/dev/null 2>&1 || { warn 'ufw did not take the rule for DNS: ufw allow in on tun0 to any port 53'; return 0; }
+    record_added 'ufw_dns tun0 tagged'
 }
 dns_settings_commit() {
     # Unbound and the redirect from the settings in memory, then the settings saved. Needs the lock.
