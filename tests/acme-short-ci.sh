@@ -15,6 +15,7 @@ ca=$(cat "$LOG/pebble-ca")
 timeout 600 bash tests/acme-sh-ci.sh issue "$ca" "$LOG" </dev/null
 kernel_answer=''
 if [[ $(bash /usr/local/lib/darban/remove-server.sh --kernel-status) == removable ]]; then kernel_answer='1\n'; fi
-printf "1\n1\n${kernel_answer}remove-everything\n" | darban remove-all | tee "$LOG/remove-all.log"
+# No certbot certificate here, so there is no question about keeping one.
+printf "1\n${kernel_answer}remove-everything\n" | darban remove-all | tee "$LOG/remove-all.log"
 bash tests/acme-sh-ci.sh removed "$LOG"
 echo 'All acme.sh checks passed.'
