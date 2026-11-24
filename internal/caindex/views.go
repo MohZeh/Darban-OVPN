@@ -142,19 +142,8 @@ func List(w *records.Writer, idx *Index, o Options) {
 	}
 }
 
-// blockReason is revoke_block_reason of lib/darban/clients.sh, as a code the manager turns into its text.
-func blockReason(o Options, cn string, name *Name) (string, string) {
-	why, needCert := blockBeforeCert(cn, name)
-	if !needCert {
-		if why == "" {
-			return "", ""
-		}
-		return why, "-"
-	}
-	return blockByCert(o, name, ReadCert(o.PKI+"/issued/"+cn+".crt"))
-}
-
-// blockBeforeCert is the part of blockReason that needs no file: a reason, or whether the certificate decides.
+// blockBeforeCert and blockByCert are revoke_block_reason of lib/darban/clients.sh, as a code the manager turns into
+// its text. blockBeforeCert is the part that needs no file: a reason, or whether the certificate decides.
 func blockBeforeCert(cn string, name *Name) (string, bool) {
 	switch name.State() {
 	case "AMBIGUOUS":
@@ -169,7 +158,7 @@ func blockBeforeCert(cn string, name *Name) (string, bool) {
 	return "", true
 }
 
-// blockByCert is the rest of blockReason: what the certificate file of a name with one valid record says.
+// blockByCert is the rest: what the certificate file of a name with one valid record says.
 func blockByCert(o Options, name *Name, cert Cert) (string, string) {
 	serial := name.LastV.Serial
 	switch {
