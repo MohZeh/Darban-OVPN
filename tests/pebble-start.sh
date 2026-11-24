@@ -23,4 +23,4 @@ for attempt in $(seq 1 20); do
     if curl -fs --cacert "$ca" https://localhost:14000/dir >/dev/null; then break; fi
     sleep 0.5
 done
-printf '%s\n' "$ca"
+printf '%s\n' "$ca" >"$LOG/pebble-ca"
