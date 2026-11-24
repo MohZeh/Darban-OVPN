@@ -251,7 +251,7 @@ jobs:
         # 2: the settings, the network, links and files, certbot, the update and the removal.
         part: [1, 2]
     runs-on: ubuntu-${{ matrix.ubuntu }}
-    timeout-minutes: 40
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -296,7 +296,7 @@ jobs:
       matrix:
         ubuntu: ['24.04', '26.04']
     runs-on: ubuntu-${{ matrix.ubuntu }}
-    timeout-minutes: 30
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:

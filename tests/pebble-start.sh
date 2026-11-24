@@ -8,8 +8,8 @@ PEBBLE=v2.10.1
 LOG=$1
 pebble_dir=$LOG/pebble
 mkdir -p "$pebble_dir/bin"
-curl -fsSL --retry 2 -o "$pebble_dir/bin.tar.gz" "https://github.com/letsencrypt/pebble/releases/download/$PEBBLE/pebble-linux-$(dpkg --print-architecture).tar.gz"
-curl -fsSL --retry 2 -o "$pebble_dir/src.tar.gz" "https://github.com/letsencrypt/pebble/archive/refs/tags/$PEBBLE.tar.gz"
+curl -fsSL --retry 2 --max-time 120 -o "$pebble_dir/bin.tar.gz" "https://github.com/letsencrypt/pebble/releases/download/$PEBBLE/pebble-linux-$(dpkg --print-architecture).tar.gz"
+curl -fsSL --retry 2 --max-time 120 -o "$pebble_dir/src.tar.gz" "https://github.com/letsencrypt/pebble/archive/refs/tags/$PEBBLE.tar.gz"
 tar -xzf "$pebble_dir/bin.tar.gz" -C "$pebble_dir/bin"
 tar -xzf "$pebble_dir/src.tar.gz" -C "$pebble_dir"
 pebble_bin=$(find "$pebble_dir/bin" -type f -name pebble | head -n 1)
@@ -20,7 +20,7 @@ chmod +x "$pebble_bin"
 (cd "$pebble_src" && PEBBLE_VA_ALWAYS_VALID=1 PEBBLE_VA_NOSLEEP=1 PEBBLE_WFE_NONCEREJECT=0 "$pebble_bin" -config test/config/pebble-config.json </dev/null >"$LOG/pebble.log" 2>&1 3>&- &)
 ca=$pebble_src/test/certs/pebble.minica.pem
 for attempt in $(seq 1 20); do
-    if curl -fs --cacert "$ca" https://localhost:14000/dir >/dev/null; then break; fi
+    if curl -fs --max-time 3 --cacert "$ca" https://localhost:14000/dir >/dev/null; then break; fi
     sleep 0.5
 done
 printf '%s\n' "$ca" >"$LOG/pebble-ca"
