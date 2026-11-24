@@ -421,8 +421,9 @@ if [[ $PART == menu ]]; then
         (( us < 20000000 )) || break
     done
     record menu "open the menu, until it asks \"Choose [0-9]\"" "$(median "${runs[@]}")" "${#runs[@]}"
-    # One more opening, traced with timestamps, to show where its time goes.
-    python3 tests/time-to-text.py "$LIMIT" 'Choose [0-9]' '0\r' -- bash -c 'exec 2>"$0"; PS4="+ \${EPOCHREALTIME} \${FUNCNAME[0]:-main} "; set -x; . /usr/local/sbin/darban' "$WORK/menu.trace" >/dev/null || true
+    # One more opening, traced with timestamps, to show where its time goes. The trace goes to a file of its own:
+    # the prompt is on standard error (read -p), which must stay on the terminal. At most 60 s: a trace only shows.
+    python3 tests/time-to-text.py 60 'Choose [0-9]' '0\r' -- bash -c 'exec 9>"$0"; BASH_XTRACEFD=9; PS4="+ \${EPOCHREALTIME} \${FUNCNAME[0]:-main} "; set -x; . /usr/local/sbin/darban' "$WORK/menu.trace" >/dev/null || true
     profile menu 'opening the menu, traced' "$WORK/menu.trace"
     # From a script, as tests/vm-reboot.sh creates one: the menu opens, takes the name, and closes.
     measure create 'create one client, from opening the menu to leaving it' 1 "printf '1\\nscale-new\\n0\\n' | darban"
