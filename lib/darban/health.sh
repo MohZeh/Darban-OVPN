@@ -105,6 +105,26 @@ network_rules_health() {
     blocked_health "$net"
     dns_server_health "$net"
 }
+conntrack_health() {
+    # NAT keeps one entry per connection in the kernel's tracking table. When it is full, the kernel drops new
+    # connections and logs only a line in the kernel log, so nothing tells the owner. The size is the kernel's own;
+    # this tool does not change it. 80% is early enough to act before users notice; at 95% drops are about to start.
+    local count max pct
+    count=$(cat "$CONNTRACK_DIR/nf_conntrack_count" 2>/dev/null) || count=''
+    max=$(cat "$CONNTRACK_DIR/nf_conntrack_max" 2>/dev/null) || max=''
+    if [[ ! $count =~ ^[0-9]+$ || ! $max =~ ^[0-9]+$ ]] || (( max == 0 )); then
+        check info 'Connection tracking table: not available (the kernel module is not loaded yet)'
+        return 0
+    fi
+    pct=$((count * 100 / max))
+    if (( pct >= 95 )); then
+        check bad "Connection tracking table is $pct% full ($count of $max): new connections are being dropped, so VPN users cannot open sites $S_ARROW find what floods it (a client with a runaway app, or a scan) and disconnect it; or raise the limit: sudo sysctl -w net.netfilter.nf_conntrack_max=<number>"
+    elif (( pct >= 80 )); then
+        check warn "Connection tracking table is $pct% full ($count of $max): when it is full, new connections are dropped $S_ARROW look for a client that opens too many connections, or fewer clients per server"
+    else
+        check ok "Connection tracking table: $count of $max entries ($pct%)"
+    fi
+}
 health() {
     local version state enabled dco port proto listeners='' e crl_err host resolved next last value issue exports pending rows mine
     if [[ -n $SERVER_PROBLEM ]]; then
@@ -223,6 +243,7 @@ health() {
         fi
     fi
     network_rules_health
+    conntrack_health
 
     group 'Temporary links'
     link_service_health

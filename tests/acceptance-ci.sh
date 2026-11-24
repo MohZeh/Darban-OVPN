@@ -885,6 +885,8 @@ if (( without_loaded )); then
 fi
 darban status >"$LOG/mss.log" 2>&1
 grep -q 'TCP MSS for VPN traffic is limited to 1330 in both directions' "$LOG/mss.log"
+# The runner's real conntrack table: the line appears, as a count or as a neutral note (the table is never filled here).
+grep -q 'Connection tracking table' "$LOG/mss.log"
 # The same path to the server itself: a page on this server, opened from a device that is connected to it,
 # as a temporary link is. Those connections never pass the forward chain.
 vpn_net=$(awk '$1=="server" {print $2; exit}' /etc/openvpn/server/server.conf)
