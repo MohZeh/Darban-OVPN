@@ -30,6 +30,8 @@ SERVER_NAME=darban-server
 DEFAULT_DNS='1.1.1.1 9.9.9.9'
 MIN_BOOT_FREE_KB=150000
 MARKER=$CONFIG_DIR/.server-setup-started
+# The comment on each ufw rule this setup adds; Remove everything deletes only a rule that still carries it.
+UFW_TAG=Darban-OVPN
 TOOL=/usr/local/sbin/darban
 SETUP_LOG=/var/log/darban-setup.log
 TOOL_LIB=/usr/local/lib/darban
@@ -104,6 +106,7 @@ on_exit() {
 check_system() {
     local id='' version=''
     [[ $EUID == 0 ]] || die 'Run with sudo/root.'
+    darban_setup_lock || exit 1
     [[ -r $OS_RELEASE ]] || die "Cannot read $OS_RELEASE."
     id=$(awk -F= '$1=="ID" {gsub(/"/,"",$2); print $2}' "$OS_RELEASE")
     version=$(awk -F= '$1=="VERSION_ID" {gsub(/"/,"",$2); print $2}' "$OS_RELEASE")
@@ -335,8 +338,25 @@ add_repository() {
     keep_or_claim "$APT_LIST"
     install -m 644 "$key" "$APT_KEY"
     rm -f -- "$key"
-    printf 'deb [arch=%s signed-by=%s] https://build.openvpn.net/debian/openvpn/stable %s main\n' "$ARCH" "$APT_KEY" "$REPO_SUITE" >"$APT_LIST"
-    chmod 644 "$APT_LIST"
+    write_apt_list
+}
+write_apt_list() {
+    # The source file is written through a temp file and a rename. A file the owner changed after an earlier run is
+    # kept with a warning: what this setup wrote is recorded as a hash, and a different file is not ours to replace.
+    local line want have temp
+    line=$(printf 'deb [arch=%s signed-by=%s] https://build.openvpn.net/debian/openvpn/stable %s main' "$ARCH" "$APT_KEY" "$REPO_SUITE")
+    if [[ -f $APT_LIST ]]; then
+        want=$(awk '$1=="apt_hash" {print $2}' "$MARKER" 2>/dev/null | tail -n 1) || want=''
+        have=$(sha256sum -- "$APT_LIST" | awk '{print $1}') || have=''
+        if [[ -n $want && -n $have && $want != "$have" ]]; then
+            warn "$APT_LIST was changed after the setup wrote it, so it is kept as it is. Check that it names the OpenVPN repository: $line"
+            return 0
+        fi
+    fi
+    temp=$(mktemp "$APT_LIST.XXXXXX") || die "Could not make a temp file beside $APT_LIST."
+    printf '%s\n' "$line" >"$temp" && chmod 644 "$temp" && sync -- "$temp" 2>/dev/null
+    mv -f -- "$temp" "$APT_LIST" || { rm -f -- "$temp"; die "Could not write $APT_LIST."; }
+    printf 'apt_hash %s\n' "$(sha256sum -- "$APT_LIST" | awk '{print $1}')" >>"$MARKER"
 }
 install_packages() {
     local version pkg planned
@@ -498,12 +518,12 @@ EOF
         # removal knows about it even if adding the next one fails.
         rules=$(ufw status 2>/dev/null || true)
         if ! grep -Eq "^$PORT/udp[[:space:]]" <<<"$rules"; then
-            printf 'ufw_port %s\n' "$PORT" >>"$MARKER"
-            ufw allow "$PORT/udp" >/dev/null
+            printf 'ufw_port %s tagged\n' "$PORT" >>"$MARKER"
+            ufw allow "$PORT/udp" comment "$UFW_TAG" >/dev/null
         fi
         if ! grep -Eq "on ${IFACE}[[:space:]].*ALLOW FWD.*on tun0" <<<"$rules"; then
-            printf 'ufw_iface %s\n' "$IFACE" >>"$MARKER"
-            ufw route allow in on tun0 out on "$IFACE" >/dev/null
+            printf 'ufw_iface %s tagged\n' "$IFACE" >>"$MARKER"
+            ufw route allow in on tun0 out on "$IFACE" comment "$UFW_TAG" >/dev/null
         fi
         ok 'ufw now allows the VPN.'
     fi

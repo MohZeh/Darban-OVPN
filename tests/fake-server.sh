@@ -212,7 +212,7 @@ echo vpn.example.com > "$E/cfg/domain"
 printf 'DOWNLOAD_SSH_HOST=203.0.113.7\nDOWNLOAD_SSH_PORT=2222\nDOWNLOAD_SSH_USER=root\nUPDATE_CHECK=no\n' > "$E/cfg/config"
 
 sed -e "s#^DARBAN_LIB=.*#DARBAN_LIB=$E/lib#" -e "s#^DARBAN_PKI=.*#DARBAN_PKI=$P#" -e "s#^DARBAN_EASYRSA=.*#DARBAN_EASYRSA=$E/bin/easyrsa#" \
-    -e "s#^DARBAN_SERVER_DIR=.*#DARBAN_SERVER_DIR=$E/server#" -e "s#^DARBAN_LOCK=.*#DARBAN_LOCK=$E/run/lock#" \
+    -e "s#^DARBAN_SERVER_DIR=.*#DARBAN_SERVER_DIR=$E/server#" -e "s#^DARBAN_LOCK=.*#DARBAN_LOCK=$E/run/lock#" -e "s#^DARBAN_SETUP_LOCK=.*#DARBAN_SETUP_LOCK=$E/run/setup-lock#" \
     -e "s#^DARBAN_RESTORE_JOURNAL=.*#DARBAN_RESTORE_JOURNAL=$E/varlib/restore.journal#" \
     -e "s#^DARBAN_BLOCKED=.*#DARBAN_BLOCKED=$E/cfg/blocked.v4#" -e "s#^DARBAN_DNS_REDIRECT=.*#DARBAN_DNS_REDIRECT=$E/cfg/dns-redirect#" \
     -e "s#^DARBAN_CONFIG=.*#DARBAN_CONFIG=$E/cfg/config#" \
@@ -245,7 +245,7 @@ sed -e "s#^OUT_DIR=.*#OUT_DIR=$E/clients#" -e "s#^LINK_DIR=.*#LINK_DIR=$E/links#
     -e "s#^LEDGER_DIR=.*#LEDGER_DIR=$E/varlib/clients#" \
     -e "s#^ACME_HOME=.*#ACME_HOME=$E/acme-home#" \
     -e "s#^PORT_SHARE_DIR=.*#PORT_SHARE_DIR=$E/run/darban-port-share#" -e "s#^PORT_SHARE_TMPFILES=.*#PORT_SHARE_TMPFILES=$E/tmpfiles/darban-port-share.conf#" \
-    -e "s#^CONNTRACK_DIR=.*#CONNTRACK_DIR=$E/conntrack#"     -e "s#^PKI_BACKUP_DIR=.*#PKI_BACKUP_DIR=$E/pki-backups#" -e "s#^RESTORE_WARN=.*#RESTORE_WARN=$E/varlib/restore-unverified#" \
+    -e "s#^CONNTRACK_DIR=.*#CONNTRACK_DIR=$E/conntrack#"     -e "s#^PKI_BACKUP_DIR=.*#PKI_BACKUP_DIR=$E/pki-backups#" -e "s#^RESTORE_WARN=.*#RESTORE_WARN=$E/varlib/restore-unverified#" -e "s#^RESTORE_EXTRAS=.*#RESTORE_EXTRAS=$E/varlib/restore-extras#" \
     -e 's#^EVENT_MAX=.*#EVENT_MAX=${TEST_EVENT_MAX:-500}#' \
     "$SRC/lib/darban/paths.sh" > "$E/lib/modules/paths.sh"
 # The screens keep their folder. The event_run_id stand-in is a function, not a path: it goes into the module that

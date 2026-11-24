@@ -144,7 +144,16 @@ if (( USE_UFW )); then
     ufw status | grep '^1194/udp' >/dev/null
     ufw status | grep 'tun0' >/dev/null
     echo 'PASS: Enter added the two ufw rules.'
+    # G26: the rules carry the tag, and a rule of the owner's on another port is not the setup's to remove.
+    ufw status | grep '^1194/udp.*Darban-OVPN' >/dev/null
+    ufw allow 18999/udp comment owner-rule >/dev/null
+    echo 'PASS: the setup tagged its ufw rules, and an owner rule was added beside them (checked after removal).'
 fi
+
+# G26: a second setup at once is refused, and changes nothing.
+( flock -n 8 || exit 1; if bash setup/install.sh >"$LOG/second-setup.log" 2>&1; then echo 'FAIL: a second setup ran while the first held the lock.'; exit 1; fi ) 8>>/run/darban-setup.lock
+grep 'Another setup is running' "$LOG/second-setup.log" >/dev/null
+echo 'PASS: two setups at once: the second is refused.'
 
 bash setup/install.sh
 darban-crl-maintain --check
@@ -1412,6 +1421,7 @@ done
 if dpkg-query -W -f='${Status}' openvpn 2>/dev/null | grep 'install ok installed' >/dev/null; then echo 'FAIL: the openvpn package is still installed.'; exit 1; fi
 if nft list table ip darban >/dev/null 2>&1; then echo 'FAIL: the NAT table is still loaded.'; exit 1; fi
 if (( USE_UFW )) && ufw status | grep '1194\|tun0' >/dev/null; then echo 'FAIL: the ufw rules are still there.'; exit 1; fi
+if (( USE_UFW )); then ufw status | grep '^18999/udp' >/dev/null || { echo "FAIL: the owner's ufw rule was removed."; exit 1; }; ufw delete allow 18999/udp >/dev/null; echo "PASS: the owner's ufw rule survived the removal."; fi
 ls /root/darban-backup-*.tar.gz
 echo 'PASS: full removal left nothing behind except the backup and the kernel.'
 fi

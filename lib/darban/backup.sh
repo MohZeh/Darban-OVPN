@@ -212,7 +212,7 @@ backup_now() {
 }
 backup_health() {
     # The Diagnostics group "Backup of the CA".
-    local value created when
+    local value created when extras
     if [[ -f $DARBAN_RESTORE_JOURNAL ]] && restore_committed; then
         check warn "A restore is done, and OpenVPN runs with the restored CA, but its cleanup is unfinished $S_ARROW sudo darban restore --resume"
     elif [[ -f $DARBAN_RESTORE_JOURNAL && $(journal_value state) == undoing ]]; then
@@ -227,6 +227,10 @@ backup_health() {
         check warn "The CA was restored from a backup of $(safe_text "$when"): revocations and certificates issued after it cannot be known. Revoke, and issue again, any client you are not sure of $S_ARROW sudo darban restore --acknowledge"
     fi
     pre_restore_health
+    if extras=$(restore_extras_present | head -n 20 | tr '
+' ' ') && [[ -n $extras ]]; then
+        check warn "Records in $LEDGER_DIR are not in the backup that was restored, and were left: $(safe_text "$extras") $S_ARROW delete them if they are not needed"
+    fi
     if [[ -s $DARBAN_PKI/ca.crt ]]; then check info "CA fingerprint $(ca_fingerprint_label); a restore asks for it"; fi
     if ! backup_recipient >/dev/null; then
         check info "No backup key is set, so the CA is not backed up by itself $S_ARROW Maintenance $S_CRUMB 4"

@@ -23,6 +23,7 @@ CORE=bin/darban-core-$ARCH
 [[ -f $CORE ]] || { echo "This copy of Darban OVPN has no $CORE for this server. Nothing was installed. In a checkout, build it first: bash scripts/build-core.sh" >&2; exit 1; }
 source ./lib/common.sh
 darban_require_root
+darban_setup_lock || exit 1
 server_checks() {
     # The same checks as the manager and the CRL maintainer.
     darban_preflight || return 1

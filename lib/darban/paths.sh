@@ -23,6 +23,8 @@ PRE_RESTORE_WARN_DAYS=7
 # A backup hook runs this long at most, then it is killed.
 BACKUP_HOOK_SECONDS=120
 RESTORE_WARN=/var/lib/darban/restore-unverified
+# The records of a restored server's clients that the backup did not have. Reported, never deleted.
+RESTORE_EXTRAS=/var/lib/darban/restore-extras
 BACKUP_PY=$DARBAN_LIB/backup.py
 GEO_PY=$DARBAN_LIB/geolist.py
 # The lists of Settings > Blocked destinations: the ranges of each country, and of Iranian CDNs, made each day from
